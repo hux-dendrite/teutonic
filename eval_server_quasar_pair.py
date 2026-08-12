@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import glob
 import gc
+import glob
 import hashlib
 import importlib.util
 import inspect
@@ -34,6 +34,7 @@ import time
 import traceback
 import types
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -123,6 +124,10 @@ EVAL_EARLY_STOP = False
 EVAL_EARLY_STOP_MIN_FRACTION = float(os.environ.get("EVAL_EARLY_STOP_MIN_FRACTION", "0.2"))
 EVAL_EARLY_STOP_ADVANTAGE_QUANTILE = float(os.environ.get("EVAL_EARLY_STOP_ADVANTAGE_QUANTILE", "0.95"))
 DEFAULT_MODEL_DOWNLOAD_WORKERS = int(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_WORKERS", "4"))
+KERNEL_CACHE_DIR = Path(
+    os.environ.get("TEUTONIC_KERNEL_CACHE_DIR", "/tmp/teutonic/kernel_cache")
+)
+MODEL_LOADER_VERSION = "direct-gpu-v1"
 DEFAULT_S3_DOWNLOAD_RETRIES = int(os.environ.get("TEUTONIC_S3_DOWNLOAD_RETRIES", "5"))
 DEFAULT_S3_DOWNLOAD_RETRY_BACKOFF_S = float(os.environ.get("TEUTONIC_S3_DOWNLOAD_RETRY_BACKOFF_S", "20"))
 DEFAULT_S3_CLIENT_MAX_ATTEMPTS = int(os.environ.get("TEUTONIC_S3_CLIENT_MAX_ATTEMPTS", "10"))
@@ -159,6 +164,7 @@ _king_key: tuple[str, ...] | None = None
 _king_device = ""
 _king_gpu_ids: list[int] = []
 _attention_preflight_cache: dict[str, dict] = {}
+_model_worker_pool = None
 
 
 class EvalRequest(BaseModel):
@@ -810,6 +816,106 @@ def snapshot_safetensor_names(snapshot_dir: str) -> list[str]:
     return sorted(p.name for p in path.glob("*.safetensors"))
 
 
+def snapshot_safetensor_keys(snapshot_dir: str) -> list[str]:
+    """Read checkpoint tensor names without materializing any tensor payloads."""
+    path = Path(snapshot_dir)
+    index_path = path / "model.safetensors.index.json"
+    if index_path.exists():
+        index = json.loads(index_path.read_text())
+        return sorted(index.get("weight_map", {}))
+
+    from safetensors import safe_open
+
+    keys: list[str] = []
+    for shard_name in snapshot_safetensor_names(snapshot_dir):
+        with safe_open(str(path / shard_name), framework="pt", device="cpu") as shard:
+            keys.extend(shard.keys())
+    return sorted(keys)
+
+
+def reject_mtp_checkpoint_weights(snapshot_dir: str) -> None:
+    mtp_keys = [name for name in snapshot_safetensor_keys(snapshot_dir) if "mtp" in name.lower()]
+    if mtp_keys:
+        raise RuntimeError(
+            f"MTP/speculative weights are not allowed in scoring model: {mtp_keys[:8]}"
+        )
+
+
+def checkpoint_load_key(snapshot_dir: str, req: EvalRequest, gpu_ids: list[int]) -> str:
+    """Identify immutable weights/runtime state; sampled sequences are deliberately absent."""
+    path = Path(snapshot_dir).resolve()
+    files = []
+    identity_names = ["config.json", "model.safetensors.index.json"]
+    identity_names.extend(snapshot_safetensor_names(snapshot_dir))
+    for name in identity_names:
+        candidate = path / name
+        if candidate.exists():
+            stat = candidate.stat()
+            files.append((name, stat.st_size, stat.st_mtime_ns))
+    material = {
+        "loader": MODEL_LOADER_VERSION,
+        "snapshot": str(path),
+        "metadata": files,
+        "gpu_ids": list(gpu_ids),
+        "dtype": "bfloat16",
+        "attn_implementation": req.attn_implementation,
+        "model_device_map": req.model_device_map,
+        "allow_code_model_fallback": req.allow_code_model_fallback,
+        "code_model": req.code_model,
+        "revision": req.revision,
+    }
+    return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+
+
+def kernel_cache_identity(config, gpu_ids: list[int]) -> str:
+    """Key reusable CUDA/Triton artifacts by architecture, never by checkpoint weights."""
+    config_dict = config.to_dict() if hasattr(config, "to_dict") else vars(config)
+    shape_keys = (
+        "model_type",
+        "hidden_size",
+        "intermediate_size",
+        "moe_intermediate_size",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "num_experts",
+        "num_experts_per_tok",
+        "num_hidden_layers",
+        "vocab_size",
+    )
+    capabilities = []
+    if torch.cuda.is_available():
+        capabilities = [list(torch.cuda.get_device_capability(gpu_id)) for gpu_id in gpu_ids]
+    material = {
+        "shapes": {key: config_dict.get(key) for key in shape_keys},
+        "dtype": "bfloat16",
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "capabilities": capabilities,
+        "grouped_moe": "torch_foreach_mm_v1",
+    }
+    return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()[:24]
+
+
+def configure_kernel_cache(config, gpu_ids: list[int]) -> dict:
+    cache_key = kernel_cache_identity(config, gpu_ids)
+    cache_dir = KERNEL_CACHE_DIR / cache_key
+    triton_dir = cache_dir / "triton"
+    inductor_dir = cache_dir / "torchinductor"
+    cuda_dir = cache_dir / "cuda"
+    for directory in (triton_dir, inductor_dir, cuda_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    # Set before the first grouped-kernel launch in this persistent worker.
+    os.environ["TRITON_CACHE_DIR"] = str(triton_dir)
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(inductor_dir)
+    os.environ["CUDA_CACHE_PATH"] = str(cuda_dir)
+    return {
+        "key": cache_key,
+        "path": str(cache_dir),
+        "scope": "architecture",
+        "model_graph_compiled": False,
+    }
+
+
 def snapshot_meta(snapshot_dir: str) -> dict:
     path = Path(snapshot_dir)
     return {
@@ -1061,7 +1167,6 @@ def enable_grouped_mimo_moe(model) -> int:
 
 
 def load_safetensors_state_dict(model_dir: str) -> dict:
-    from concurrent.futures import ThreadPoolExecutor
     from safetensors.torch import load_file
 
     path = Path(model_dir)
@@ -1200,6 +1305,7 @@ def model_input_device(model) -> torch.device:
 
 
 def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: EvalRequest, gpu_ids: list[int] | None = None, on_phase=None):
+    from accelerate import init_empty_weights, load_checkpoint_and_dispatch
     from transformers import AutoModelForCausalLM
     from transformers.initialization import no_init_weights
 
@@ -1209,6 +1315,8 @@ def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: Eva
     config.use_cache = False
     config._attn_implementation = "eager"
     dtype = torch.bfloat16
+    effective_ids = list(gpu_ids if gpu_ids is not None else _gpu_ids)
+    reject_mtp_checkpoint_weights(snapshot_dir)
     old_dtype = torch.get_default_dtype()
     try:
         torch.set_default_dtype(dtype)
@@ -1216,34 +1324,44 @@ def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: Eva
             on_phase({"phase": f"{label}_init_start", "dtype": str(dtype)})
         # Every parameter is populated by the strict checkpoint load below. Skip
         # random initialization, which is prohibitively expensive for 104B models.
-        with no_init_weights():
+        with init_empty_weights(), no_init_weights():
             model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
     finally:
         torch.set_default_dtype(old_dtype)
+    # Empty-weight construction cannot preserve aliases created by parameter
+    # assignment. Re-establish any checkpoint-declared embedding/head ties before
+    # Accelerate resolves tied tensors and streams the shards.
+    model.tie_weights()
     if on_phase:
-        on_phase({"phase": f"{label}_state_load_start"})
-    state = load_safetensors_state_dict(snapshot_dir)
-    info = model.load_state_dict(state, strict=False)
-    del state
-    gc.collect()
-    log.info("%s state loaded: missing=%d unexpected=%d", label, len(info.missing_keys), len(info.unexpected_keys))
-    if info.missing_keys or info.unexpected_keys:
-        raise RuntimeError(
-            f"{label} state dict mismatch: missing={info.missing_keys[:8]} "
-            f"unexpected={info.unexpected_keys[:8]}"
-        )
-    if on_phase:
-        on_phase({"phase": f"{label}_to_device_start", "device": device, "dtype": str(dtype)})
+        on_phase({"phase": f"{label}_direct_gpu_load_start", "dtype": str(dtype)})
     if device == "auto":
-        effective_ids = gpu_ids if gpu_ids is not None else _gpu_ids
-        log.info("%s dispatching across GPUs %s dtype=%s", label, effective_ids, dtype)
-        model = model.to(dtype=dtype)
-        model = dispatch_model_across_gpus(model, req, label, gpu_ids=gpu_ids, on_phase=on_phase)
+        device_map = balanced_transformer_device_map(model, effective_ids)
+        if not device_map:
+            raise RuntimeError(f"could not construct a fixed device map for {label} on {effective_ids}")
     else:
-        log.info("%s moving to %s dtype=%s", label, device, dtype)
-        model = model.to(device=device, dtype=dtype)
-    if torch.cuda.is_available() and str(device).startswith("cuda"):
-        torch.cuda.synchronize(torch.device(device))
+        device_map = {"": device}
+    no_split = list(getattr(model, "_no_split_modules", None) or [])
+    model = load_checkpoint_and_dispatch(
+        model,
+        checkpoint=snapshot_dir,
+        device_map=device_map,
+        no_split_module_classes=no_split,
+        dtype=dtype,
+        offload_state_dict=False,
+        force_hooks=len(set(device_map.values())) > 1,
+        strict=True,
+    )
+    meta_parameters = [name for name, parameter in model.named_parameters() if parameter.is_meta]
+    if meta_parameters:
+        raise RuntimeError(f"{label} has parameters left on meta after checkpoint load: {meta_parameters[:8]}")
+    if on_phase:
+        on_phase({
+            "phase": f"{label}_direct_gpu_load_done",
+            "devices": sorted({str(value) for value in device_map.values()}),
+        })
+    if torch.cuda.is_available():
+        for gpu_id in effective_ids:
+            torch.cuda.synchronize(gpu_id)
     if chain_config.ARCH_MODULE.endswith(".quasar"):
         patch_loaded_quasar_modules()
     if getattr(config, "model_type", "") == "mimo_v2":
@@ -1772,13 +1890,20 @@ def model_cuda_devices(model) -> list[torch.device]:
 
 
 @torch.no_grad()
-def compute_per_sequence_loss(model, token_batches: list[list[int]], chunk_size: int) -> list[float]:
+def compute_per_sequence_loss(
+    model,
+    token_batches: list[list[int]],
+    chunk_size: int,
+    *,
+    reset_peak_memory: bool = True,
+) -> list[float]:
     if len(token_batches) != 1:
         raise RuntimeError(f"eager scoring requires batch size 1, got {len(token_batches)}")
     input_device = model_input_device(model)
     cuda_devices = model_cuda_devices(model)
-    for device in cuda_devices:
-        torch.cuda.reset_peak_memory_stats(device)
+    if reset_peak_memory:
+        for device in cuda_devices:
+            torch.cuda.reset_peak_memory_stats(device)
     input_ids = torch.tensor(token_batches, dtype=torch.long, device=input_device)
     try:
         if hasattr(model, "reset_state"):
@@ -1830,125 +1955,275 @@ def compute_per_sequence_loss(model, token_batches: list[list[int]], chunk_size:
         ) from exc
 
 
-def model_worker_main(
-    spec: dict,
-    snapshot_dir: str,
-    request_data: dict,
-    task_queue,
-    result_queue,
-) -> None:
-    """Own one two-GPU model instance and score tasks until shutdown."""
-    setup_logging()
-    worker_id = spec["worker_id"]
-    role = spec["role"]
-    gpu_ids = list(spec["gpu_ids"])
-    try:
-        req = EvalRequest(**request_data)
-        patch_transformers_masking_compat()
-        patch_triton_autotuner_thread_safety()
-        config, artifacts = load_model_config(snapshot_dir, req, worker_id)
-        attention = validate_and_report_attention_config(config, worker_id)
-        model = load_eval_model(
-            snapshot_dir,
-            config,
-            "auto",
-            worker_id,
-            req,
-            gpu_ids=gpu_ids,
-        )
-        result_queue.put({
-            "type": "ready",
-            "worker_id": worker_id,
-            "role": role,
-            "gpu_ids": gpu_ids,
-            "pid": os.getpid(),
-            "artifacts": artifacts,
-            "attention": attention,
-        })
-        while True:
-            task = task_queue.get()
-            if task is None:
-                break
-            sequence_index, token_ids = task
-            started = time.time()
-            loss = compute_per_sequence_loss(model, [token_ids], req.lm_head_chunk)[0]
-            result_queue.put({
+class TwoGpuSequencePipeline:
+    """Overlap one sequence on each layer-sharded GPU without concurrent use of either GPU."""
+
+    def __init__(self, model, req: EvalRequest, spec: dict, result_queue, generation: str):
+        self.model = model
+        self.req = req
+        self.spec = spec
+        self.result_queue = result_queue
+        self.generation = generation
+        self._thread_state = threading.local()
+        self._stage2_lock = threading.Lock()
+        self._previous_boundary = None
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix=spec["worker_id"])
+        self._hook = None
+        self.boundary_layer = self._find_boundary_layer()
+        if self.boundary_layer is not None:
+            layers = model.model.layers
+            self._hook = layers[self.boundary_layer].register_forward_pre_hook(
+                self._enter_stage2,
+                prepend=True,
+            )
+
+    @property
+    def depth(self) -> int:
+        return 2 if self.boundary_layer is not None else 1
+
+    def _find_boundary_layer(self) -> int | None:
+        if len(self.spec["gpu_ids"]) != 2:
+            return None
+        layers = getattr(getattr(self.model, "model", None), "layers", None)
+        if layers is None:
+            return None
+        second_gpu = self.spec["gpu_ids"][1]
+        for index, layer in enumerate(layers):
+            parameter = next(layer.parameters(), None)
+            if parameter is not None and parameter.device.type == "cuda" and parameter.device.index == second_gpu:
+                return index
+        return None
+
+    def _enter_stage2(self, _module, _args) -> None:
+        state = getattr(self._thread_state, "current", None)
+        if state is None or state["stage2_acquired"]:
+            return
+        self._stage2_lock.acquire()
+        state["stage2_acquired"] = True
+        state["boundary"].set()
+
+    def submit(self, sequence_index: int, token_ids: list[int]) -> None:
+        if self._previous_boundary is not None:
+            self._previous_boundary.wait()
+        state = {"boundary": threading.Event(), "stage2_acquired": False}
+        self._previous_boundary = state["boundary"]
+        self._executor.submit(self._score, sequence_index, token_ids, state)
+
+    def _score(self, sequence_index: int, token_ids: list[int], state: dict) -> None:
+        self._thread_state.current = state
+        started = time.time()
+        try:
+            loss = compute_per_sequence_loss(
+                self.model,
+                [token_ids],
+                self.req.lm_head_chunk,
+                reset_peak_memory=False,
+            )[0]
+            self.result_queue.put({
                 "type": "result",
-                "worker_id": worker_id,
-                "role": role,
+                "generation": self.generation,
+                "worker_id": self.spec["worker_id"],
+                "role": self.spec["role"],
                 "sequence_index": sequence_index,
                 "loss": loss,
                 "wall_time_s": time.time() - started,
             })
+        except BaseException as exc:
+            self.result_queue.put({
+                "type": "error",
+                "generation": self.generation,
+                "worker_id": self.spec["worker_id"],
+                "role": self.spec["role"],
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            })
+        finally:
+            state["boundary"].set()
+            if state["stage2_acquired"]:
+                self._stage2_lock.release()
+            self._thread_state.current = None
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=True, cancel_futures=False)
+        if self._hook is not None:
+            self._hook.remove()
+
+
+def empty_worker_cuda_cache(gpu_ids: list[int]) -> None:
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+    for gpu_id in gpu_ids:
+        with torch.cuda.device(gpu_id):
+            torch.cuda.empty_cache()
+
+
+def reset_worker_peak_memory(gpu_ids: list[int]) -> None:
+    if not torch.cuda.is_available():
+        return
+    for gpu_id in gpu_ids:
+        torch.cuda.reset_peak_memory_stats(gpu_id)
+
+
+def model_worker_main(spec: dict, command_queue, result_queue) -> None:
+    """Own one persistent two-GPU model instance and accept load/score commands."""
+    setup_logging()
+    worker_id = spec["worker_id"]
+    role = spec["role"]
+    gpu_ids = list(spec["gpu_ids"])
+    model = None
+    pipeline = None
+    loaded_key = None
+    try:
+        patch_transformers_masking_compat()
+        patch_triton_autotuner_thread_safety()
+        while True:
+            command = command_queue.get()
+            if command["type"] == "shutdown":
+                break
+            if command["type"] == "load":
+                generation = command["generation"]
+                try:
+                    if pipeline is not None:
+                        pipeline.close()
+                        pipeline = None
+                    req = EvalRequest(**command["request"])
+                    reused = model is not None and loaded_key == command["model_key"]
+                    if not reused:
+                        if model is not None:
+                            del model
+                            model = None
+                            empty_worker_cuda_cache(gpu_ids)
+                        config, artifacts = load_model_config(command["snapshot"], req, worker_id)
+                        attention = validate_and_report_attention_config(config, worker_id)
+                        kernel_cache = configure_kernel_cache(config, gpu_ids)
+                        model = load_eval_model(
+                            command["snapshot"],
+                            config,
+                            "auto",
+                            worker_id,
+                            req,
+                            gpu_ids=gpu_ids,
+                        )
+                        loaded_key = command["model_key"]
+                    else:
+                        artifacts = command.get("artifacts", {})
+                        attention = command.get("attention", {})
+                        kernel_cache = command.get("kernel_cache", {})
+                    reset_worker_peak_memory(gpu_ids)
+                    pipeline = TwoGpuSequencePipeline(model, req, spec, result_queue, generation)
+                    result_queue.put({
+                        "type": "ready",
+                        "generation": generation,
+                        "worker_id": worker_id,
+                        "role": role,
+                        "gpu_ids": gpu_ids,
+                        "pid": os.getpid(),
+                        "snapshot": command["snapshot"],
+                        "reused_model": reused,
+                        "artifacts": artifacts,
+                        "attention": attention,
+                        "kernel_cache": kernel_cache,
+                        "pipeline_depth": pipeline.depth,
+                        "pipeline_boundary_layer": pipeline.boundary_layer,
+                    })
+                except BaseException as exc:
+                    result_queue.put({
+                        "type": "error",
+                        "generation": generation,
+                        "worker_id": worker_id,
+                        "role": role,
+                        "error": str(exc),
+                        "traceback": traceback.format_exc(),
+                    })
+            elif command["type"] == "score":
+                if pipeline is None or command["generation"] != pipeline.generation:
+                    raise RuntimeError(f"{worker_id} received score command before matching load")
+                pipeline.submit(command["sequence_index"], command["token_ids"])
+            else:
+                raise RuntimeError(f"unknown worker command: {command['type']}")
     except BaseException as exc:
         result_queue.put({
             "type": "error",
+            "generation": "worker",
             "worker_id": worker_id,
             "role": role,
             "error": str(exc),
             "traceback": traceback.format_exc(),
         })
+    finally:
+        if pipeline is not None:
+            pipeline.close()
 
 
-def score_with_model_workers(
-    sequences: list[list[int]],
-    req: EvalRequest,
-    king_snapshot: str,
-    challenger_snapshot: str,
-    gpu_ids: list[int],
-    on_progress,
-) -> tuple[list[float], list[float], dict]:
-    """Score both sides with asynchronous, process-isolated two-GPU workers."""
-    specs = model_worker_specs(gpu_ids)
-    context = mp.get_context("spawn")
-    result_queue = context.Queue()
-    task_queues = {spec["worker_id"]: context.Queue(maxsize=1) for spec in specs}
-    request_data = req.model_dump()
-    processes = {}
-    for spec in specs:
-        snapshot = king_snapshot if spec["role"] == "king" else challenger_snapshot
-        process = context.Process(
-            target=model_worker_main,
-            args=(spec, snapshot, request_data, task_queues[spec["worker_id"]], result_queue),
-            name=f"mimo-{spec['worker_id']}",
-        )
-        process.start()
-        processes[spec["worker_id"]] = process
+class PersistentModelWorkerPool:
+    """Keep four model processes alive and reload only when checkpoint identity changes."""
 
-    ready: dict[str, dict] = {}
-    king_losses: list[float | None] = [None] * len(sequences)
-    challenger_losses: list[float | None] = [None] * len(sequences)
-    next_index = {"king": 0, "challenger": 0}
-    paired_done = 0
+    def __init__(self, gpu_ids: list[int]):
+        self.gpu_ids = list(gpu_ids)
+        self.specs = model_worker_specs(self.gpu_ids)
+        context = mp.get_context("spawn")
+        self.result_queue = context.Queue()
+        self.command_queues = {}
+        self.processes = {}
+        self.ready: dict[str, dict] = {}
+        for spec in self.specs:
+            worker_id = spec["worker_id"]
+            queue = context.Queue(maxsize=4)
+            process = context.Process(
+                target=model_worker_main,
+                args=(spec, queue, self.result_queue),
+                name=f"mimo-{worker_id}",
+            )
+            process.start()
+            self.command_queues[worker_id] = queue
+            self.processes[worker_id] = process
 
-    def dispatch_next(worker_id: str, role: str) -> None:
-        index = next_index[role]
-        if index >= len(sequences):
-            return
-        task_queues[worker_id].put((index, sequences[index]))
-        next_index[role] = index + 1
+    def dead_workers(self) -> list[str]:
+        return [worker_id for worker_id, process in self.processes.items() if not process.is_alive()]
 
-    try:
-        while len(ready) < len(specs):
+    def load_models(
+        self,
+        req: EvalRequest,
+        king_snapshot: str,
+        challenger_snapshot: str,
+        on_progress,
+    ) -> str:
+        generation = uuid.uuid4().hex
+        request_data = req.model_dump()
+        for spec in self.specs:
+            snapshot = king_snapshot if spec["role"] == "king" else challenger_snapshot
+            worker_id = spec["worker_id"]
+            previous = self.ready.get(worker_id, {})
+            self.command_queues[worker_id].put({
+                "type": "load",
+                "generation": generation,
+                "snapshot": snapshot,
+                "request": request_data,
+                "model_key": checkpoint_load_key(snapshot, req, spec["gpu_ids"]),
+                "artifacts": previous.get("artifacts", {}),
+                "attention": previous.get("attention", {}),
+                "kernel_cache": previous.get("kernel_cache", {}),
+            })
+
+        ready = {}
+        while len(ready) < len(self.specs):
             try:
-                message = result_queue.get(timeout=30)
+                message = self.result_queue.get(timeout=30)
             except Empty:
-                dead = [worker_id for worker_id, process in processes.items() if not process.is_alive()]
+                dead = self.dead_workers()
                 if dead:
-                    raise RuntimeError(f"model workers exited during startup: {dead}")
-                on_progress({
-                    "phase": "model_workers_loading",
-                    "ready": len(ready),
-                    "total_workers": len(specs),
-                })
+                    raise RuntimeError(f"model workers exited during load: {dead}")
+                on_progress({"phase": "model_workers_loading", "ready": len(ready), "total_workers": len(self.specs)})
                 continue
+            if message.get("generation") != generation:
+                raise RuntimeError(f"stale model worker message during load: {message}")
             if message["type"] == "error":
                 raise RuntimeError(
-                    f"model worker {message['worker_id']} failed: {message['error']}\n"
-                    f"{message['traceback']}"
+                    f"model worker {message['worker_id']} failed: {message['error']}\n{message['traceback']}"
                 )
             if message["type"] != "ready":
-                raise RuntimeError(f"unexpected model worker startup message: {message}")
+                raise RuntimeError(f"unexpected model worker load message: {message}")
             ready[message["worker_id"]] = message
             on_progress({
                 "phase": "model_worker_ready",
@@ -1956,41 +2231,65 @@ def score_with_model_workers(
                 "role": message["role"],
                 "gpu_ids": message["gpu_ids"],
                 "pid": message["pid"],
+                "reused_model": message["reused_model"],
+                "pipeline_depth": message["pipeline_depth"],
                 "ready": len(ready),
-                "total_workers": len(specs),
+                "total_workers": len(self.specs),
             })
+        self.ready = ready
+        return generation
 
-        for spec in specs:
-            dispatch_next(spec["worker_id"], spec["role"])
+    def score(self, sequences: list[list[int]], generation: str, on_progress) -> tuple[list[float], list[float], dict]:
+        king_losses: list[float | None] = [None] * len(sequences)
+        challenger_losses: list[float | None] = [None] * len(sequences)
+        next_index = {"king": 0, "challenger": 0}
+        in_flight = {spec["worker_id"]: 0 for spec in self.specs}
+        paired_done = 0
+
+        def fill_worker(worker_id: str, role: str) -> None:
+            depth = int(self.ready[worker_id].get("pipeline_depth", 1))
+            while in_flight[worker_id] < depth and next_index[role] < len(sequences):
+                index = next_index[role]
+                self.command_queues[worker_id].put({
+                    "type": "score",
+                    "generation": generation,
+                    "sequence_index": index,
+                    "token_ids": sequences[index],
+                })
+                next_index[role] += 1
+                in_flight[worker_id] += 1
+
+        for spec in self.specs:
+            fill_worker(spec["worker_id"], spec["role"])
 
         started = time.time()
         while paired_done < len(sequences):
             try:
-                message = result_queue.get(timeout=30)
+                message = self.result_queue.get(timeout=30)
             except Empty:
-                dead = [worker_id for worker_id, process in processes.items() if not process.is_alive()]
+                dead = self.dead_workers()
                 if dead:
                     raise RuntimeError(f"model workers exited without a result: {dead}")
-                on_progress({
-                    "phase": "heartbeat",
-                    "done": paired_done,
-                    "total": len(sequences),
-                })
+                on_progress({"phase": "heartbeat", "done": paired_done, "total": len(sequences)})
                 continue
+            if message.get("generation") != generation:
+                raise RuntimeError(f"stale model worker message during scoring: {message}")
             if message["type"] == "error":
                 raise RuntimeError(
-                    f"model worker {message['worker_id']} failed: {message['error']}\n"
-                    f"{message['traceback']}"
+                    f"model worker {message['worker_id']} failed: {message['error']}\n{message['traceback']}"
                 )
             if message["type"] != "result":
-                raise RuntimeError(f"unexpected model worker message: {message}")
+                raise RuntimeError(f"unexpected model worker score message: {message}")
 
+            worker_id = message["worker_id"]
+            role = message["role"]
+            in_flight[worker_id] -= 1
             index = int(message["sequence_index"])
-            target = king_losses if message["role"] == "king" else challenger_losses
+            target = king_losses if role == "king" else challenger_losses
             if target[index] is not None:
-                raise RuntimeError(f"duplicate {message['role']} result for sequence {index}")
+                raise RuntimeError(f"duplicate {role} result for sequence {index}")
             target[index] = float(message["loss"])
-            dispatch_next(message["worker_id"], message["role"])
+            fill_worker(worker_id, role)
 
             previous_done = paired_done
             while (
@@ -2012,28 +2311,95 @@ def score_with_model_workers(
                     "avg_king_loss": round(float(paired_king.mean()), 6),
                     "avg_challenger_loss": round(float(paired_challenger.mean()), 6),
                 })
-    finally:
-        for queue in task_queues.values():
+        return (
+            [float(value) for value in king_losses],
+            [float(value) for value in challenger_losses],
+            {"workers": [self.ready[spec["worker_id"]] for spec in self.specs]},
+        )
+
+    def close(self, *, force: bool = False) -> None:
+        if force:
+            for process in self.processes.values():
+                if process.is_alive():
+                    process.terminate()
+            for process in self.processes.values():
+                process.join(timeout=10)
+            for queue in [*self.command_queues.values(), self.result_queue]:
+                try:
+                    queue.close()
+                except Exception:
+                    pass
+            return
+        for queue in self.command_queues.values():
             try:
-                queue.put_nowait(None)
+                queue.put_nowait({"type": "shutdown"})
             except Exception:
                 pass
-        for process in processes.values():
+        for process in self.processes.values():
             process.join(timeout=10)
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=10)
-        for queue in [*task_queues.values(), result_queue]:
+        for queue in [*self.command_queues.values(), self.result_queue]:
             try:
                 queue.close()
             except Exception:
                 pass
 
-    return (
-        [float(value) for value in king_losses],
-        [float(value) for value in challenger_losses],
-        {"workers": [ready[spec["worker_id"]] for spec in specs]},
-    )
+    def status(self) -> dict:
+        return {
+            "running": not bool(self.dead_workers()),
+            "workers": [
+                {
+                    "worker_id": spec["worker_id"],
+                    "pid": self.processes[spec["worker_id"]].pid,
+                    "alive": self.processes[spec["worker_id"]].is_alive(),
+                    "loaded": spec["worker_id"] in self.ready,
+                }
+                for spec in self.specs
+            ],
+        }
+
+    def loaded_snapshot_paths(self) -> set[Path]:
+        return {
+            Path(message["snapshot"]).resolve()
+            for message in self.ready.values()
+            if message.get("snapshot")
+        }
+
+
+def get_model_worker_pool(gpu_ids: list[int]) -> PersistentModelWorkerPool:
+    global _model_worker_pool
+    if _model_worker_pool is not None and _model_worker_pool.gpu_ids != list(gpu_ids):
+        _model_worker_pool.close()
+        _model_worker_pool = None
+    if _model_worker_pool is None or _model_worker_pool.dead_workers():
+        if _model_worker_pool is not None:
+            _model_worker_pool.close(force=True)
+        _model_worker_pool = PersistentModelWorkerPool(gpu_ids)
+    return _model_worker_pool
+
+
+def score_with_model_workers(
+    sequences: list[list[int]],
+    req: EvalRequest,
+    king_snapshot: str,
+    challenger_snapshot: str,
+    gpu_ids: list[int],
+    on_progress,
+) -> tuple[list[float], list[float], dict]:
+    """Score randomized sequences; only worker/model state persists between evals."""
+    global _model_worker_pool
+    pool = get_model_worker_pool(gpu_ids)
+    try:
+        generation = pool.load_models(req, king_snapshot, challenger_snapshot, on_progress)
+        return pool.score(sequences, generation, on_progress)
+    except Exception:
+        # In particular, an eager-attention OOM must halt every queued sequence
+        # immediately: never keep scoring, truncate, or switch attention backend.
+        pool.close(force=True)
+        _model_worker_pool = None
+        raise
 
 
 def bootstrap_verdict(king_losses: list[float], challenger_losses: list[float], req: EvalRequest) -> dict:
@@ -2190,6 +2556,11 @@ def cleanup_model_cache() -> None:
         keep = set()
         if _king_key:
             keep.add((_king_key[0].replace("/", "--"), _king_key[1].replace(":", "-")))
+        loaded_paths = (
+            _model_worker_pool.loaded_snapshot_paths()
+            if _model_worker_pool is not None
+            else set()
+        )
         candidates = []
         for d in snapshots:
             try:
@@ -2201,6 +2572,8 @@ def cleanup_model_cache() -> None:
             if running < target:
                 break
             if (d.parent.name, d.name) in keep:
+                continue
+            if d.resolve() in loaded_paths:
                 continue
             shutil.rmtree(d, ignore_errors=True)
             running -= size
@@ -2429,12 +2802,13 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _gpu_ids
+    global _gpu_ids, _model_worker_pool
     setup_logging()
     MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     EVAL_RECORD_DIR.mkdir(parents=True, exist_ok=True)
     COMPLETED_SAFETENSORS_SHA_FILE.touch(exist_ok=True)
     SHARD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    KERNEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     _gpu_ids = parse_gpu_ids()
     log.info(
         "Pair eval server starting; arch=%s gpus=%s model_cache=%s shard_cache=%s records=%s",
@@ -2445,6 +2819,9 @@ async def lifespan(app: FastAPI):
         EVAL_RECORD_DIR,
     )
     yield
+    if _model_worker_pool is not None:
+        _model_worker_pool.close()
+        _model_worker_pool = None
     log.info("Pair eval server shutting down")
 
 
@@ -2462,6 +2839,8 @@ async def health():
         "cache_dir": str(MODEL_CACHE_DIR),
         "shard_cache_dir": str(SHARD_CACHE_DIR),
         "record_dir": str(EVAL_RECORD_DIR),
+        "kernel_cache_dir": str(KERNEL_CACHE_DIR),
+        "model_worker_pool": _model_worker_pool.status() if _model_worker_pool is not None else {"running": False, "workers": []},
         "safetensors_reuse": {
             "history_file": str(COMPLETED_SAFETENSORS_SHA_FILE),
             "max_completed_evals": MAX_COMPLETED_EVALS_PER_SAFETENSORS_SHA,
@@ -2478,6 +2857,10 @@ async def health():
             "tensor_parallel_size": 1,
             "model_parallel_strategy": "layer_sharding",
             "grouped_moe": True,
+            "persistent_model_workers": True,
+            "direct_checkpoint_to_gpu": True,
+            "sequence_pipeline_depth": 2,
+            "loss_cache": False,
             "use_cache": False,
             "dtype": "bfloat16",
             "n": DEFAULT_N,
