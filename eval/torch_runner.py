@@ -11,7 +11,7 @@ Usage:
     python -m eval.torch_runner \
         --king unconst/Teutonic-I \
         --challenger unconst/Teutonic-I \
-        --n 100 --batch-size 64 --seq-len 2048 --gpus 0,1,2,3,4,5,6,7
+        --n 100 --batch-size 1 --seq-len 4096 --gpus 0,1,2,3,4,5,6,7
 
 Env vars:
     TEUTONIC_R2_ENDPOINT  R2 endpoint URL
@@ -61,6 +61,7 @@ if _workspace_root not in sys.path:
 import chain_config  # noqa: E402
 chain_config.load_arch()  # noqa: E402
 from eval.raw_dataset import load_raw_sequences, raw_dataset_enabled  # noqa: E402
+from eval.tokenization import DEFAULT_TOKENIZER_BACKEND  # noqa: E402
 from model_store import ModelRef, materialize_model  # noqa: E402
 
 log = logging.getLogger("eval_torch")
@@ -601,26 +602,25 @@ def load_model(repo, device, label="model", force_download=False, revision=None,
         load_kwargs = {"device_map": device_map_arg, "max_memory": max_memory}
     else:
         load_kwargs = {"device_map": {"": device}}
-    for attn_impl in ("flash_attention_2", "sdpa", "eager"):
-        try:
-            local_repo = repo
-            if revision and not os.path.isdir(repo):
-                local_repo = _prefetch_repo(repo, digest=revision,
-                                           timeout=int(os.environ.get("HIPPIUS_PREFETCH_TIMEOUT", "600")))
-            model = AutoModelForCausalLM.from_pretrained(
-                local_repo,
-                torch_dtype=torch.bfloat16,
-                attn_implementation=attn_impl,
-                force_download=False,
-                use_safetensors=True,
-                **load_kwargs,
-            )
-            log.info("using attn_implementation=%s", attn_impl)
-            break
-        except Exception as e:
-            log.warning("attn %s failed (%s), trying next", attn_impl, e)
-    else:
-        raise RuntimeError("could not load model with any attention implementation")
+    local_repo = repo
+    if revision and not os.path.isdir(repo):
+        local_repo = _prefetch_repo(
+            repo,
+            digest=revision,
+            timeout=int(os.environ.get("HIPPIUS_PREFETCH_TIMEOUT", "600")),
+        )
+    model = AutoModelForCausalLM.from_pretrained(
+        local_repo,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="eager",
+        force_download=False,
+        trust_remote_code=True,
+        use_safetensors=True,
+        **load_kwargs,
+    )
+    model.config.use_cache = False
+    model.config._attn_implementation = "eager"
+    log.info("using reference attn_implementation=eager dtype=bfloat16 use_cache=false")
     model.eval()
     elapsed = time.time() - t0
     params = sum(p.numel() for p in model.parameters()) / 1e9
@@ -1390,7 +1390,8 @@ def is_accepted(lcb: float, delta_threshold: float) -> bool:
 
 def sample_public_holdout(r2, shard_key, public_seed: bytes,
                           n_public: int, seq_len: int,
-                          vocab_size: int | None = None
+                          vocab_size: int | None = None,
+                          tokenizer_backend: str = DEFAULT_TOKENIZER_BACKEND,
                           ) -> tuple[torch.Tensor, str, dict | None]:
     """Sample `n_public` sequences of `seq_len` tokens from the public corpus.
 
@@ -1414,6 +1415,7 @@ def sample_public_holdout(r2, shard_key, public_seed: bytes,
                     hashlib.sha256(marker).hexdigest(), None)
         raw_sequences, raw_meta = load_raw_sequences(
             r2, n_public, seq_len, seed_str, chain_config.SEED_TOKENIZER_REPO,
+            tokenizer_backend=tokenizer_backend,
         )
         if len(raw_sequences) < n_public:
             log.warning("public holdout undersized: got %d, requested %d",
@@ -1561,7 +1563,8 @@ def run_paired_eval(king_eval, challenger_eval,
 def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
                        alpha, seq_len, batch_size, seed_str,
                        n_bootstrap=10000, on_progress=None,
-                       delta_threshold: float | None = None):
+                       delta_threshold: float | None = None,
+                       tokenizer_backend: str = DEFAULT_TOKENIZER_BACKEND):
     """Run the retained standalone public-corpus paired bootstrap test.
 
     ``delta_threshold`` defaults to ``EVAL_DELTA`` for CLI compatibility.
@@ -1573,6 +1576,7 @@ def run_bootstrap_test(king_eval, challenger_eval, r2, shard_key, eval_n,
     holdout, indices_digest, raw_meta = sample_public_holdout(
         r2, shard_key, public_seed, eval_n, seq_len,
         vocab_size=_evaluator_vocab_size(king_eval),
+        tokenizer_backend=tokenizer_backend,
     )
     verdict = run_paired_eval(
         king_eval, challenger_eval,
@@ -1604,8 +1608,14 @@ def main():
     parser.add_argument("--n", type=int, default=100, help="Number of sequences to evaluate")
     parser.add_argument("--alpha", type=float, default=0.001, help="Bootstrap confidence level (one-sided)")
     parser.add_argument("--n-bootstrap", type=int, default=10000, help="Number of bootstrap replicates")
-    parser.add_argument("--batch-size", type=int, default=64, help="Sequences per batch (split across GPUs)")
-    parser.add_argument("--seq-len", type=int, default=2048, help="Tokens per sequence")
+    parser.add_argument("--batch-size", type=int, choices=(1,), default=1, help="Fixed eager microbatch size")
+    parser.add_argument("--seq-len", type=int, default=4096, help="Tokens per sequence")
+    parser.add_argument(
+        "--tokenizer-backend",
+        choices=("huggingface", "gigatoken"),
+        default=DEFAULT_TOKENIZER_BACKEND,
+        help="Raw-dataset tokenizer backend (default: gigatoken)",
+    )
     parser.add_argument("--gpus", default="auto", help="Comma-separated GPU IDs or 'auto' (default: auto)")
     parser.add_argument("--seed", default="test:eval", help="Seed string for deterministic sequence selection")
     parser.add_argument("--shard", default=None, help="Specific shard key (default: first shard from manifest)")
@@ -1673,6 +1683,7 @@ def main():
         r2, shard_key, args.n, args.alpha,
         args.seq_len, args.batch_size, args.seed,
         n_bootstrap=args.n_bootstrap,
+        tokenizer_backend=args.tokenizer_backend,
     )
 
     king_eval.shutdown()

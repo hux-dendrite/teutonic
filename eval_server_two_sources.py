@@ -52,13 +52,14 @@ async def lifespan(app: FastAPI):
     URL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     base._gpu_ids = base.parse_gpu_ids()
     log.info(
-        "Quasar two-source eval server starting; gpus=%s shard_cache=%s url_cache=%s",
+        "Two-source eval server starting; arch=%s gpus=%s shard_cache=%s url_cache=%s",
+        base.chain_config.ARCH_MODULE,
         base._gpu_ids,
         base.SHARD_CACHE_DIR,
         URL_CACHE_DIR,
     )
     yield
-    log.info("Quasar two-source eval server shutting down")
+    log.info("Two-source eval server shutting down")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -68,6 +69,7 @@ app = FastAPI(lifespan=lifespan)
 async def health():
     return {
         "status": "ok",
+        "arch": base.chain_config.ARCH_MODULE,
         "gpu_ids": base._gpu_ids,
         "king_loaded": base._king_key,
         "active_evals": len(base._evals),
@@ -87,6 +89,13 @@ async def health():
             "batch_size": base.DEFAULT_BATCH_SIZE,
             "alpha": base.DEFAULT_ALPHA,
             "seq_len": base.DEFAULT_SEQ_LEN,
+            "tokenizer_backend": base.DEFAULT_TOKENIZER_BACKEND,
+            "attn_implementation": base.DEFAULT_ATTN_IMPLEMENTATION,
+            "gpus_per_model": 4,
+            "replicas_per_model": 4,
+            "tensor_parallel_size": 1,
+            "use_cache": False,
+            "dtype": "bfloat16",
             "n": base.DEFAULT_N,
             "n_bootstrap": base.DEFAULT_BOOTSTRAP_B,
             "shards_per_source": DEFAULT_SHARDS_PER_SOURCE,

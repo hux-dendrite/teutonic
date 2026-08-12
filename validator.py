@@ -89,7 +89,7 @@ DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "")
 COLDKEY_PREFIX_LEN = int(os.environ.get("TEUTONIC_COLDKEY_PREFIX_LEN", "5"))
 COLDKEY_SUFFIX_LEN = int(os.environ.get("TEUTONIC_COLDKEY_SUFFIX_LEN", "5"))
 
-# Quasar permits only these hash-matched local model files.
+# Custom-code architectures permit only hash-matched local model files.
 CUSTOM_CODE_POLICY = os.environ.get("TEUTONIC_CUSTOM_CODE_POLICY", "").strip().lower()
 QUASAR_CODE_POLICY_ENV = os.environ.get("TEUTONIC_ALLOW_QUASAR_CUSTOM_CODE", "").lower() in (
     "1",
@@ -104,6 +104,26 @@ QUASAR_ALLOWED_CODE_FILES = {
 QUASAR_EXPECTED_AUTO_MAP = {
     "AutoConfig": "configuration_qwen3_5.QuasarConfig",
     "AutoModelForCausalLM": "modeling_qwen3_5.QuasarForCausalLM",
+}
+MIMO_ALLOWED_CODE_FILES = {
+    "configuration_mimo_v2.py",
+    "modeling_mimo_v2.py",
+}
+MIMO_EXPECTED_AUTO_MAP = {
+    "AutoConfig": "configuration_mimo_v2.MiMoV2Config",
+    "AutoModel": "modeling_mimo_v2.MiMoV2Model",
+    "AutoModelForCausalLM": "modeling_mimo_v2.MiMoV2ForCausalLM",
+}
+
+CUSTOM_CODE_SPECS = {
+    "quasar": {
+        "allowed_files": QUASAR_ALLOWED_CODE_FILES,
+        "auto_map": QUASAR_EXPECTED_AUTO_MAP,
+    },
+    "mimo": {
+        "allowed_files": MIMO_ALLOWED_CODE_FILES,
+        "auto_map": MIMO_EXPECTED_AUTO_MAP,
+    },
 }
 
 TMC_BASE = "https://api.taomarketcap.com/public/v1"
@@ -368,33 +388,44 @@ def get_king_config(king_repo: str, king_digest: str = ""):
     return _king_config
 
 
-def _quasar_custom_code_allowed(king_cfg: dict, challenger_cfg: dict) -> bool:
+def _custom_code_arch(king_cfg: dict, challenger_cfg: dict) -> str | None:
     if QUASAR_CODE_POLICY_ENV or CUSTOM_CODE_POLICY in {"quasar", "quasar_qwen3_5"}:
-        return True
+        return "quasar"
+    if CUSTOM_CODE_POLICY in {"mimo", "mimo_v2"}:
+        return "mimo"
     if chain_config.ARCH_MODULE.endswith(".quasar"):
-        return True
-    return (
-        king_cfg.get("model_type") == "quasar_text"
-        or challenger_cfg.get("model_type") == "quasar_text"
-    )
+        return "quasar"
+    if chain_config.ARCH_MODULE.endswith(".mimo"):
+        return "mimo"
+    model_types = {king_cfg.get("model_type"), challenger_cfg.get("model_type")}
+    if "quasar_text" in model_types:
+        return "quasar"
+    if "mimo_v2" in model_types:
+        return "mimo"
+    return None
+
+
+def _validate_custom_auto_map(arch: str, auto_map: dict | None) -> str | None:
+    expected_map = CUSTOM_CODE_SPECS[arch]["auto_map"]
+    if not isinstance(auto_map, dict):
+        return f"{arch} config must provide auto_map"
+    if set(auto_map) != set(expected_map):
+        return (
+            f"{arch} auto_map keys mismatch: "
+            f"expected={sorted(expected_map)} got={sorted(auto_map)}"
+        )
+    for key, expected in expected_map.items():
+        value = auto_map.get(key)
+        if value != expected:
+            return f"{arch} auto_map[{key!r}] mismatch: expected={expected!r} got={value!r}"
+        module = expected.rsplit(".", 1)[0]
+        if "--" in module or "/" in module:
+            return f"{arch} auto_map[{key!r}] must be local, got {value!r}"
+    return None
 
 
 def _validate_quasar_auto_map(auto_map: dict | None) -> str | None:
-    if not isinstance(auto_map, dict):
-        return "quasar config must provide auto_map"
-    if set(auto_map) != set(QUASAR_EXPECTED_AUTO_MAP):
-        return (
-            "quasar auto_map keys mismatch: "
-            f"expected={sorted(QUASAR_EXPECTED_AUTO_MAP)} got={sorted(auto_map)}"
-        )
-    for key, expected in QUASAR_EXPECTED_AUTO_MAP.items():
-        value = auto_map.get(key)
-        if value != expected:
-            return f"quasar auto_map[{key!r}] mismatch: expected={expected!r} got={value!r}"
-        module = expected.rsplit(".", 1)[0]
-        if "--" in module or "/" in module:
-            return f"quasar auto_map[{key!r}] must be local, got {value!r}"
-    return None
+    return _validate_custom_auto_map("quasar", auto_map)
 
 
 def _code_cache_dir(ref: ModelRef, files: set[str]) -> Path:
@@ -475,32 +506,35 @@ def validate_custom_code_policy(
     auto_map = challenger_cfg.get("auto_map")
     py_files = sorted(f for f in repo_files if f.endswith(".py"))
 
-    if not _quasar_custom_code_allowed(king_cfg, challenger_cfg):
+    arch = _custom_code_arch(king_cfg, challenger_cfg)
+    if arch is None:
         if auto_map:
             return "auto_map present in config.json (custom modeling code is not allowed)"
         if py_files:
             return f"repo ships *.py files (not allowed): {py_files[:3]}"
         return None
 
-    unexpected_py = sorted(set(py_files) - QUASAR_ALLOWED_CODE_FILES)
+    spec = CUSTOM_CODE_SPECS[arch]
+    allowed_files = set(spec["allowed_files"])
+    unexpected_py = sorted(set(py_files) - allowed_files)
     if unexpected_py:
-        return f"repo ships non-Quasar *.py files (not allowed): {unexpected_py[:3]}"
+        return f"repo ships non-{arch} *.py files (not allowed): {unexpected_py[:3]}"
 
     if auto_map:
-        rejection = _validate_quasar_auto_map(auto_map)
+        rejection = _validate_custom_auto_map(arch, auto_map)
         if rejection:
             return rejection
-        required = set(QUASAR_ALLOWED_CODE_FILES)
+        required = allowed_files
         missing_py = sorted(required - set(py_files))
         if missing_py:
-            return f"quasar auto_map requires missing code files: {missing_py}"
+            return f"{arch} auto_map requires missing code files: {missing_py}"
 
         try:
             king_ref = ModelRef(king_repo or SEED_REPO, king_digest or SEED_DIGEST)
             king_hashes = _remote_code_hashes(king_ref, required)
             challenger_hashes = _remote_code_hashes(model_ref, required)
         except Exception as exc:
-            return f"could not verify Quasar custom code hashes: {exc}"
+            return f"could not verify {arch} custom code hashes: {exc}"
 
         mismatches = [
             name
@@ -515,11 +549,11 @@ def validate_custom_code_policy(
                 }
                 for name in mismatches
             }
-            return f"quasar custom code hash mismatch: {details}"
+            return f"{arch} custom code hash mismatch: {details}"
         return None
 
     if py_files:
-        return "quasar *.py files are allowed only with the exact approved auto_map"
+        return f"{arch} *.py files are allowed only with the exact approved auto_map"
     return None
 
 

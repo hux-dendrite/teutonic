@@ -17,7 +17,8 @@ dependencies = [
     "hf_transfer>=0.1",
     "safetensors",
     "torch",
-    "transformers",
+    "transformers>=5.12.1,<6",
+    "gigatoken>=0.10,<0.11",
     "fastapi",
     "uvicorn",
     "pydantic",
@@ -26,7 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["ruff"]
+dev = ["pytest", "ruff"]
 
 [project.urls]
 Homepage = "https://teutonic.ai"

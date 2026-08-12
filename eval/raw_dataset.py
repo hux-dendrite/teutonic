@@ -15,11 +15,12 @@ import logging
 import os
 import pathlib
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import numpy as np
 
+from eval.tokenization import DEFAULT_TOKENIZER_BACKEND, encode_batch, prepare_tokenizer
 from s3_transfer import safe_download_file
 
 log = logging.getLogger("eval_raw_dataset")
@@ -45,7 +46,7 @@ class RawDatasetConfig:
     list_fallback: bool
 
     @classmethod
-    def from_env(cls, default_tokenizer_repo: str) -> "RawDatasetConfig":
+    def from_env(cls, default_tokenizer_repo: str) -> RawDatasetConfig:
         prefix = os.environ.get("TEUTONIC_RAW_DATASET_PREFIX", DEFAULT_PREFIX).strip("/")
         manifest_key = os.environ.get(
             "TEUTONIC_RAW_DATASET_MANIFEST",
@@ -82,6 +83,7 @@ def load_raw_sequences(
     seq_len: int,
     seed_str: str,
     default_tokenizer_repo: str,
+    tokenizer_backend: str = DEFAULT_TOKENIZER_BACKEND,
 ) -> tuple[list[list[int]], dict]:
     """Return fixed-length token sequences sampled from raw mirrored Parquet."""
     cfg = RawDatasetConfig.from_env(default_tokenizer_repo)
@@ -100,10 +102,16 @@ def load_raw_sequences(
     from transformers import AutoTokenizer
 
     token = os.environ.get("HF_TOKEN") or None
-    tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_repo, token=token, use_fast=True)
-    eos_id = tokenizer.eos_token_id
+    hf_tokenizer = AutoTokenizer.from_pretrained(
+        cfg.tokenizer_repo,
+        token=token,
+        trust_remote_code=True,
+        use_fast=True,
+    )
+    eos_id = hf_tokenizer.eos_token_id
     if eos_id is None:
-        eos_id = tokenizer.sep_token_id
+        eos_id = hf_tokenizer.sep_token_id
+    tokenizer, selected_backend = prepare_tokenizer(hf_tokenizer, tokenizer_backend)
 
     sequences: list[list[int]] = []
     token_remainder: list[int] = []
@@ -114,17 +122,19 @@ def load_raw_sequences(
         key = item["key"]
         local_path = _download_parquet(r2, cfg, key)
         used_files.append(key)
-        for text in _iter_parquet_texts(local_path, cfg.text_column):
-            docs_seen += 1
-            ids = tokenizer.encode(text, add_special_tokens=False)
-            if eos_id is not None:
-                ids.append(int(eos_id))
-            token_remainder.extend(ids)
-            while len(token_remainder) >= seq_len:
-                sequences.append(token_remainder[:seq_len])
-                token_remainder = token_remainder[seq_len:]
-                if len(sequences) >= eval_n:
-                    return sequences, _meta(cfg, files, used_files, docs_seen)
+        for texts in _iter_parquet_text_batches(local_path, cfg.text_column):
+            docs_seen += len(texts)
+            for ids in encode_batch(tokenizer, texts):
+                if eos_id is not None:
+                    ids.append(int(eos_id))
+                token_remainder.extend(ids)
+                while len(token_remainder) >= seq_len:
+                    sequences.append(token_remainder[:seq_len])
+                    token_remainder = token_remainder[seq_len:]
+                    if len(sequences) >= eval_n:
+                        meta = _meta(cfg, files, used_files, docs_seen)
+                        meta["tokenizer_backend"] = selected_backend
+                        return sequences, meta
 
     if not sequences:
         raise RuntimeError(
@@ -135,7 +145,9 @@ def load_raw_sequences(
         "raw dataset produced only %d/%d requested sequences from %d files",
         len(sequences), eval_n, len(used_files),
     )
-    return sequences, _meta(cfg, files, used_files, docs_seen)
+    meta = _meta(cfg, files, used_files, docs_seen)
+    meta["tokenizer_backend"] = selected_backend
+    return sequences, meta
 
 
 def _meta(
@@ -210,6 +222,15 @@ def _download_parquet(r2, cfg: RawDatasetConfig, key: str) -> pathlib.Path:
 
 
 def _iter_parquet_texts(path: pathlib.Path, text_column: str) -> Iterable[str]:
+    for texts in _iter_parquet_text_batches(path, text_column):
+        yield from texts
+
+
+def _iter_parquet_text_batches(
+    path: pathlib.Path,
+    text_column: str,
+    batch_size: int = 1024,
+) -> Iterable[list[str]]:
     import pyarrow.parquet as pq
     import pyarrow.types as patypes
 
@@ -226,8 +247,7 @@ def _iter_parquet_texts(path: pathlib.Path, text_column: str) -> Iterable[str]:
         column = string_columns[0]
         log.warning("%s missing column %r; using %r", path.name, text_column, column)
 
-    for rg_idx in range(pf.num_row_groups):
-        table = pf.read_row_group(rg_idx, columns=[column])
-        for value in table.column(column).to_pylist():
-            if isinstance(value, str) and value:
-                yield value
+    for batch in pf.iter_batches(batch_size=batch_size, columns=[column]):
+        texts = [value for value in batch.column(column).to_pylist() if isinstance(value, str) and value]
+        if texts:
+            yield texts

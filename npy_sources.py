@@ -129,7 +129,7 @@ DEFAULT_SOURCE_WEIGHTS: list[float] = (
 )
 # vocab_size of the eval model — sequences with any token_id >= this value are dropped
 # before inference to prevent CUDA device-side assert from embedding OOB access.
-DEFAULT_VOCAB_SIZE: int = int(os.environ.get("TEUTONIC_VOCAB_SIZE", "248320"))
+DEFAULT_VOCAB_SIZE: int = int(os.environ.get("TEUTONIC_VOCAB_SIZE", "152576"))
 DEFAULT_MAX_SEQS_PER_SHARD: int = int(os.environ.get("TEUTONIC_MAX_SEQS_PER_SHARD", "0"))
 DEFAULT_SHARDS_PER_SOURCE: int = int(os.environ.get("TEUTONIC_SHARDS_PER_SOURCE", "5"))
 URL_CACHE_DIR = Path(

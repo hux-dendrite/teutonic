@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Quasar pair-eval engine used by the multi-source evaluation service.
+"""Paired model-eval engine used by the multi-source evaluation service.
 
 - model refs are materialized from Hippius Hub / Hugging Face into a local cache,
 - the king model is cached across evals,
 - each eval has an id, status endpoint, SSE stream, phase/progress events,
 - final verdicts are written to disk as JSON audit artifacts.
 
-It evaluates Quasar checkpoints on local FineWeb-Edu token shards. Model
+It evaluates configured-chain checkpoints on local FineWeb-Edu data. Model
 snapshots are treated as self-contained by default: their own config/custom code
 is used and compared before any weights are loaded. ``code_model`` remains only
 as an explicit debug fallback for older, weights-only snapshots.
@@ -36,6 +36,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, Queue
+from typing import Literal
 from urllib.parse import urlparse
 
 import numpy as np
@@ -50,11 +51,14 @@ _repo_root = Path(__file__).resolve().parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
+import chain_config
+from eval.tokenization import DEFAULT_TOKENIZER_BACKEND, encode_batch, prepare_tokenizer
+
 log = logging.getLogger("eval_server_quasar_pair")
 eval_log = logging.getLogger("eval_torch")
 
-MODEL_CACHE_DIR = Path(os.environ.get("TEUTONIC_MODEL_CACHE_DIR", "/tmp/teutonic/quasar_pair_models"))
-EVAL_RECORD_DIR = Path(os.environ.get("TEUTONIC_EVAL_RECORD_DIR", "/tmp/teutonic/quasar_pair_evals"))
+MODEL_CACHE_DIR = Path(os.environ.get("TEUTONIC_MODEL_CACHE_DIR", "/tmp/teutonic/pair_models"))
+EVAL_RECORD_DIR = Path(os.environ.get("TEUTONIC_EVAL_RECORD_DIR", "/tmp/teutonic/pair_evals"))
 COMPLETED_SAFETENSORS_SHA_FILE = Path(
     os.environ.get(
         "TEUTONIC_COMPLETED_SAFETENSORS_SHA_FILE",
@@ -68,7 +72,10 @@ SHARD_CACHE_DIR = Path(
         os.environ.get("TEUTONIC_PARQUET_CACHE_DIR", "/tmp/teutonic/finewebedu_shards"),
     )
 )
-DEFAULT_CODE_MODEL = os.environ.get("QUASAR_CODE_MODEL", "silx-ai/Quasar-10B")
+DEFAULT_CODE_MODEL = os.environ.get(
+    "TEUTONIC_CODE_MODEL",
+    os.environ.get("QUASAR_CODE_MODEL", chain_config.SEED_REPO),
+)
 DEFAULT_PARQUET_GLOB = os.environ.get("TEUTONIC_PARQUET_GLOB", "/root/data/fineweb-edu-10BT/sample/10BT/**/*.parquet")
 DEFAULT_DATASET_SOURCE = os.environ.get("TEUTONIC_DATASET_SOURCE", "s3")
 DEFAULT_S3_ENDPOINT = os.environ.get("TEUTONIC_DS_ENDPOINT", "https://s3.hippius.com")
@@ -77,15 +84,14 @@ DEFAULT_S3_PREFIX = os.environ.get("TEUTONIC_DS_PREFIX", "dataset/finewebedu/")
 DEFAULT_S3_AUTH_SOURCE = os.environ.get("TEUTONIC_DS_AUTH_SOURCE", "env")
 DEFAULT_S3_SHARD_CONTAINS = os.environ.get("TEUTONIC_DS_SHARD_CONTAINS", "/shards/")
 DEFAULT_S3_SHARD_SUFFIX = os.environ.get("TEUTONIC_DS_SHARD_SUFFIX", ".npy")
-DEFAULT_BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "512"))
-# In parallel mode each model gets only n/2 GPUs → more layers per GPU → larger MLP intermediates.
-# Use a smaller batch to avoid OOM.  512 is fine for 8-GPU sequential; 256 for 4-GPU parallel.
-DEFAULT_PARALLEL_BATCH_SIZE = int(os.environ.get("EVAL_PARALLEL_BATCH_SIZE", "128"))
+DEFAULT_BATCH_SIZE = 1
+DEFAULT_PARALLEL_BATCH_SIZE = 1
 DEFAULT_ALPHA = float(os.environ.get("EVAL_ALPHA", "0.001"))
-DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
+DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "4096"))
 DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.0015"))
 DEFAULT_BOOTSTRAP_B = int(os.environ.get("EVAL_BOOTSTRAP_B", "10000"))
 DEFAULT_N = int(os.environ.get("EVAL_N", "25000"))
+DEFAULT_ATTN_IMPLEMENTATION = "eager"
 
 # Server-side caps. The validator can request a larger eval_n / n_bootstrap
 # in its POST body; we clamp to these to keep per-eval wall time bounded
@@ -95,7 +101,7 @@ EVAL_BOOTSTRAP_B_CAP = int(os.environ.get("EVAL_BOOTSTRAP_B_CAP", "999999"))
 
 PROBE_ENABLED = os.environ.get("TEUTONIC_PROBE_ENABLED", "1") == "1"
 
-EVAL_MAX_RUNTIME_S = int(os.environ.get("EVAL_MAX_RUNTIME_S", "3000"))
+EVAL_MAX_RUNTIME_S = int(os.environ.get("EVAL_MAX_RUNTIME_S", "0"))
 DEFAULT_LM_HEAD_CHUNK = int(os.environ.get("TEUTONIC_LM_HEAD_CHUNK", "32"))
 DEFAULT_LOG_EVERY_BATCHES = int(os.environ.get("EVAL_LOG_EVERY_BATCHES", "1"))
 DEFAULT_MODEL_DEVICE_MAP = os.environ.get("TEUTONIC_MODEL_DEVICE_MAP", "auto")
@@ -108,7 +114,7 @@ DEFAULT_MODEL_DOWNLOAD_RETRY_BACKOFF_S = float(os.environ.get("TEUTONIC_MODEL_DO
 # whether (d_sum + remaining * d_max_observed) / n_total < delta_threshold.
 # Since LCB <= mu_hat, if that upper bound on mu_hat is below the threshold the
 # challenger cannot reach it regardless of the remaining samples.
-EVAL_EARLY_STOP = os.environ.get("EVAL_EARLY_STOP", "1") == "1"
+EVAL_EARLY_STOP = False
 EVAL_EARLY_STOP_MIN_FRACTION = float(os.environ.get("EVAL_EARLY_STOP_MIN_FRACTION", "0.2"))
 EVAL_EARLY_STOP_ADVANTAGE_QUANTILE = float(os.environ.get("EVAL_EARLY_STOP_ADVANTAGE_QUANTILE", "0.95"))
 DEFAULT_MODEL_DOWNLOAD_WORKERS = int(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_WORKERS", "4"))
@@ -147,6 +153,7 @@ _king_model = None
 _king_key: tuple[str, ...] | None = None
 _king_device = ""
 _king_gpu_ids: list[int] = []
+_attention_preflight_cache: dict[str, dict] = {}
 
 
 class EvalRequest(BaseModel):
@@ -172,9 +179,11 @@ class EvalRequest(BaseModel):
     s3_max_shards: int = 0
     s3_doppler_project: str = "arbos"
     s3_doppler_config: str = "dev"
-    seq_len: int = DEFAULT_SEQ_LEN
+    seq_len: int = Field(default=DEFAULT_SEQ_LEN, ge=2)
+    tokenizer_backend: Literal["huggingface", "gigatoken"] = DEFAULT_TOKENIZER_BACKEND
+    attn_implementation: Literal["eager"] = DEFAULT_ATTN_IMPLEMENTATION
     n: int = DEFAULT_N
-    batch_size: int = DEFAULT_BATCH_SIZE
+    batch_size: Literal[1] = DEFAULT_BATCH_SIZE
     alpha: float = DEFAULT_ALPHA
     delta_threshold: float = DEFAULT_DELTA
     n_bootstrap: int = DEFAULT_BOOTSTRAP_B
@@ -188,8 +197,8 @@ class EvalRequest(BaseModel):
     log_every_batches: int = DEFAULT_LOG_EVERY_BATCHES
     model_device_map: str = DEFAULT_MODEL_DEVICE_MAP
     gpu_memory_fraction: float = DEFAULT_GPU_MEMORY_FRACTION
-    parallel_models: bool = DEFAULT_PARALLEL_MODELS
-    parallel_batch_size: int = DEFAULT_PARALLEL_BATCH_SIZE
+    parallel_models: Literal[True] = True
+    parallel_batch_size: Literal[1] = DEFAULT_PARALLEL_BATCH_SIZE
 
 
 def setup_logging() -> None:
@@ -572,6 +581,8 @@ def prepare_remote_code(model_id: str, revision: str | None) -> str:
 
 
 def preflight_deps() -> None:
+    if not chain_config.ARCH_MODULE.endswith(".quasar"):
+        return
     missing = []
     for module_name, package_hint in (("causal_conv1d", "causal-conv1d"),):
         try:
@@ -585,6 +596,8 @@ def preflight_deps() -> None:
 
 
 def patch_transformers_masking_compat() -> None:
+    if not chain_config.ARCH_MODULE.endswith(".quasar"):
+        return
     try:
         import transformers.masking_utils as masking_utils
     except Exception:
@@ -639,6 +652,9 @@ def patch_triton_autotuner_thread_safety() -> None:
     streams, so serializing the brief Python-side dispatch doesn't block actual GPU
     overlap.
     """
+    if not chain_config.ARCH_MODULE.endswith(".quasar"):
+        return
+
     from triton.runtime.autotuner import Autotuner
 
     if getattr(Autotuner, "_quasar_thread_safe", False):
@@ -684,6 +700,88 @@ CONFIG_MATCH_KEYS = (
     "tie_word_embeddings",
     "attention_bias",
 )
+
+
+def resolved_attention_types(config) -> list[str]:
+    """Resolve MiMo's trained per-layer hybrid attention schedule in order."""
+    n_layers = int(getattr(config, "num_hidden_layers", 0) or 0)
+    pattern = list(getattr(config, "hybrid_layer_pattern", None) or [])
+    declared = list(getattr(config, "layer_types", None) or [])
+    if len(pattern) != n_layers:
+        raise RuntimeError(
+            f"hybrid_layer_pattern has {len(pattern)} entries for {n_layers} surviving layers"
+        )
+    invalid = [(idx, value) for idx, value in enumerate(pattern) if value not in (0, 1)]
+    if invalid:
+        raise RuntimeError(f"invalid hybrid_layer_pattern entries: {invalid[:8]}")
+    resolved = [
+        "sliding_window_attention" if value == 1 else "full_attention"
+        for value in pattern
+    ]
+    if len(declared) != n_layers:
+        raise RuntimeError(f"layer_types has {len(declared)} entries for {n_layers} surviving layers")
+    normalized_declared = [
+        "sliding_window_attention" if value == "sliding_attention" else value
+        for value in declared
+    ]
+    if normalized_declared != resolved:
+        mismatches = [
+            {"layer": idx, "declared": got, "resolved": want}
+            for idx, (got, want) in enumerate(zip(normalized_declared, resolved))
+            if got != want
+        ]
+        raise RuntimeError(f"layer_types do not match hybrid_layer_pattern: {mismatches[:8]}")
+    if int(getattr(config, "sliding_window", 0) or 0) != 128:
+        raise RuntimeError(f"MiMo sliding_window must be 128, got {config.sliding_window!r}")
+    if int(getattr(config, "sliding_window_size", 0) or 0) != 128:
+        raise RuntimeError(
+            f"MiMo sliding_window_size must be 128, got {config.sliding_window_size!r}"
+        )
+    if not bool(getattr(config, "add_swa_attention_sink_bias", False)):
+        raise RuntimeError("MiMo SWA learned attention sink bias must be enabled")
+    if str(getattr(config, "_attn_implementation", "")) != "eager":
+        raise RuntimeError("MiMo evaluation requires eager attention")
+    return resolved
+
+
+def validate_and_report_attention_config(config, label: str, on_phase=None) -> dict:
+    if getattr(config, "model_type", "") != "mimo_v2":
+        return {}
+    cache_material = json.dumps(
+        {
+            "model_type": config.model_type,
+            "num_hidden_layers": config.num_hidden_layers,
+            "hybrid_layer_pattern": config.hybrid_layer_pattern,
+            "layer_types": config.layer_types,
+            "sliding_window": config.sliding_window,
+            "sliding_window_size": config.sliding_window_size,
+            "add_swa_attention_sink_bias": config.add_swa_attention_sink_bias,
+            "attn_implementation": config._attn_implementation,
+        },
+        sort_keys=True,
+    ).encode()
+    cache_key = hashlib.sha256(cache_material).hexdigest()
+    if cache_key in _attention_preflight_cache:
+        cached = dict(_attention_preflight_cache[cache_key])
+        cached["label"] = label
+        cached["preflight_cached"] = True
+        return cached
+    attention_types = resolved_attention_types(config)
+    report = {
+        "label": label,
+        "n_layers": len(attention_types),
+        "attention_types": attention_types,
+        "sliding_window": int(config.sliding_window),
+        "learned_swa_sink_bias": True,
+        "attn_implementation": "eager",
+        "preflight_cache_key": cache_key,
+        "preflight_cached": False,
+    }
+    _attention_preflight_cache[cache_key] = dict(report)
+    log.info("%s resolved MiMo attention config: %s", label, json.dumps(report, sort_keys=True))
+    if on_phase:
+        on_phase({"phase": f"{label}_attention_config_validated", **report})
+    return report
 
 
 def snapshot_safetensor_names(snapshot_dir: str) -> list[str]:
@@ -805,8 +903,14 @@ def load_model_config(snapshot_dir: str, req: EvalRequest, label: str, on_phase=
         config = AutoConfig.from_pretrained(req.code_model, revision=req.revision, trust_remote_code=True)
         source = f"code_model:{req.code_model}"
     config.use_cache = False
+    config._attn_implementation = req.attn_implementation
     if on_phase:
-        on_phase({"phase": f"{label}_config_load_done", "source": source, "model_type": getattr(config, "model_type", "")})
+        on_phase({
+            "phase": f"{label}_config_load_done",
+            "source": source,
+            "model_type": getattr(config, "model_type", ""),
+            "attn_implementation": req.attn_implementation,
+        })
     return config, {"source": source, **meta}
 
 
@@ -822,7 +926,12 @@ def load_eval_tokenizer(king_snapshot: str, req: EvalRequest, on_phase=None):
     if on_phase:
         on_phase({"phase": "tokenizer_load_start", "snapshot": king_snapshot})
     try:
-        tokenizer = AutoTokenizer.from_pretrained(king_snapshot, revision=req.revision, trust_remote_code=True, use_fast=True)
+        hf_tokenizer = AutoTokenizer.from_pretrained(
+            king_snapshot,
+            revision=req.revision,
+            trust_remote_code=True,
+            use_fast=True,
+        )
         tokenizer_source = "king_snapshot"
     except Exception as exc:
         if not req.allow_code_model_fallback:
@@ -833,13 +942,23 @@ def load_eval_tokenizer(king_snapshot: str, req: EvalRequest, on_phase=None):
                     "or allow_code_model_fallback=true must be set for a debug-only run."
                 ) from exc
             return None, {"source": "missing_but_not_needed"}
-        tokenizer = AutoTokenizer.from_pretrained(req.code_model, revision=req.revision, trust_remote_code=True, use_fast=True)
+        hf_tokenizer = AutoTokenizer.from_pretrained(
+            req.code_model,
+            revision=req.revision,
+            trust_remote_code=True,
+            use_fast=True,
+        )
         tokenizer_source = f"code_model:{req.code_model}"
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    if hf_tokenizer.pad_token is None:
+        hf_tokenizer.pad_token = hf_tokenizer.eos_token
+    tokenizer, tokenizer_backend = prepare_tokenizer(hf_tokenizer, req.tokenizer_backend)
     if on_phase:
-        on_phase({"phase": "tokenizer_load_done", "source": tokenizer_source})
-    return tokenizer, {"source": tokenizer_source}
+        on_phase({
+            "phase": "tokenizer_load_done",
+            "source": tokenizer_source,
+            "backend": tokenizer_backend,
+        })
+    return tokenizer, {"source": tokenizer_source, "backend": tokenizer_backend}
 
 
 def config_value(config, key: str):
@@ -885,6 +1004,11 @@ def load_safetensors_state_dict(model_dir: str) -> dict:
     state: dict = {}
     for shard_name in shard_names:
         state.update(results[shard_name])
+    mtp_keys = sorted(name for name in state if "mtp" in name.lower())
+    if mtp_keys:
+        raise RuntimeError(
+            f"MTP/speculative weights are not allowed in scoring model: {mtp_keys[:8]}"
+        )
     return state
 
 
@@ -975,10 +1099,9 @@ def balanced_transformer_device_map(model, gpu_ids: list[int] | None = None) -> 
         else:
             device_map[full_name] = last  # norm, etc.
 
-    # Reserve the last GPU for norm + lm_head only.  It already bears the largest
-    # activation spike: full hidden states (~4 GB) + logit chunk (~4 GB with chunk=32).
-    # Distribute all transformer layers across GPUs 0..last-1.
-    n_layer_gpus = max(1, len(ids) - 1)
+    # TP remains 1: each layer lives wholly on one GPU. Distribute layers across
+    # all four GPUs in the model's assigned group; no cross-rank reductions.
+    n_layer_gpus = len(ids)
     for layer_idx in range(n_layers):
         gpu_idx = min(n_layer_gpus - 1, (layer_idx * n_layer_gpus) // n_layers)
         device_map[f"model.layers.{layer_idx}"] = ids[gpu_idx]
@@ -996,14 +1119,15 @@ def model_input_device(model) -> torch.device:
     return next(model.parameters()).device
 
 
-def load_quasar_model(snapshot_dir: str, config, device: str, label: str, req: EvalRequest, gpu_ids: list[int] | None = None, on_phase=None):
+def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: EvalRequest, gpu_ids: list[int] | None = None, on_phase=None):
     from transformers import AutoModelForCausalLM
 
     if on_phase:
         on_phase({"phase": f"{label}_load_start", "device": device, "snapshot": snapshot_dir})
     t0 = time.time()
     config.use_cache = False
-    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    config._attn_implementation = "eager"
+    dtype = torch.bfloat16
     old_dtype = torch.get_default_dtype()
     try:
         torch.set_default_dtype(dtype)
@@ -1019,6 +1143,11 @@ def load_quasar_model(snapshot_dir: str, config, device: str, label: str, req: E
     del state
     gc.collect()
     log.info("%s state loaded: missing=%d unexpected=%d", label, len(info.missing_keys), len(info.unexpected_keys))
+    if info.missing_keys or info.unexpected_keys:
+        raise RuntimeError(
+            f"{label} state dict mismatch: missing={info.missing_keys[:8]} "
+            f"unexpected={info.unexpected_keys[:8]}"
+        )
     if on_phase:
         on_phase({"phase": f"{label}_to_device_start", "device": device, "dtype": str(dtype)})
     if device == "auto":
@@ -1031,12 +1160,41 @@ def load_quasar_model(snapshot_dir: str, config, device: str, label: str, req: E
         model = model.to(device=device, dtype=dtype)
     if torch.cuda.is_available() and str(device).startswith("cuda"):
         torch.cuda.synchronize(torch.device(device))
-    patch_loaded_quasar_modules()
+    if chain_config.ARCH_MODULE.endswith(".quasar"):
+        patch_loaded_quasar_modules()
     model.eval()
+    model.config.use_cache = False
+    model.config._attn_implementation = "eager"
     params = sum(p.numel() for p in model.parameters()) / 1e9
     if on_phase:
         on_phase({"phase": f"{label}_load_done", "params_b": round(params, 3), "elapsed_s": round(time.time() - t0, 1)})
     return model
+
+
+def load_model_replicas(
+    snapshot_dir: str,
+    config,
+    label: str,
+    req: EvalRequest,
+    gpu_ids: list[int],
+    on_phase=None,
+) -> list:
+    if len(gpu_ids) != 4:
+        raise RuntimeError(f"{label} requires four replica GPUs, got {gpu_ids}")
+    replicas = []
+    for replica_idx, gpu_id in enumerate(gpu_ids):
+        replicas.append(
+            load_eval_model(
+                snapshot_dir,
+                config,
+                f"cuda:{gpu_id}",
+                f"{label}_replica_{replica_idx}",
+                req,
+                gpu_ids=[gpu_id],
+                on_phase=on_phase,
+            )
+        )
+    return replicas
 
 
 def expand_globs(patterns: list[str]) -> list[str]:
@@ -1342,10 +1500,13 @@ def load_sequences_from_npy_shard(
 
     arr = np.load(path, mmap_mode="r")
     if arr.ndim == 2:
-        if arr.shape[1] < req.seq_len:
-            raise ValueError(f"{path} sequence width {arr.shape[1]} < seq_len={req.seq_len}")
+        if arr.shape[1] != req.seq_len:
+            raise ValueError(
+                f"{path} sequence width {arr.shape[1]} != seq_len={req.seq_len}; "
+                "refusing to truncate or pad evaluation sequences"
+            )
         indices = shuffled_indices(rng, arr.shape[0], limit)
-        return [arr[int(i), : req.seq_len].astype(np.int64, copy=False).tolist() for i in indices]
+        return [arr[int(i)].astype(np.int64, copy=False).tolist() for i in indices]
 
     if arr.ndim != 1:
         raise ValueError(f"{path} expected 1D token stream or 2D sequence matrix, got shape={arr.shape}")
@@ -1397,6 +1558,7 @@ def sample_packed_sequences(files: list[str], tokenizer, req: EvalRequest, *, sh
         if req.text_field not in set(pf.schema_arrow.names):
             raise KeyError(f"{path} does not contain text field {req.text_field!r}")
         for batch in pf.iter_batches(batch_size=req.parquet_batch_size, columns=[req.text_field]):
+            texts: list[str] = []
             for text in batch.column(req.text_field).to_pylist():
                 if not isinstance(text, str) or len(text) < req.min_chars:
                     continue
@@ -1406,7 +1568,8 @@ def sample_packed_sequences(files: list[str], tokenizer, req: EvalRequest, *, sh
                     cut = text.rfind(" ")
                     if cut > req.max_chars // 2:
                         text = text[:cut]
-                ids = tokenizer.encode(text, add_special_tokens=False)
+                texts.append(text)
+            for ids in encode_batch(tokenizer, texts):
                 if not ids:
                     continue
                 buffer.extend(ids)
@@ -1426,6 +1589,7 @@ def sample_packed_sequences(files: list[str], tokenizer, req: EvalRequest, *, sh
                             "hotkey": req.hotkey,
                             "digest": digest,
                             "source": req.dataset_source,
+                            "tokenizer_backend": req.tokenizer_backend,
                             "used_files": used_files,
                             "docs_seen": docs_seen,
                         }
@@ -1510,26 +1674,55 @@ def lm_head_device(model) -> torch.device:
 
 @torch.no_grad()
 def compute_per_sequence_loss(model, token_batches: list[list[int]], chunk_size: int) -> list[float]:
-    input_ids = torch.tensor(token_batches, dtype=torch.long, device=model_input_device(model))
-    if hasattr(model, "reset_state"):
-        model.reset_state()
-    hidden = model.model(input_ids).last_hidden_state
-    head_dev = lm_head_device(model)
-    if hidden.device != head_dev:
-        hidden = hidden.to(head_dev)
-    labels_full = input_ids if input_ids.device == head_dev else input_ids.to(head_dev)
+    if len(token_batches) != 1:
+        raise RuntimeError(f"eager scoring requires batch size 1, got {len(token_batches)}")
+    input_device = model_input_device(model)
+    if input_device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(input_device)
+    input_ids = torch.tensor(token_batches, dtype=torch.long, device=input_device)
+    try:
+        if hasattr(model, "reset_state"):
+            model.reset_state()
+        hidden = model.model(input_ids, use_cache=False).last_hidden_state
+        head_dev = lm_head_device(model)
+        if hidden.device != head_dev:
+            hidden = hidden.to(head_dev)
+        labels_full = input_ids if input_ids.device == head_dev else input_ids.to(head_dev)
 
-    batch = len(token_batches)
-    n_pos = labels_full.size(1) - 1
-    total = torch.zeros(batch, device=head_dev)
-    for start in range(0, n_pos, chunk_size):
-        end = min(start + chunk_size, n_pos)
-        logits = model.lm_head(hidden[:, start:end, :])
-        labels = labels_full[:, start + 1 : end + 1]
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1), reduction="none")
-        total += loss.reshape(batch, -1).sum(dim=1)
-        del logits, loss
-    return (total / n_pos).float().cpu().tolist()
+        batch = len(token_batches)
+        n_pos = labels_full.size(1) - 1
+        total = torch.zeros(batch, device=head_dev)
+        for start in range(0, n_pos, chunk_size):
+            end = min(start + chunk_size, n_pos)
+            logits = model.lm_head(hidden[:, start:end, :])
+            labels = labels_full[:, start + 1 : end + 1]
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                labels.reshape(-1),
+                reduction="none",
+            )
+            total += loss.reshape(batch, -1).sum(dim=1)
+            del logits, loss
+        result = (total / n_pos).float().cpu().tolist()
+        if input_device.type == "cuda":
+            peak_gib = torch.cuda.max_memory_allocated(input_device) / (1024**3)
+            eval_log.info(
+                "eager memory | device=%s seq_len=%d peak_allocated_gib=%.2f",
+                input_device,
+                input_ids.shape[1],
+                peak_gib,
+            )
+        return result
+    except (torch.OutOfMemoryError, MemoryError) as exc:
+        peak_detail = ""
+        if input_device.type == "cuda":
+            peak_gib = torch.cuda.max_memory_allocated(input_device) / (1024**3)
+            reserved_gib = torch.cuda.max_memory_reserved(input_device) / (1024**3)
+            peak_detail = f" peak_allocated_gib={peak_gib:.2f} peak_reserved_gib={reserved_gib:.2f}"
+        raise RuntimeError(
+            f"OOM scoring an unmodified {input_ids.shape[1]}-token sequence with eager attention; "
+            f"evaluation stopped without truncation or backend fallback.{peak_detail}"
+        ) from exc
 
 
 def bootstrap_verdict(king_losses: list[float], challenger_losses: list[float], req: EvalRequest) -> dict:
@@ -1604,7 +1797,14 @@ def _shards_used(dataset_meta: dict) -> list[dict]:
 
 
 def _public_dataset_meta(dataset_meta: dict) -> dict:
-    meta = {"source": dataset_meta.get("source"), "shards_used": _shards_used(dataset_meta)}
+    meta = {
+        "source": dataset_meta.get("source"),
+        "shards_used": _shards_used(dataset_meta),
+        "min_seq_len": dataset_meta.get("min_seq_len"),
+        "max_seq_len": dataset_meta.get("max_seq_len"),
+        "max_model_len": dataset_meta.get("max_model_len"),
+        "length_source": dataset_meta.get("length_source"),
+    }
     return {k: v for k, v in meta.items() if v}
 
 
@@ -1621,7 +1821,14 @@ def ensure_king(req: EvalRequest, snapshot: str, config, config_source: str, dev
         del _king_model
         _king_model = None
         torch.cuda.empty_cache()
-    _king_model = load_quasar_model(snapshot, config, device, "king", req, gpu_ids=gpu_ids, on_phase=on_phase)
+    _king_model = load_model_replicas(
+        snapshot,
+        config,
+        "king",
+        req,
+        effective_gpu_ids,
+        on_phase=on_phase,
+    )
     _king_key = key
     _king_device = device
     _king_gpu_ids = effective_gpu_ids
@@ -1770,6 +1977,18 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         config_mismatches = compare_model_configs(king_config, challenger_config)
         if config_mismatches:
             raise RuntimeError(f"king/challenger config mismatch: {config_mismatches[:8]}")
+        attention_meta = {
+            "king": validate_and_report_attention_config(
+                king_config,
+                "king",
+                on_phase=on_phase,
+            ),
+            "challenger": validate_and_report_attention_config(
+                challenger_config,
+                "challenger",
+                on_phase=on_phase,
+            ),
+        }
 
         tokenizer, tokenizer_meta = load_eval_tokenizer(king_snapshot, req, on_phase=on_phase)
 
@@ -1780,42 +1999,68 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
             "seq_len": req.seq_len,
         })
         sequences, dataset_meta = sample_eval_sequences(tokenizer, req, on_phase=on_phase)
+        if not sequences:
+            raise RuntimeError("tokenized evaluation corpus is empty")
+        corpus_lengths = [len(sequence) for sequence in sequences]
+        corpus_max_seq_len = max(corpus_lengths)
+        corpus_min_seq_len = min(corpus_lengths)
+        if corpus_max_seq_len > int(king_config.max_position_embeddings):
+            raise RuntimeError(
+                f"corpus max sequence length {corpus_max_seq_len} exceeds checkpoint limit "
+                f"{king_config.max_position_embeddings}"
+            )
+        king_config._eval_max_model_len = corpus_max_seq_len
+        challenger_config._eval_max_model_len = corpus_max_seq_len
+        dataset_meta.update({
+            "min_seq_len": corpus_min_seq_len,
+            "max_seq_len": corpus_max_seq_len,
+            "max_model_len": corpus_max_seq_len,
+            "length_source": "tokenized_corpus",
+        })
         # Pop private key so it never reaches the verdict JSON or disk record.
         source_labels: list[str] | None = dataset_meta.pop("_source_labels", None)
         public_dataset_meta = _public_dataset_meta(dataset_meta)
         check_eval_runtime(t0)
-        on_phase({"phase": "dataset_sample_done", "digest": dataset_meta["digest"][:16]})
+        on_phase({
+            "phase": "dataset_sample_done",
+            "digest": dataset_meta["digest"][:16],
+            "min_seq_len": corpus_min_seq_len,
+            "max_seq_len": corpus_max_seq_len,
+            "max_model_len": corpus_max_seq_len,
+        })
 
-        use_parallel = req.parallel_models and len(_gpu_ids) >= 4
-        if use_parallel:
-            mid = len(_gpu_ids) // 2
-            king_gpu_ids = _gpu_ids[:mid]
-            challenger_gpu_ids = _gpu_ids[mid:]
-            on_phase({"phase": "parallel_models_setup", "king_gpus": king_gpu_ids, "challenger_gpus": challenger_gpu_ids})
-        else:
-            king_gpu_ids = _gpu_ids
-            challenger_gpu_ids = _gpu_ids
+        if len(_gpu_ids) != 8:
+            raise RuntimeError(f"MiMo duel requires exactly 8 GPUs, got {_gpu_ids}")
+        use_parallel = True
+        king_gpu_ids = _gpu_ids[:4]
+        challenger_gpu_ids = _gpu_ids[4:8]
+        on_phase({
+            "phase": "parallel_models_setup",
+            "king_gpus": king_gpu_ids,
+            "challenger_gpus": challenger_gpu_ids,
+            "gpus_per_model": 4,
+            "replicas_per_model": 4,
+            "tensor_parallel_size": 1,
+        })
 
-        king_device = device_plan_for_gpus(king_gpu_ids)
-        challenger_device = device_plan_for_gpus(challenger_gpu_ids)
+        king_device = ",".join(f"cuda:{gpu_id}" for gpu_id in king_gpu_ids)
+        challenger_device = ",".join(f"cuda:{gpu_id}" for gpu_id in challenger_gpu_ids)
         king = ensure_king(req, king_snapshot, king_config, king_artifacts["source"], king_device, gpu_ids=king_gpu_ids, on_phase=on_phase)
         check_eval_runtime(t0)
-        challenger = load_quasar_model(
+        challenger = load_model_replicas(
             challenger_snapshot,
             challenger_config,
-            challenger_device,
             "challenger",
             req,
-            gpu_ids=challenger_gpu_ids,
+            challenger_gpu_ids,
             on_phase=on_phase,
         )
         check_eval_runtime(t0)
 
-        if use_parallel:
-            from concurrent.futures import ThreadPoolExecutor
-            _eval_pool = ThreadPoolExecutor(max_workers=2)
+        from concurrent.futures import ThreadPoolExecutor
+        _eval_pool = ThreadPoolExecutor(max_workers=8)
 
-        effective_batch_size = req.parallel_batch_size if use_parallel else req.batch_size
+        effective_batch_size = 4
         king_losses: list[float] = []
         challenger_losses: list[float] = []
         king_sum = 0.0
@@ -1827,14 +2072,31 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
             check_eval_runtime(t0)
             batch_idx = (start // effective_batch_size) + 1
             batch = sequences[start : start + effective_batch_size]
-            if _eval_pool is not None:
-                kfut = _eval_pool.submit(compute_per_sequence_loss, king, batch, req.lm_head_chunk)
-                cfut = _eval_pool.submit(compute_per_sequence_loss, challenger, batch, req.lm_head_chunk)
-                kl = kfut.result()
-                cl = cfut.result()
-            else:
-                kl = compute_per_sequence_loss(king, batch, req.lm_head_chunk)
-                cl = compute_per_sequence_loss(challenger, batch, req.lm_head_chunk)
+            king_futures = [
+                _eval_pool.submit(
+                    compute_per_sequence_loss,
+                    king[replica_idx],
+                    [sequence],
+                    req.lm_head_chunk,
+                )
+                for replica_idx, sequence in enumerate(batch)
+            ]
+            challenger_futures = [
+                _eval_pool.submit(
+                    compute_per_sequence_loss,
+                    challenger[replica_idx],
+                    [sequence],
+                    req.lm_head_chunk,
+                )
+                for replica_idx, sequence in enumerate(batch)
+            ]
+            try:
+                kl = [future.result()[0] for future in king_futures]
+                cl = [future.result()[0] for future in challenger_futures]
+            except Exception:
+                for future in king_futures + challenger_futures:
+                    future.cancel()
+                raise
             king_losses.extend(kl)
             challenger_losses.extend(cl)
             king_sum += float(np.sum(kl))
@@ -1937,8 +2199,13 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                             "king": king_artifacts,
                             "challenger": challenger_artifacts,
                             "tokenizer": tokenizer_meta,
+                            "attention": attention_meta,
                             "duplicate_check": duplicate_meta,
                         },
+                        "max_model_len": corpus_max_seq_len,
+                        "gpus_per_model": 4,
+                        "replicas_per_model": 4,
+                        "tensor_parallel_size": 1,
                         "dataset": public_dataset_meta,
                         "shards_used": public_dataset_meta.get("shards_used", []),
                         "dataset_source": req.dataset_source,
@@ -1974,8 +2241,13 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                 "king": king_artifacts,
                 "challenger": challenger_artifacts,
                 "tokenizer": tokenizer_meta,
+                "attention": attention_meta,
                 "duplicate_check": duplicate_meta,
             },
+            "max_model_len": corpus_max_seq_len,
+            "gpus_per_model": 4,
+            "replicas_per_model": 4,
+            "tensor_parallel_size": 1,
             "dataset": public_dataset_meta,
             "shards_used": public_dataset_meta.get("shards_used", []),
             "dataset_source": req.dataset_source,
@@ -2028,14 +2300,15 @@ async def lifespan(app: FastAPI):
     SHARD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     _gpu_ids = parse_gpu_ids()
     log.info(
-        "Quasar pair eval server starting; gpus=%s model_cache=%s shard_cache=%s records=%s",
+        "Pair eval server starting; arch=%s gpus=%s model_cache=%s shard_cache=%s records=%s",
+        chain_config.ARCH_MODULE,
         _gpu_ids,
         MODEL_CACHE_DIR,
         SHARD_CACHE_DIR,
         EVAL_RECORD_DIR,
     )
     yield
-    log.info("Quasar pair eval server shutting down")
+    log.info("Pair eval server shutting down")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -2045,6 +2318,7 @@ app = FastAPI(lifespan=lifespan)
 async def health():
     return {
         "status": "ok",
+        "arch": chain_config.ARCH_MODULE,
         "gpu_ids": _gpu_ids,
         "king_loaded": _king_key,
         "active_evals": len(_evals),
@@ -2059,6 +2333,13 @@ async def health():
             "batch_size": DEFAULT_BATCH_SIZE,
             "alpha": DEFAULT_ALPHA,
             "seq_len": DEFAULT_SEQ_LEN,
+            "tokenizer_backend": DEFAULT_TOKENIZER_BACKEND,
+            "attn_implementation": DEFAULT_ATTN_IMPLEMENTATION,
+            "gpus_per_model": 4,
+            "replicas_per_model": 4,
+            "tensor_parallel_size": 1,
+            "use_cache": False,
+            "dtype": "bfloat16",
             "n": DEFAULT_N,
             "n_bootstrap": DEFAULT_BOOTSTRAP_B,
         },
