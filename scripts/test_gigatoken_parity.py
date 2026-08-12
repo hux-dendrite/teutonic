@@ -167,7 +167,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parquet", action="append", default=[])
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--samples", type=int, default=25_000)
-    parser.add_argument("--seq-len", type=int, default=4096)
+    parser.add_argument("--seq-len", type=int, default=8192)
     parser.add_argument("--text-column", default="text")
     parser.add_argument("--min-chars", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=1024)

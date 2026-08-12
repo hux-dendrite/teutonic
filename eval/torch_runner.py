@@ -11,7 +11,7 @@ Usage:
     python -m eval.torch_runner \
         --king unconst/Teutonic-I \
         --challenger unconst/Teutonic-I \
-        --n 100 --batch-size 1 --seq-len 4096 --gpus 0,1,2,3,4,5,6,7
+        --n 100 --batch-size 1 --seq-len 8192 --gpus 0,1,2,3,4,5,6,7
 
 Env vars:
     TEUTONIC_R2_ENDPOINT  R2 endpoint URL
@@ -1609,7 +1609,7 @@ def main():
     parser.add_argument("--alpha", type=float, default=0.001, help="Bootstrap confidence level (one-sided)")
     parser.add_argument("--n-bootstrap", type=int, default=10000, help="Number of bootstrap replicates")
     parser.add_argument("--batch-size", type=int, choices=(1,), default=1, help="Fixed eager microbatch size")
-    parser.add_argument("--seq-len", type=int, default=4096, help="Tokens per sequence")
+    parser.add_argument("--seq-len", type=int, default=8192, help="Tokens per sequence")
     parser.add_argument(
         "--tokenizer-backend",
         choices=("huggingface", "gigatoken"),

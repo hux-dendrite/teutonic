@@ -933,7 +933,7 @@ def ingest(
     tokenizer_name: str = DEFAULT_TOKENIZER_NAME,
     dest_prefix: str = DEFAULT_DEST_PREFIX,
     shard_size_gb: float = 2.0,
-    seq_len: int = 4096,
+    seq_len: int = 8192,
     dry_run: bool = False,
     langs: list[str] | None = None,
     workers: int = 0,
@@ -1355,7 +1355,7 @@ def main():
     parser.add_argument("--tokens-column", default="", help="Read pre-tokenized List[int] ids from this parquet column instead of tokenizing text.")
     parser.add_argument("--include-prefixes", default=None)
     parser.add_argument("--shard-size-gb", type=float, default=2.0)
-    parser.add_argument("--seq-len", type=int, default=4096)
+    parser.add_argument("--seq-len", type=int, default=8192)
     parser.add_argument(
         "--workers",
         type=int,

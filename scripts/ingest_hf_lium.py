@@ -1531,7 +1531,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokens-column", default=os.environ.get("TEUTONIC_LIUM_INGEST_TOKENS_COLUMN", ""), help="Read pre-tokenized List[int] ids from this parquet column instead of tokenizing text.")
     parser.add_argument("--packed-shards", action="store_true", help="Use seq-packed shard mode instead of writing one .npy per source parquet.")
     parser.add_argument("--ordered-packed-parts", action="store_true", help="With --packed-shards, process each pod as one ordered stream. Slower, but preserves cross-parquet adjacency within a part.")
-    parser.add_argument("--seq-len", type=int, default=int(os.environ.get("TEUTONIC_LIUM_INGEST_SEQ_LEN", "4096")), help="Sequence packing length passed to ingest_hf.py in --packed-shards mode.")
+    parser.add_argument("--seq-len", type=int, default=int(os.environ.get("TEUTONIC_LIUM_INGEST_SEQ_LEN", "8192")), help="Sequence packing length passed to ingest_hf.py in --packed-shards mode.")
     parser.add_argument("--shard-size-gb", type=float, default=float(os.environ.get("TEUTONIC_LIUM_INGEST_SHARD_SIZE_GB", "2.0")), help="Approximate packed .npy shard payload size in GiB.")
     parser.add_argument("--include-prefixes", default=os.environ.get("TEUTONIC_LIUM_INGEST_INCLUDE_PREFIXES", None))
     parser.add_argument("--exclude-prefixes", default=os.environ.get("TEUTONIC_LIUM_INGEST_EXCLUDE_PREFIXES", ""), help="Comma-separated parquet path prefixes to exclude after include filtering.")

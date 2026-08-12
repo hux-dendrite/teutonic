@@ -23,6 +23,7 @@ import inspect
 import io
 import json
 import logging
+import multiprocessing as mp
 import os
 import random
 import shutil
@@ -30,6 +31,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import types
 import uuid
 from contextlib import asynccontextmanager
@@ -87,7 +89,7 @@ DEFAULT_S3_SHARD_SUFFIX = os.environ.get("TEUTONIC_DS_SHARD_SUFFIX", ".npy")
 DEFAULT_BATCH_SIZE = 1
 DEFAULT_PARALLEL_BATCH_SIZE = 1
 DEFAULT_ALPHA = float(os.environ.get("EVAL_ALPHA", "0.001"))
-DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "4096"))
+DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "8192"))
 DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.0015"))
 DEFAULT_BOOTSTRAP_B = int(os.environ.get("EVAL_BOOTSTRAP_B", "10000"))
 DEFAULT_N = int(os.environ.get("EVAL_N", "25000"))
@@ -102,11 +104,14 @@ EVAL_BOOTSTRAP_B_CAP = int(os.environ.get("EVAL_BOOTSTRAP_B_CAP", "999999"))
 PROBE_ENABLED = os.environ.get("TEUTONIC_PROBE_ENABLED", "1") == "1"
 
 EVAL_MAX_RUNTIME_S = int(os.environ.get("EVAL_MAX_RUNTIME_S", "0"))
-DEFAULT_LM_HEAD_CHUNK = int(os.environ.get("TEUTONIC_LM_HEAD_CHUNK", "32"))
+DEFAULT_LM_HEAD_CHUNK = int(os.environ.get("TEUTONIC_LM_HEAD_CHUNK", "1024"))
 DEFAULT_LOG_EVERY_BATCHES = int(os.environ.get("EVAL_LOG_EVERY_BATCHES", "1"))
 DEFAULT_MODEL_DEVICE_MAP = os.environ.get("TEUTONIC_MODEL_DEVICE_MAP", "auto")
 DEFAULT_PARALLEL_MODELS = os.environ.get("TEUTONIC_PARALLEL_MODELS", "1") == "1"
 DEFAULT_GPU_MEMORY_FRACTION = float(os.environ.get("TEUTONIC_GPU_MEMORY_FRACTION", "0.45"))
+GPUS_PER_MODEL_INSTANCE = 2
+MODEL_INSTANCES_PER_SIDE = 2
+MODEL_WORKER_PROCESSES = MODEL_INSTANCES_PER_SIDE * 2
 DEFAULT_MODEL_DOWNLOAD_RETRIES = int(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_RETRIES", "3"))
 DEFAULT_MODEL_DOWNLOAD_RETRY_BACKOFF_S = float(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_RETRY_BACKOFF_S", "15"))
 # Early stopping: abort once the challenger has no mathematical chance to win.
@@ -227,6 +232,18 @@ def device_plan_for_gpus(gpu_ids: list[int]) -> str:
     if len(gpu_ids) == 1:
         return f"cuda:{gpu_ids[0]}"
     return "auto"
+
+
+def model_worker_specs(gpu_ids: list[int]) -> list[dict]:
+    """Return the fixed two-GPU, two-instance topology for each duel side."""
+    if len(gpu_ids) != 8:
+        raise RuntimeError(f"MiMo duel requires exactly 8 GPUs, got {gpu_ids}")
+    return [
+        {"worker_id": "king-0", "role": "king", "gpu_ids": gpu_ids[0:2]},
+        {"worker_id": "king-1", "role": "king", "gpu_ids": gpu_ids[2:4]},
+        {"worker_id": "challenger-0", "role": "challenger", "gpu_ids": gpu_ids[4:6]},
+        {"worker_id": "challenger-1", "role": "challenger", "gpu_ids": gpu_ids[6:8]},
+    ]
 
 
 def normalize_model_ref(ref: str) -> str:
@@ -980,6 +997,69 @@ def compare_model_configs(king_config, challenger_config) -> list[dict]:
     return mismatches
 
 
+def grouped_mimo_moe(
+    module,
+    hidden_states: torch.Tensor,
+    topk_indices: torch.Tensor,
+    topk_weights: torch.Tensor,
+) -> torch.Tensor:
+    """Run MiMo experts with three grouped CUDA GEMMs instead of 64 Python loops."""
+    if not hidden_states.is_cuda or hidden_states.dtype != torch.bfloat16:
+        raise RuntimeError("grouped MiMo MoE requires CUDA bfloat16 activations")
+    n_tokens = hidden_states.shape[0]
+    top_k = topk_indices.shape[1]
+    n_experts = len(module.experts)
+
+    flat_experts = topk_indices.reshape(-1)
+    flat_tokens = torch.arange(n_tokens, device=hidden_states.device).repeat_interleave(top_k)
+    order = torch.argsort(flat_experts, stable=True)
+    sorted_experts = flat_experts[order]
+    sorted_tokens = flat_tokens[order]
+    sorted_weights = topk_weights.reshape(-1)[order]
+
+    counts = torch.bincount(sorted_experts, minlength=n_experts)
+    active_experts = torch.nonzero(counts, as_tuple=False).flatten()
+    split_sizes = counts[active_experts].tolist()
+    routed_inputs = list(hidden_states[sorted_tokens].split(split_sizes, dim=0))
+    experts = [module.experts[index] for index in active_experts.tolist()]
+
+    gate_outputs = torch._foreach_mm(
+        routed_inputs,
+        [expert.gate_proj.weight.T for expert in experts],
+    )
+    up_outputs = torch._foreach_mm(
+        routed_inputs,
+        [expert.up_proj.weight.T for expert in experts],
+    )
+    activated = [module.experts[0].act_fn(gate) * up for gate, up in zip(gate_outputs, up_outputs)]
+    down_outputs = torch._foreach_mm(
+        activated,
+        [expert.down_proj.weight.T for expert in experts],
+    )
+
+    routed_outputs = torch.cat(list(down_outputs), dim=0)
+    routed_outputs = routed_outputs * sorted_weights.unsqueeze(-1)
+    final_hidden_states = torch.zeros_like(hidden_states, dtype=topk_weights.dtype)
+    final_hidden_states.index_add_(0, sorted_tokens, routed_outputs)
+    return final_hidden_states.type(hidden_states.dtype)
+
+
+def enable_grouped_mimo_moe(model) -> int:
+    """Patch checkpoint MiMo MoE modules after strict state loading."""
+    if not hasattr(torch, "_foreach_mm"):
+        raise RuntimeError("this PyTorch build does not provide native grouped CUDA GEMM")
+    patched = 0
+    for module in model.modules():
+        if module.__class__.__name__ != "MiMoV2MoE":
+            continue
+        module.moe = types.MethodType(grouped_mimo_moe, module)
+        patched += 1
+    if patched == 0 and getattr(model.config, "model_type", "") == "mimo_v2":
+        raise RuntimeError("MiMo checkpoint contains no patchable MiMoV2MoE modules")
+    log.info("enabled grouped CUDA MoE for %d layers", patched)
+    return patched
+
+
 def load_safetensors_state_dict(model_dir: str) -> dict:
     from concurrent.futures import ThreadPoolExecutor
     from safetensors.torch import load_file
@@ -1100,7 +1180,7 @@ def balanced_transformer_device_map(model, gpu_ids: list[int] | None = None) -> 
             device_map[full_name] = last  # norm, etc.
 
     # TP remains 1: each layer lives wholly on one GPU. Distribute layers across
-    # all four GPUs in the model's assigned group; no cross-rank reductions.
+    # the GPUs in the model's assigned group; no cross-rank reductions.
     n_layer_gpus = len(ids)
     for layer_idx in range(n_layers):
         gpu_idx = min(n_layer_gpus - 1, (layer_idx * n_layer_gpus) // n_layers)
@@ -1166,6 +1246,8 @@ def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: Eva
         torch.cuda.synchronize(torch.device(device))
     if chain_config.ARCH_MODULE.endswith(".quasar"):
         patch_loaded_quasar_modules()
+    if getattr(config, "model_type", "") == "mimo_v2":
+        enable_grouped_mimo_moe(model)
     model.eval()
     model.config.use_cache = False
     model.config._attn_implementation = "eager"
@@ -1676,13 +1758,27 @@ def lm_head_device(model) -> torch.device:
     return next(model.lm_head.parameters()).device
 
 
+def model_cuda_devices(model) -> list[torch.device]:
+    devices: set[torch.device] = set()
+    for value in (getattr(model, "hf_device_map", None) or {}).values():
+        if isinstance(value, int):
+            devices.add(torch.device(f"cuda:{value}"))
+        elif str(value).startswith("cuda"):
+            devices.add(torch.device(value))
+    for device in (model_input_device(model), lm_head_device(model)):
+        if device.type == "cuda":
+            devices.add(device)
+    return sorted(devices, key=lambda device: device.index or 0)
+
+
 @torch.no_grad()
 def compute_per_sequence_loss(model, token_batches: list[list[int]], chunk_size: int) -> list[float]:
     if len(token_batches) != 1:
         raise RuntimeError(f"eager scoring requires batch size 1, got {len(token_batches)}")
     input_device = model_input_device(model)
-    if input_device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(input_device)
+    cuda_devices = model_cuda_devices(model)
+    for device in cuda_devices:
+        torch.cuda.reset_peak_memory_stats(device)
     input_ids = torch.tensor(token_batches, dtype=torch.long, device=input_device)
     try:
         if hasattr(model, "reset_state"):
@@ -1695,7 +1791,7 @@ def compute_per_sequence_loss(model, token_batches: list[list[int]], chunk_size:
 
         batch = len(token_batches)
         n_pos = labels_full.size(1) - 1
-        total = torch.zeros(batch, device=head_dev)
+        per_token_losses = []
         for start in range(0, n_pos, chunk_size):
             end = min(start + chunk_size, n_pos)
             logits = model.lm_head(hidden[:, start:end, :])
@@ -1705,28 +1801,239 @@ def compute_per_sequence_loss(model, token_batches: list[list[int]], chunk_size:
                 labels.reshape(-1),
                 reduction="none",
             )
-            total += loss.reshape(batch, -1).sum(dim=1)
-            del logits, loss
+            per_token_losses.append(loss.reshape(batch, -1).float())
+            del logits
+        # Summing once after concatenation makes the accumulation order independent
+        # of lm_head_chunk, so increasing the projection chunk does not alter scores.
+        total = torch.cat(per_token_losses, dim=1).sum(dim=1)
         result = (total / n_pos).float().cpu().tolist()
-        if input_device.type == "cuda":
-            peak_gib = torch.cuda.max_memory_allocated(input_device) / (1024**3)
-            eval_log.info(
-                "eager memory | device=%s seq_len=%d peak_allocated_gib=%.2f",
-                input_device,
-                input_ids.shape[1],
-                peak_gib,
-            )
+        peaks = {
+            str(device): round(torch.cuda.max_memory_allocated(device) / (1024**3), 3)
+            for device in cuda_devices
+        }
+        eval_log.info(
+            "eager memory | devices=%s seq_len=%d peak_allocated_gib=%s",
+            [str(device) for device in cuda_devices],
+            input_ids.shape[1],
+            peaks,
+        )
         return result
     except (torch.OutOfMemoryError, MemoryError) as exc:
-        peak_detail = ""
-        if input_device.type == "cuda":
-            peak_gib = torch.cuda.max_memory_allocated(input_device) / (1024**3)
-            reserved_gib = torch.cuda.max_memory_reserved(input_device) / (1024**3)
-            peak_detail = f" peak_allocated_gib={peak_gib:.2f} peak_reserved_gib={reserved_gib:.2f}"
+        peak_detail = " ".join(
+            f"{device}:allocated={torch.cuda.max_memory_allocated(device) / (1024**3):.2f}GiB,"
+            f"reserved={torch.cuda.max_memory_reserved(device) / (1024**3):.2f}GiB"
+            for device in cuda_devices
+        )
         raise RuntimeError(
             f"OOM scoring an unmodified {input_ids.shape[1]}-token sequence with eager attention; "
-            f"evaluation stopped without truncation or backend fallback.{peak_detail}"
+            f"evaluation stopped without truncation or backend fallback. {peak_detail}"
         ) from exc
+
+
+def model_worker_main(
+    spec: dict,
+    snapshot_dir: str,
+    request_data: dict,
+    task_queue,
+    result_queue,
+) -> None:
+    """Own one two-GPU model instance and score tasks until shutdown."""
+    setup_logging()
+    worker_id = spec["worker_id"]
+    role = spec["role"]
+    gpu_ids = list(spec["gpu_ids"])
+    try:
+        req = EvalRequest(**request_data)
+        patch_transformers_masking_compat()
+        patch_triton_autotuner_thread_safety()
+        config, artifacts = load_model_config(snapshot_dir, req, worker_id)
+        attention = validate_and_report_attention_config(config, worker_id)
+        model = load_eval_model(
+            snapshot_dir,
+            config,
+            "auto",
+            worker_id,
+            req,
+            gpu_ids=gpu_ids,
+        )
+        result_queue.put({
+            "type": "ready",
+            "worker_id": worker_id,
+            "role": role,
+            "gpu_ids": gpu_ids,
+            "pid": os.getpid(),
+            "artifacts": artifacts,
+            "attention": attention,
+        })
+        while True:
+            task = task_queue.get()
+            if task is None:
+                break
+            sequence_index, token_ids = task
+            started = time.time()
+            loss = compute_per_sequence_loss(model, [token_ids], req.lm_head_chunk)[0]
+            result_queue.put({
+                "type": "result",
+                "worker_id": worker_id,
+                "role": role,
+                "sequence_index": sequence_index,
+                "loss": loss,
+                "wall_time_s": time.time() - started,
+            })
+    except BaseException as exc:
+        result_queue.put({
+            "type": "error",
+            "worker_id": worker_id,
+            "role": role,
+            "error": str(exc),
+            "traceback": traceback.format_exc(),
+        })
+
+
+def score_with_model_workers(
+    sequences: list[list[int]],
+    req: EvalRequest,
+    king_snapshot: str,
+    challenger_snapshot: str,
+    gpu_ids: list[int],
+    on_progress,
+) -> tuple[list[float], list[float], dict]:
+    """Score both sides with asynchronous, process-isolated two-GPU workers."""
+    specs = model_worker_specs(gpu_ids)
+    context = mp.get_context("spawn")
+    result_queue = context.Queue()
+    task_queues = {spec["worker_id"]: context.Queue(maxsize=1) for spec in specs}
+    request_data = req.model_dump()
+    processes = {}
+    for spec in specs:
+        snapshot = king_snapshot if spec["role"] == "king" else challenger_snapshot
+        process = context.Process(
+            target=model_worker_main,
+            args=(spec, snapshot, request_data, task_queues[spec["worker_id"]], result_queue),
+            name=f"mimo-{spec['worker_id']}",
+        )
+        process.start()
+        processes[spec["worker_id"]] = process
+
+    ready: dict[str, dict] = {}
+    king_losses: list[float | None] = [None] * len(sequences)
+    challenger_losses: list[float | None] = [None] * len(sequences)
+    next_index = {"king": 0, "challenger": 0}
+    paired_done = 0
+
+    def dispatch_next(worker_id: str, role: str) -> None:
+        index = next_index[role]
+        if index >= len(sequences):
+            return
+        task_queues[worker_id].put((index, sequences[index]))
+        next_index[role] = index + 1
+
+    try:
+        while len(ready) < len(specs):
+            try:
+                message = result_queue.get(timeout=30)
+            except Empty:
+                dead = [worker_id for worker_id, process in processes.items() if not process.is_alive()]
+                if dead:
+                    raise RuntimeError(f"model workers exited during startup: {dead}")
+                on_progress({
+                    "phase": "model_workers_loading",
+                    "ready": len(ready),
+                    "total_workers": len(specs),
+                })
+                continue
+            if message["type"] == "error":
+                raise RuntimeError(
+                    f"model worker {message['worker_id']} failed: {message['error']}\n"
+                    f"{message['traceback']}"
+                )
+            if message["type"] != "ready":
+                raise RuntimeError(f"unexpected model worker startup message: {message}")
+            ready[message["worker_id"]] = message
+            on_progress({
+                "phase": "model_worker_ready",
+                "worker_id": message["worker_id"],
+                "role": message["role"],
+                "gpu_ids": message["gpu_ids"],
+                "pid": message["pid"],
+                "ready": len(ready),
+                "total_workers": len(specs),
+            })
+
+        for spec in specs:
+            dispatch_next(spec["worker_id"], spec["role"])
+
+        started = time.time()
+        while paired_done < len(sequences):
+            try:
+                message = result_queue.get(timeout=30)
+            except Empty:
+                dead = [worker_id for worker_id, process in processes.items() if not process.is_alive()]
+                if dead:
+                    raise RuntimeError(f"model workers exited without a result: {dead}")
+                on_progress({
+                    "phase": "heartbeat",
+                    "done": paired_done,
+                    "total": len(sequences),
+                })
+                continue
+            if message["type"] == "error":
+                raise RuntimeError(
+                    f"model worker {message['worker_id']} failed: {message['error']}\n"
+                    f"{message['traceback']}"
+                )
+            if message["type"] != "result":
+                raise RuntimeError(f"unexpected model worker message: {message}")
+
+            index = int(message["sequence_index"])
+            target = king_losses if message["role"] == "king" else challenger_losses
+            if target[index] is not None:
+                raise RuntimeError(f"duplicate {message['role']} result for sequence {index}")
+            target[index] = float(message["loss"])
+            dispatch_next(message["worker_id"], message["role"])
+
+            previous_done = paired_done
+            while (
+                paired_done < len(sequences)
+                and king_losses[paired_done] is not None
+                and challenger_losses[paired_done] is not None
+            ):
+                paired_done += 1
+            if paired_done != previous_done:
+                paired_king = np.asarray(king_losses[:paired_done], dtype=np.float64)
+                paired_challenger = np.asarray(challenger_losses[:paired_done], dtype=np.float64)
+                elapsed = max(time.time() - started, 1e-9)
+                on_progress({
+                    "phase": "eval_progress",
+                    "done": paired_done,
+                    "total": len(sequences),
+                    "mu_hat": round(float((paired_king - paired_challenger).mean()), 6),
+                    "seq_per_s": round(paired_done / elapsed, 4),
+                    "avg_king_loss": round(float(paired_king.mean()), 6),
+                    "avg_challenger_loss": round(float(paired_challenger.mean()), 6),
+                })
+    finally:
+        for queue in task_queues.values():
+            try:
+                queue.put_nowait(None)
+            except Exception:
+                pass
+        for process in processes.values():
+            process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=10)
+        for queue in [*task_queues.values(), result_queue]:
+            try:
+                queue.close()
+            except Exception:
+                pass
+
+    return (
+        [float(value) for value in king_losses],
+        [float(value) for value in challenger_losses],
+        {"workers": [ready[spec["worker_id"]] for spec in specs]},
+    )
 
 
 def bootstrap_verdict(king_losses: list[float], challenger_losses: list[float], req: EvalRequest) -> dict:
@@ -1923,12 +2230,12 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
 
     def heartbeat_loop():
         while not heartbeat_stop.wait(30):
-            on_phase({"phase": "heartbeat"})
+            current = dict(record.get("progress") or {})
+            current["heartbeat_at"] = time.time()
+            on_phase(current or {"phase": "heartbeat"})
 
     threading.Thread(target=heartbeat_loop, daemon=True, name=f"heartbeat-{eval_id}").start()
 
-    challenger = None
-    _eval_pool = None
     try:
         on_phase({"phase": "setup_start"})
         limits_meta = apply_eval_limits(req, eval_id)
@@ -2033,196 +2340,27 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
             "max_model_len": corpus_max_seq_len,
         })
 
-        if len(_gpu_ids) != 8:
-            raise RuntimeError(f"MiMo duel requires exactly 8 GPUs, got {_gpu_ids}")
-        use_parallel = True
-        king_gpu_ids = _gpu_ids[:4]
-        challenger_gpu_ids = _gpu_ids[4:8]
+        worker_specs = model_worker_specs(_gpu_ids)
         on_phase({
             "phase": "parallel_models_setup",
-            "king_gpus": king_gpu_ids,
-            "challenger_gpus": challenger_gpu_ids,
-            "gpus_per_model": 4,
-            "replicas_per_model": 4,
+            "workers": worker_specs,
+            "gpus_per_model_instance": GPUS_PER_MODEL_INSTANCE,
+            "model_instances_per_side": MODEL_INSTANCES_PER_SIDE,
+            "worker_processes": MODEL_WORKER_PROCESSES,
             "tensor_parallel_size": 1,
+            "model_parallel_strategy": "layer_sharding",
         })
-
-        king_device = ",".join(f"cuda:{gpu_id}" for gpu_id in king_gpu_ids)
-        challenger_device = ",".join(f"cuda:{gpu_id}" for gpu_id in challenger_gpu_ids)
-        king = ensure_king(req, king_snapshot, king_config, king_artifacts["source"], king_device, gpu_ids=king_gpu_ids, on_phase=on_phase)
-        check_eval_runtime(t0)
-        challenger = load_model_replicas(
-            challenger_snapshot,
-            challenger_config,
-            "challenger",
+        king_device = "cuda:0,1|cuda:2,3"
+        challenger_device = "cuda:4,5|cuda:6,7"
+        use_parallel = True
+        king_losses, challenger_losses, worker_meta = score_with_model_workers(
+            sequences,
             req,
-            challenger_gpu_ids,
-            on_phase=on_phase,
+            king_snapshot,
+            challenger_snapshot,
+            _gpu_ids,
+            on_phase,
         )
-        check_eval_runtime(t0)
-
-        from concurrent.futures import ThreadPoolExecutor
-        _eval_pool = ThreadPoolExecutor(max_workers=8)
-
-        effective_batch_size = 4
-        king_losses: list[float] = []
-        challenger_losses: list[float] = []
-        king_sum = 0.0
-        challenger_sum = 0.0
-        eval_t0 = time.time()
-        total_batches = (len(sequences) + effective_batch_size - 1) // effective_batch_size
-        log_every_batches = max(1, int(req.log_every_batches or 1))
-        for start in range(0, len(sequences), effective_batch_size):
-            check_eval_runtime(t0)
-            batch_idx = (start // effective_batch_size) + 1
-            batch = sequences[start : start + effective_batch_size]
-            king_futures = [
-                _eval_pool.submit(
-                    compute_per_sequence_loss,
-                    king[replica_idx],
-                    [sequence],
-                    req.lm_head_chunk,
-                )
-                for replica_idx, sequence in enumerate(batch)
-            ]
-            challenger_futures = [
-                _eval_pool.submit(
-                    compute_per_sequence_loss,
-                    challenger[replica_idx],
-                    [sequence],
-                    req.lm_head_chunk,
-                )
-                for replica_idx, sequence in enumerate(batch)
-            ]
-            try:
-                kl = [future.result()[0] for future in king_futures]
-                cl = [future.result()[0] for future in challenger_futures]
-            except Exception:
-                for future in king_futures + challenger_futures:
-                    future.cancel()
-                raise
-            king_losses.extend(kl)
-            challenger_losses.extend(cl)
-            king_sum += float(np.sum(kl))
-            challenger_sum += float(np.sum(cl))
-            done = len(king_losses)
-            diff_so_far = np.asarray(king_losses) - np.asarray(challenger_losses)
-            mu_hat = float(diff_so_far.mean())
-            seq_per_s = done / max(time.time() - eval_t0, 1e-9)
-            if batch_idx % log_every_batches == 0 or done == len(sequences):
-                eval_log.info(
-                    "batch %d/%d | done=%d/%d | mu_hat=%.6f | %.1f seq/s",
-                    batch_idx,
-                    total_batches,
-                    done,
-                    len(sequences),
-                    mu_hat,
-                    seq_per_s,
-                )
-            on_phase({
-                "phase": "eval_progress",
-                "batch": batch_idx,
-                "total_batches": total_batches,
-                "done": done,
-                "total": len(sequences),
-                "mu_hat": round(mu_hat, 6),
-                "seq_per_s": round(seq_per_s, 1),
-                "avg_king_loss": round(king_sum / done, 6),
-                "avg_challenger_loss": round(challenger_sum / done, 6),
-            })
-
-            # Early stop: can challenger still mathematically achieve LCB > delta_threshold?
-            # Upper bound on final mu_hat = assume all remaining seqs give the max
-            # observed per-seq advantage. Since LCB <= mu_hat, if mu_upper < delta_threshold
-            # the challenger cannot win regardless of the remaining samples.
-            n_total = len(sequences)
-            if (EVAL_EARLY_STOP and done < n_total
-                    and done >= int(n_total * EVAL_EARLY_STOP_MIN_FRACTION)):
-                advantage_quantile = min(max(EVAL_EARLY_STOP_ADVANTAGE_QUANTILE, 0.0), 1.0)
-                d_max = float(np.quantile(diff_so_far, advantage_quantile))
-                remaining = n_total - done
-                mu_upper = (float(diff_so_far.sum()) + remaining * d_max) / n_total
-                if mu_upper < req.delta_threshold:
-                    # Compute the real bootstrap LCB on the partial observed data
-                    # using the same formula as bootstrap_verdict. The partial LCB
-                    # will be <= mu_hat <= mu_upper < delta_threshold.
-                    es_rng = np.random.default_rng(req.bootstrap_seed)
-                    n_es = len(diff_so_far)
-                    es_boot = np.empty(req.n_bootstrap, dtype=np.float64)
-                    for _b in range(req.n_bootstrap):
-                        _idx = es_rng.integers(0, n_es, size=n_es)
-                        es_boot[_b] = diff_so_far[_idx].mean()
-                    lcb_partial = float(np.quantile(es_boot, req.alpha))
-                    eval_log.info(
-                        "early stop at %d/%d seqs: best-case mu_hat=%.6f "
-                        "lcb_partial=%.6f < delta=%.6f advantage_quantile=%.3f",
-                        done, n_total, mu_upper, lcb_partial, req.delta_threshold, advantage_quantile,
-                    )
-                    elapsed = time.time() - t0
-                    early_verdict = {
-                        "accepted": False,
-                        "verdict": "king",
-                        "mu_hat": round(mu_hat, 6),
-                        "mu_hat_upper_bound": round(mu_upper, 6),
-                        "lcb": round(lcb_partial, 6),
-                        "delta": req.delta_threshold,
-                        "delta_threshold": req.delta_threshold,
-                        "alpha": req.alpha,
-                        "n_bootstrap": req.n_bootstrap,
-                        "n_sequences": n_total,
-                        "n_sequences_evaluated": done,
-                        "avg_king_loss": round(king_sum / done, 6),
-                        "avg_challenger_loss": round(challenger_sum / done, 6),
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "early_stopped": True,
-                        "early_stop_reason": (
-                            f"best_case_mu_hat={mu_upper:.6f} < delta_threshold="
-                            f"{req.delta_threshold:.6f} after {done}/{n_total} seqs"
-                        ),
-                        "early_stop_advantage_quantile": advantage_quantile,
-                        "early_stop_assumed_remaining_advantage": round(d_max, 6),
-                    }
-                    early_verdict["source_scores"] = _compute_source_scores(
-                        king_losses, challenger_losses,
-                        source_labels[:done] if source_labels else None,
-                    )
-                    early_verdict.update({
-                        "eval_id": eval_id,
-                        "king_repo": normalize_model_ref(req.king_repo),
-                        "challenger_repo": normalize_model_ref(req.challenger_repo),
-                        "king_digest": req.king_digest,
-                        "challenger_digest": req.challenger_digest,
-                        "code_model": req.code_model,
-                        "allow_code_model_fallback": req.allow_code_model_fallback,
-                        "king_device": king_device,
-                        "challenger_device": challenger_device,
-                        "parallel_models": use_parallel,
-                        "gpu_memory_fraction": req.gpu_memory_fraction,
-                        "limits": limits_meta,
-                        "model_artifacts": {
-                            "king": king_artifacts,
-                            "challenger": challenger_artifacts,
-                            "tokenizer": tokenizer_meta,
-                            "attention": attention_meta,
-                            "duplicate_check": duplicate_meta,
-                        },
-                        "max_model_len": corpus_max_seq_len,
-                        "gpus_per_model": 4,
-                        "replicas_per_model": 4,
-                        "tensor_parallel_size": 1,
-                        "dataset": public_dataset_meta,
-                        "shards_used": public_dataset_meta.get("shards_used", []),
-                        "dataset_source": req.dataset_source,
-                        "wall_time_s": round(elapsed, 1),
-                    })
-                    early_verdict["record_path"] = write_record(
-                        eval_id, {"request": req.model_dump(), "verdict": early_verdict}
-                    )
-                    record_completed_safetensors_sha(duplicate_meta["challenger_safetensors_sha256"])
-                    record["state"] = "completed"
-                    record["verdict"] = early_verdict
-                    events.put({"type": "verdict", "data": early_verdict})
-                    return
 
         verdict = bootstrap_verdict(king_losses, challenger_losses, req)
         verdict["source_scores"] = _compute_source_scores(
@@ -2247,11 +2385,15 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
                 "tokenizer": tokenizer_meta,
                 "attention": attention_meta,
                 "duplicate_check": duplicate_meta,
+                "workers": worker_meta,
             },
             "max_model_len": corpus_max_seq_len,
-            "gpus_per_model": 4,
-            "replicas_per_model": 4,
+            "gpus_per_model_instance": GPUS_PER_MODEL_INSTANCE,
+            "model_instances_per_side": MODEL_INSTANCES_PER_SIDE,
+            "worker_processes": MODEL_WORKER_PROCESSES,
             "tensor_parallel_size": 1,
+            "model_parallel_strategy": "layer_sharding",
+            "grouped_moe": True,
             "dataset": public_dataset_meta,
             "shards_used": public_dataset_meta.get("shards_used", []),
             "dataset_source": req.dataset_source,
@@ -2259,16 +2401,12 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         })
         verdict["record_path"] = write_record(eval_id, {"request": req.model_dump(), "verdict": verdict})
         if verdict.get("accepted"):
-            promote_challenger_to_king(
-                req,
-                challenger,
-                challenger_snapshot,
-                challenger_artifacts["source"],
-                challenger_device,
-                challenger_gpu_ids,
-                on_phase=on_phase,
-            )
-            challenger = None
+            write_current_king_ref(challenger_snapshot)
+            on_phase({
+                "phase": "king_promoted",
+                "repo": normalize_model_ref(req.challenger_repo),
+                "digest": req.challenger_digest or "latest",
+            })
         record_completed_safetensors_sha(duplicate_meta["challenger_safetensors_sha256"])
         record["state"] = "completed"
         record["verdict"] = verdict
@@ -2282,11 +2420,6 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         events.put({"type": "error", "data": {"error": reason, "reason": reason}})
     finally:
         heartbeat_stop.set()
-        if _eval_pool is not None:
-            _eval_pool.shutdown(wait=False)
-        if challenger is not None:
-            del challenger
-            torch.cuda.empty_cache()
         cleanup_model_cache()
         try:
             _eval_lock.release()
@@ -2339,9 +2472,12 @@ async def health():
             "seq_len": DEFAULT_SEQ_LEN,
             "tokenizer_backend": DEFAULT_TOKENIZER_BACKEND,
             "attn_implementation": DEFAULT_ATTN_IMPLEMENTATION,
-            "gpus_per_model": 4,
-            "replicas_per_model": 4,
+            "gpus_per_model_instance": GPUS_PER_MODEL_INSTANCE,
+            "model_instances_per_side": MODEL_INSTANCES_PER_SIDE,
+            "worker_processes": MODEL_WORKER_PROCESSES,
             "tensor_parallel_size": 1,
+            "model_parallel_strategy": "layer_sharding",
+            "grouped_moe": True,
             "use_cache": False,
             "dtype": "bfloat16",
             "n": DEFAULT_N,

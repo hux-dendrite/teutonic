@@ -4,7 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from eval_server_quasar_pair import EvalRequest, resolved_attention_types
+from eval_server_quasar_pair import (
+    EvalRequest,
+    MODEL_INSTANCES_PER_SIDE,
+    MODEL_WORKER_PROCESSES,
+    model_worker_specs,
+    resolved_attention_types,
+)
 
 
 def mimo_config(**overrides):
@@ -49,5 +55,19 @@ def test_eval_request_fixes_reference_runtime_settings():
     assert request.batch_size == 1
     assert request.parallel_batch_size == 1
     assert request.parallel_models is True
-    assert request.seq_len == 4096
+    assert request.seq_len == 8192
+    assert request.lm_head_chunk == 1024
 
+
+def test_worker_topology_uses_two_processes_per_side_and_two_gpus_each():
+    specs = model_worker_specs(list(range(8)))
+    assert MODEL_INSTANCES_PER_SIDE == 2
+    assert MODEL_WORKER_PROCESSES == 4
+    assert specs == [
+        {"worker_id": "king-0", "role": "king", "gpu_ids": [0, 1]},
+        {"worker_id": "king-1", "role": "king", "gpu_ids": [2, 3]},
+        {"worker_id": "challenger-0", "role": "challenger", "gpu_ids": [4, 5]},
+        {"worker_id": "challenger-1", "role": "challenger", "gpu_ids": [6, 7]},
+    ]
+    with pytest.raises(RuntimeError, match="exactly 8 GPUs"):
+        model_worker_specs(list(range(4)))

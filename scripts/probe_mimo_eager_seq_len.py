@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Empirically find the single-GPU MiMo eager-attention sequence ceiling."""
+"""Empirically find the two-GPU MiMo eager-attention sequence ceiling."""
 from __future__ import annotations
 
 import argparse
@@ -30,15 +30,22 @@ def parse_lengths(value: str) -> list[int]:
     return lengths
 
 
+def parse_gpus(value: str) -> list[int]:
+    gpu_ids = [int(item.strip()) for item in value.split(",") if item.strip()]
+    if len(gpu_ids) != 2 or len(set(gpu_ids)) != 2 or any(gpu_id < 0 for gpu_id in gpu_ids):
+        raise argparse.ArgumentTypeError("gpus must contain exactly two distinct non-negative IDs")
+    return gpu_ids
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--revision", default=DEFAULT_REVISION)
-    parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--gpus", type=parse_gpus, default=parse_gpus("0,1"))
     parser.add_argument(
         "--lengths",
         type=parse_lengths,
-        default=parse_lengths("4096,6144,8192,10240,12288,14336,16384,20480,24576,32768"),
+        default=parse_lengths("8192,10240,12288,14336,16384,20480,24576,32768"),
     )
     parser.add_argument("--report", default="/home/ubuntu/mimo-eager-seq-ceiling.json")
     return parser.parse_args()
@@ -48,8 +55,9 @@ def main() -> int:
     args = parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
-    if args.gpu >= torch.cuda.device_count():
-        raise ValueError(f"GPU {args.gpu} is unavailable")
+    unavailable = [gpu_id for gpu_id in args.gpus if gpu_id >= torch.cuda.device_count()]
+    if unavailable:
+        raise ValueError(f"GPUs are unavailable: {unavailable}")
     digest = f"hf:{args.revision}"
     request = pair.EvalRequest(
         king_repo=args.repo,
@@ -67,10 +75,10 @@ def main() -> int:
     model = pair.load_eval_model(
         snapshot,
         config,
-        f"cuda:{args.gpu}",
+        "auto",
         "probe",
         request,
-        gpu_ids=[args.gpu],
+        gpu_ids=args.gpus,
     )
 
     results = []
@@ -78,7 +86,8 @@ def main() -> int:
     first_oom = None
     for seq_len in args.lengths:
         torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats(args.gpu)
+        for gpu_id in args.gpus:
+            torch.cuda.reset_peak_memory_stats(gpu_id)
         token_ids = ((torch.arange(seq_len, dtype=torch.int64) * 7919) % config.vocab_size).tolist()
         started = time.time()
         try:
@@ -91,12 +100,14 @@ def main() -> int:
                 "seq_len": seq_len,
                 "status": "oom",
                 "error": str(exc),
-                "peak_allocated_gib": round(
-                    torch.cuda.max_memory_allocated(args.gpu) / (1024**3), 3
-                ),
-                "peak_reserved_gib": round(
-                    torch.cuda.max_memory_reserved(args.gpu) / (1024**3), 3
-                ),
+                "peak_allocated_gib": {
+                    str(gpu_id): round(torch.cuda.max_memory_allocated(gpu_id) / (1024**3), 3)
+                    for gpu_id in args.gpus
+                },
+                "peak_reserved_gib": {
+                    str(gpu_id): round(torch.cuda.max_memory_reserved(gpu_id) / (1024**3), 3)
+                    for gpu_id in args.gpus
+                },
             })
             break
         ceiling = seq_len
@@ -105,24 +116,28 @@ def main() -> int:
             "status": "ok",
             "loss": loss,
             "wall_time_s": round(time.time() - started, 3),
-            "peak_allocated_gib": round(
-                torch.cuda.max_memory_allocated(args.gpu) / (1024**3), 3
-            ),
-            "peak_reserved_gib": round(
-                torch.cuda.max_memory_reserved(args.gpu) / (1024**3), 3
-            ),
+            "peak_allocated_gib": {
+                str(gpu_id): round(torch.cuda.max_memory_allocated(gpu_id) / (1024**3), 3)
+                for gpu_id in args.gpus
+            },
+            "peak_reserved_gib": {
+                str(gpu_id): round(torch.cuda.max_memory_reserved(gpu_id) / (1024**3), 3)
+                for gpu_id in args.gpus
+            },
         })
         print(json.dumps(results[-1], sort_keys=True), flush=True)
 
     report = {
         "repo": args.repo,
         "revision": args.revision,
-        "gpu": args.gpu,
-        "gpu_name": torch.cuda.get_device_name(args.gpu),
+        "gpus": args.gpus,
+        "gpu_names": {str(gpu_id): torch.cuda.get_device_name(gpu_id) for gpu_id in args.gpus},
         "dtype": "bfloat16",
         "attn_implementation": "eager",
         "use_cache": False,
         "tensor_parallel_size": 1,
+        "model_parallel_strategy": "layer_sharding",
+        "grouped_moe": True,
         "checkpoint_artifacts": artifacts,
         "attention": attention,
         "largest_tested_success": ceiling,
