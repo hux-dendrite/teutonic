@@ -1121,6 +1121,7 @@ def model_input_device(model) -> torch.device:
 
 def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: EvalRequest, gpu_ids: list[int] | None = None, on_phase=None):
     from transformers import AutoModelForCausalLM
+    from transformers.modeling_utils import no_init_weights
 
     if on_phase:
         on_phase({"phase": f"{label}_load_start", "device": device, "snapshot": snapshot_dir})
@@ -1133,7 +1134,10 @@ def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: Eva
         torch.set_default_dtype(dtype)
         if on_phase:
             on_phase({"phase": f"{label}_init_start", "dtype": str(dtype)})
-        model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+        # Every parameter is populated by the strict checkpoint load below. Skip
+        # random initialization, which is prohibitively expensive for 104B models.
+        with no_init_weights():
+            model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
     finally:
         torch.set_default_dtype(old_dtype)
     if on_phase:
