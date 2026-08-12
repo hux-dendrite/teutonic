@@ -1121,7 +1121,7 @@ def model_input_device(model) -> torch.device:
 
 def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: EvalRequest, gpu_ids: list[int] | None = None, on_phase=None):
     from transformers import AutoModelForCausalLM
-    from transformers.modeling_utils import no_init_weights
+    from transformers.initialization import no_init_weights
 
     if on_phase:
         on_phase({"phase": f"{label}_load_start", "device": device, "snapshot": snapshot_dir})
