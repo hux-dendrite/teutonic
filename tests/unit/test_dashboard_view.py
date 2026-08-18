@@ -1,0 +1,282 @@
+from __future__ import annotations
+
+import io
+import json
+import math
+import unittest
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+
+import httpx
+from botocore.exceptions import ClientError
+
+from teutonic.dashboard.contracts import (
+    DashboardContractError,
+    canonical_dashboard_json,
+    validate_dashboard,
+)
+from teutonic.dashboard.market import MarketClient, MarketDataError, select_market
+from teutonic.dashboard.storage import DashboardObjectStore
+from teutonic.dashboard.service import DashboardViewService
+
+NOW = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
+DIGEST = "a" * 64
+
+
+def payload() -> dict:
+    stamp = "2026-08-18T12:00:00Z"
+    return {
+        "schema_version": 1,
+        "publication_id": "11111111-1111-4111-8111-111111111111",
+        "generated_at": stamp,
+        "updated_at": stamp,
+        "source_watermark": 7,
+        "chain": {
+            "name": "Teutonic",
+            "netuid": 306,
+            "generation": "test",
+            "competition": "quasar",
+            "finalized_start_block": None,
+            "last_finalized_block": None,
+            "observed_at": None,
+        },
+        "king": None,
+        "king_payout": {"weight": None, "alpha_per_hour": None, "usd_per_hour": None},
+        "king_chain": [],
+        "stats": {
+            "active_registrations": 0,
+            "queue_depth": 0,
+            "completed_evaluations": 0,
+            "reign_count": 0,
+        },
+        "current_eval": None,
+        "queue": [],
+        "history": [],
+        "weight_status": {
+            "state": None,
+            "cadence_blocks": None,
+            "last_attempted_block": None,
+            "next_due_block": None,
+            "latest_attempt_state": None,
+            "latest_finalized_block": None,
+            "error_code": None,
+            "requested_at": None,
+            "submitted_at": None,
+            "finalized_at": None,
+        },
+        "service_status": {
+            "overall": "offline",
+            "validator_phase": None,
+            "validator_heartbeat_age_seconds": None,
+            "current_evaluation_age_seconds": None,
+            "weight_delayed": False,
+            "services": [],
+        },
+        "market": None,
+    }
+
+
+def market(*, fetched_at: str = "2026-08-18T12:00:00Z", stale: bool = False) -> dict:
+    return {
+        "source": "market-fixture-v1",
+        "fetched_at": fetched_at,
+        "stale": stale,
+        "tao_price_usd": 412.5,
+        "tao_change_24h": -1.25,
+        "sn3_alpha_price_tao": 0.031,
+        "sn3_reg_burn_tao": 0.5,
+    }
+
+
+class FakeS3:
+    def __init__(self) -> None:
+        self.objects = {}
+        self.put_calls = 0
+
+    @staticmethod
+    def _missing():
+        return ClientError({"Error": {"Code": "NoSuchKey"}}, "HeadObject")
+
+    def head_object(self, *, Bucket, Key):
+        record = self.objects.get((Bucket, Key))
+        if record is None:
+            raise self._missing()
+        return {
+            "ContentLength": len(record["Body"]),
+            "Metadata": dict(record["Metadata"]),
+        }
+
+    def get_object(self, *, Bucket, Key):
+        record = self.objects.get((Bucket, Key))
+        if record is None:
+            raise self._missing()
+        return {"Body": io.BytesIO(record["Body"])}
+
+    def put_object(self, **kwargs):
+        self.put_calls += 1
+        self.objects[(kwargs["Bucket"], kwargs["Key"])] = dict(kwargs)
+        return {"ETag": "fixture"}
+
+
+class DashboardContractTests(unittest.TestCase):
+    def test_empty_payload_is_strict_and_valid(self):
+        body = canonical_dashboard_json(payload())
+        self.assertNotIn(b"NaN", body)
+        self.assertEqual(json.loads(body)["schema_version"], 1)
+
+    def test_non_finite_and_unknown_fields_are_rejected(self):
+        invalid = payload()
+        invalid["king_payout"]["weight"] = math.inf
+        with self.assertRaises(DashboardContractError):
+            canonical_dashboard_json(invalid)
+        invalid = payload()
+        invalid["private_bucket"] = "teutonic-private-models"
+        with self.assertRaises(DashboardContractError):
+            validate_dashboard(invalid)
+
+    def test_public_fixture_has_no_secret_bearing_shapes(self):
+        fixture = payload()
+        fixture["history"] = [
+            {
+                "challenge_id": "0123456789abcdef",
+                "hotkey": "public-hotkey",
+                "coldkey": "public-coldkey",
+                "uid": 7,
+                "baseline_hotkey": "king-hotkey",
+                "baseline_coldkey": None,
+                "baseline_uid": 0,
+                "verdict": "error",
+                "accepted": False,
+                "mu_hat": None,
+                "lcb": None,
+                "delta": None,
+                "avg_king_loss": None,
+                "avg_challenger_loss": None,
+                "wall_time_s": None,
+                "n_sequences_evaluated": None,
+                "n_sequences": None,
+                "early_stopped": False,
+                "error_code": "evaluation_failed",
+                "error_message": "The evaluation could not be completed.",
+                "policy_version": "policy-v1",
+                "dataset_version": "dataset-v1",
+                "timestamp": "2026-08-18T12:00:00Z",
+                "challenger_repo": None,
+                "challenger_digest": None,
+                "model_reference": None,
+                "publication_disposition": None,
+                "model_identity": "hidden_until_promotion",
+            }
+        ]
+        text = canonical_dashboard_json(fixture).decode()
+        forbidden = (
+            "secret_access_key",
+            "access_key_id",
+            "parent_token",
+            "private-models",
+            "ingest/",
+            "immutable_bucket",
+            "traceback",
+            "http://validator-internal",
+        )
+        for marker in forbidden:
+            self.assertNotIn(marker, text.lower())
+
+
+class MarketTests(unittest.TestCase):
+    def test_fetch_validates_source_shape_ranges_and_timestamp(self):
+        response = httpx.Response(200, json=market())
+        client = MarketClient(
+            "https://market.example/v1/dashboard",
+            source="market-fixture-v1",
+            transport=httpx.MockTransport(lambda _request: response),
+        )
+        self.assertFalse(client.fetch(now=NOW)["stale"])
+        bad = market()
+        bad["tao_price_usd"] = -1
+        client = MarketClient(
+            "https://market.example/v1/dashboard",
+            source="market-fixture-v1",
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=bad)),
+        )
+        with self.assertRaises(MarketDataError):
+            client.fetch(now=NOW)
+
+    def test_failure_reuses_bounded_stale_market_then_expires_it(self):
+        previous = market(fetched_at="2026-08-18T11:30:00Z")
+        selected = select_market(None, previous, now=NOW, maximum_stale=timedelta(hours=1))
+        self.assertTrue(selected["stale"])
+        self.assertIsNone(
+            select_market(
+                None,
+                previous,
+                now=NOW + timedelta(hours=1),
+                maximum_stale=timedelta(hours=1),
+            )
+        )
+
+
+class DashboardStorageTests(unittest.TestCase):
+    def test_complete_single_put_is_verified_and_unchanged_is_skipped(self):
+        s3 = FakeS3()
+        store = DashboardObjectStore(s3, bucket="teutonic-dash")
+        body = canonical_dashboard_json(payload())
+        first = store.publish(body, source_watermark=7)
+        second = store.publish(body, source_watermark=7)
+        self.assertEqual(first.state, "published")
+        self.assertEqual(second.state, "unchanged")
+        self.assertEqual(s3.put_calls, 1)
+        stored = s3.objects[("teutonic-dash", "dashboard.json")]
+        self.assertEqual(stored["ContentType"], "application/json; charset=utf-8")
+        self.assertEqual(store.previous_payload()["source_watermark"], 7)
+
+    def test_older_watermark_cannot_replace_newer_object(self):
+        s3 = FakeS3()
+        store = DashboardObjectStore(s3, bucket="teutonic-dash")
+        body = canonical_dashboard_json(payload())
+        store.publish(body, source_watermark=8)
+        older = deepcopy(payload())
+        older["source_watermark"] = 7
+        result = store.publish(canonical_dashboard_json(older), source_watermark=7)
+        self.assertEqual(result.state, "stale_skipped")
+        self.assertEqual(s3.put_calls, 1)
+
+
+class DashboardServiceTests(unittest.TestCase):
+    def test_market_failure_does_not_block_new_database_publication(self):
+        previous = payload()
+        previous["market"] = market(fetched_at="2026-08-18T11:30:00Z")
+
+        class Repository:
+            def project(self, *, now):
+                candidate = payload()
+                candidate["source_watermark"] = 8
+                return candidate
+
+        class Store:
+            def __init__(self):
+                self.published = None
+
+            def previous_payload(self):
+                return previous
+
+            def publish(self, body, *, source_watermark):
+                self.published = json.loads(body)
+                return source_watermark
+
+        class FailedMarket:
+            def fetch(self, *, now):
+                raise RuntimeError("private endpoint details must not escape")
+
+        store = Store()
+        result = DashboardViewService(
+            Repository(), store, market_client=FailedMarket()
+        ).publish_once(now=NOW)
+        self.assertEqual(result, 8)
+        self.assertEqual(store.published["source_watermark"], 8)
+        self.assertTrue(store.published["market"]["stale"])
+        self.assertNotIn("private endpoint", json.dumps(store.published))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -740,6 +740,7 @@ th:last-child, td:last-child { text-align: right; }
 
 </div>
 
+<script src="dashboard-v1.js"></script>
 <script>
 var STORAGE_ENDPOINTS = [
     ""
@@ -1049,10 +1050,10 @@ async function loadDatasetManifest() {
 // but no broken link out.
 function hotkeyCell(hotkey, coldkey) {
     if (!hotkey) return "--";
-    var label = short(hotkey, 16);
+    var label = esc(short(hotkey, 16));
     if (!coldkey) return label;
     return '<a href="https://taomarketcap.com/coldkey/' + encodeURIComponent(coldkey) +
-        '" target="_blank" style="color:var(--ink)">' + label + '</a>';
+        '" target="_blank" rel="noopener" style="color:var(--ink)">' + label + '</a>';
 }
 
 function timeAgo(iso) {
@@ -1189,8 +1190,8 @@ function hubUrl(repo, digest) {
     return digest && String(digest).indexOf("hf:") === 0 ? "https://huggingface.co/" + path : "https://hub.hippius.com/models/" + path;
 }
 function modelLink(repo, digest, label) {
-    if (!repo) return label || "--";
-    return '<a href="' + hubUrl(repo, digest) + '" target="_blank" style="color:var(--ink)">' + (label || repo) + '</a>';
+    if (!repo) return esc(label || "--");
+    return '<a href="' + esc(hubUrl(repo, digest)) + '" target="_blank" rel="noopener" style="color:var(--ink)">' + esc(label || repo) + '</a>';
 }
 function modelDigestLookup(d) {
     var byRepo = {};
@@ -1704,6 +1705,7 @@ async function pollBenchmarks() {
 }
 
 function render(d) {
+    var dashboardState = TeutonicDashboardV1.presentation(d);
     setDatasetManifestLink(DATASET_MANIFEST_URL);
     var datasetMeta = datasetMetaFromPayload(d);
     if (_datasetManifestData) {
@@ -1718,6 +1720,17 @@ function render(d) {
     });
 
     var mkt = d.market || {};
+    ["tao-price", "alpha-price", "reg-cost"].forEach(function(id) {
+        var el = document.getElementById(id);
+        el.title = dashboardState.marketStale ? "Market data is stale" : "";
+        el.style.opacity = dashboardState.marketStale ? "0.55" : "";
+    });
+    if (!dashboardState.marketAvailable) {
+        document.getElementById("tao-price").textContent = "--";
+        document.getElementById("tao-change").textContent = "";
+        document.getElementById("alpha-price").textContent = "--";
+        document.getElementById("reg-cost").textContent = "--";
+    }
     if (mkt.tao_price_usd) {
         document.getElementById("tao-price").textContent = "$" + mkt.tao_price_usd.toFixed(2);
         var ch = mkt.tao_change_24h;
@@ -1762,14 +1775,15 @@ function render(d) {
     kingLinkTop.textContent = kingRepo;
     var kingRevEl = document.getElementById("king-rev");
     if (kingDigest) {
-        kingRevEl.innerHTML = '@ <a href="' + hubUrl(kingRepo, kingDigest) + '" target="_blank" style="color:var(--ink);opacity:0.6">' + shortDigest(kingDigest) + '</a>';
+        kingRevEl.innerHTML = '@ <a href="' + esc(hubUrl(kingRepo, kingDigest)) + '" target="_blank" rel="noopener" style="color:var(--ink);opacity:0.6">' + esc(shortDigest(kingDigest)) + '</a>';
     } else {
         kingRevEl.textContent = "";
     }
     var healthEl = document.getElementById("king-health");
     healthEl.textContent = "\u25CF ";
-    healthEl.style.color = "#2a2";
-    healthEl.title = "King repo live";
+    var healthColors = { healthy: "#2a2", degraded: "#d88a00", stale: "#c66", offline: "#888" };
+    healthEl.style.color = healthColors[dashboardState.health] || "#888";
+    healthEl.title = "Validator status: " + dashboardState.health;
     var reignEl = document.getElementById("king-reign");
     reignEl.textContent = king.reign_number != null ? "REIGN #" + king.reign_number + (king.crowned_at ? " \u2014 " + king.crowned_at.slice(0, 16) + "Z" : "") : "";
 
@@ -2000,7 +2014,7 @@ function render(d) {
     var duelWr = document.getElementById("duel-wr");
     if (ev) {
         duelSec.classList.remove("duel-idle");
-        var duelName = modelRepo(ev) || short(ev.hotkey, 12);
+        var duelName = dashboardState.duelIdentity || modelRepo(ev) || short(ev.hotkey, 12);
         if (modelRepo(ev)) {
             duelLabel.innerHTML = modelLink(modelRepo(ev), modelDigestFor(modelRepo(ev), ev, repoDigests), duelName);
         } else {
@@ -2031,7 +2045,7 @@ function render(d) {
         var q = d.queue || [];
         if (q.length > 0) {
             duelSec.classList.remove("duel-idle");
-            var nextRepo = q[0].model_repo || "--";
+            var nextRepo = dashboardState.duelIdentity || q[0].model_repo || "--";
             if (q[0].model_repo) {
                 duelLabel.innerHTML = modelLink(q[0].model_repo, modelDigestFor(q[0].model_repo, q[0], repoDigests), nextRepo);
             } else {
@@ -2091,7 +2105,7 @@ function render(d) {
             var weightVal = e.weight != null ? e.weight : w.weight;
             var alphaVal = e.alpha_per_hour != null ? e.alpha_per_hour : w.alpha_per_hour;
             var usdVal = e.usd_per_hour != null ? e.usd_per_hour : w.usd_per_hour;
-            var repo = e.model_repo || "--";
+            var repo = e.model_repo || "Public model";
             var repoLink = e.model_repo ? modelLink(e.model_repo, modelDigestFor(e.model_repo, e, repoDigests), repo) : repo;
             var hkLink = hotkeyCell(e.hotkey, e.coldkey);
             var weightPct = (weightVal != null) ? (weightVal * 100).toFixed(1) + "%" : "--";
@@ -2119,7 +2133,7 @@ function render(d) {
         qEl.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:16px">Queue empty</td></tr>';
     } else {
         qEl.innerHTML = q.map(function(e) {
-            var repo = e.model_repo || "--";
+            var repo = e.model_repo || TeutonicDashboardV1.HIDDEN;
             var repoLink = e.model_repo ? modelLink(e.model_repo, modelDigestFor(e.model_repo, e, repoDigests), repo) : repo;
             var uid = e.uid != null ? e.uid : "--";
             return '<tr>' +
@@ -2127,7 +2141,7 @@ function render(d) {
                 '<td>' + repoLink + '</td>' +
                 '<td>' + hotkeyCell(e.hotkey, e.coldkey) + '</td>' +
                 '<td>' + (e.block ? '#' + e.block : '--') + '</td>' +
-                '<td>' + (e.reeval ? 'SEEN' : 'UNSEEN') + '</td>' +
+                '<td>' + esc(String(e.state || "queued").toUpperCase()) + '</td>' +
                 '</tr>';
         }).join("");
     }
@@ -2193,7 +2207,7 @@ function render(d) {
             var isErr = h.verdict === "error";
             var kl = h.avg_king_loss || 0;
             var cl = h.avg_challenger_loss || 0;
-            var repo = modelRepo(h) || "--";
+            var repo = modelRepo(h) || (h.model_identity === "hidden_until_promotion" ? TeutonicDashboardV1.HIDDEN : "--");
             var repoLink = modelRepo(h) ? modelLink(modelRepo(h), modelDigest(h), repo) : repo;
             var uid = h.uid != null ? h.uid : "--";
             var hasScores = !isErr && h.source_scores && Object.keys(h.source_scores).length > 0;
@@ -2209,7 +2223,7 @@ function render(d) {
                 if (errInfo) {
                     tip = errInfo.title + ": " + errInfo.message(h.error_detail || "");
                 } else {
-                    tip = (h.error_code || "error") + (h.error_detail ? ": " + h.error_detail : "");
+                    tip = h.error_message || h.error_code || "Evaluation failed";
                 }
                 tip = tip.replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
                 var label = errInfo ? errInfo.title.toUpperCase() : "ERROR";
@@ -2340,7 +2354,8 @@ function saveCachedEndpoint(url) {
 
 async function dashboardJson(response) {
     var text = await response.text();
-    return JSON.parse(text.replace(/:\s*(?:NaN|-?Infinity)(?=[,}\]])/g, ": null"));
+    var payload = JSON.parse(text);
+    return TeutonicDashboardV1.validate(payload);
 }
 
 // Race all endpoints in parallel; first 2xx JSON response wins.
