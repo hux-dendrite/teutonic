@@ -27,6 +27,7 @@ class PromotionWorker:
         max_attempts: int = 8,
         clock: Callable[[], datetime] | None = None,
         on_winner_promoted: Callable[[str], Any] | None = None,
+        on_heartbeat: Callable[[], None] | None = None,
         after_stage: Callable[[str, PromotionClaim], None] | None = None,
     ) -> None:
         if lease <= timedelta(0) or retry_base_delay < timedelta(0) or max_attempts < 1:
@@ -39,6 +40,7 @@ class PromotionWorker:
         self.max_attempts = max_attempts
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.on_winner_promoted = on_winner_promoted
+        self.on_heartbeat = on_heartbeat
         self.after_stage = after_stage
 
     def _stage(self, name: str, claim: PromotionClaim) -> None:
@@ -98,9 +100,11 @@ class PromotionWorker:
         return True
 
     def _run_claim(self, claim: PromotionClaim) -> None:
-        heartbeat = lambda: self.repository.heartbeat(
-            claim, now=self.clock(), lease=self.lease
-        )
+        def heartbeat() -> None:
+            self.repository.heartbeat(claim, now=self.clock(), lease=self.lease)
+            if self.on_heartbeat is not None:
+                self.on_heartbeat()
+
         destination = self.inspector.inventory(claim.public_bucket, claim.public_prefix)
         verify_inventory(claim.expected, destination, complete=False)
 

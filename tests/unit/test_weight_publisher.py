@@ -14,6 +14,8 @@ def plan(**changes) -> WeightPlan:
         "current_reign_id": "reign",
         "reign_number": 1,
         "policy_version": "policy-v1",
+        "payload_revision": 1,
+        "target_hotkeys": ("hotkey-1", "hotkey-3"),
         "target_uids": (1, 3),
         "normalized_weights": (0.75, 0.25),
         "payload_sha256": weight_payload_digest([1, 3], [0.75, 0.25]),
@@ -36,6 +38,8 @@ class WeightPlanTests(unittest.TestCase):
             {"normalized_weights": (math.nan, 0.25)},
             {"normalized_weights": (0.5, 0.25)},
             {"payload_sha256": "0" * 64},
+            {"payload_revision": 0},
+            {"target_hotkeys": ("hotkey-1",)},
         )
         for changes in cases:
             with self.subTest(changes=changes), self.assertRaises(WeightPlanError):

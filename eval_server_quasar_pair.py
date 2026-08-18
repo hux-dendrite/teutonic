@@ -26,7 +26,6 @@ import multiprocessing as mp
 import os
 import random
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -87,10 +86,9 @@ SHARD_CACHE_DIR = Path(
 )
 DEFAULT_PARQUET_GLOB = os.environ.get("TEUTONIC_PARQUET_GLOB", "/root/data/fineweb-edu-10BT/sample/10BT/**/*.parquet")
 DEFAULT_DATASET_SOURCE = os.environ.get("TEUTONIC_DATASET_SOURCE", "s3")
-DEFAULT_S3_ENDPOINT = os.environ.get("TEUTONIC_DS_ENDPOINT", "https://s3.hippius.com")
-DEFAULT_S3_BUCKET = os.environ.get("TEUTONIC_DS_BUCKET", "teutonic-sn3")
-DEFAULT_S3_PREFIX = os.environ.get("TEUTONIC_DS_PREFIX", "dataset/finewebedu/")
-DEFAULT_S3_AUTH_SOURCE = os.environ.get("TEUTONIC_DS_AUTH_SOURCE", "env")
+DEFAULT_S3_ENDPOINT = os.environ.get("TEUTONIC_DS_ENDPOINT", "")
+DEFAULT_S3_BUCKET = os.environ.get("TEUTONIC_DS_BUCKET", "")
+DEFAULT_S3_PREFIX = os.environ.get("TEUTONIC_DS_PREFIX", "")
 DEFAULT_S3_SHARD_CONTAINS = os.environ.get("TEUTONIC_DS_SHARD_CONTAINS", "/shards/")
 DEFAULT_S3_SHARD_SUFFIX = os.environ.get("TEUTONIC_DS_SHARD_SUFFIX", ".npy")
 DEFAULT_BATCH_SIZE = 1
@@ -159,12 +157,9 @@ class EvalRequest(BaseModel):
     s3_endpoint: str = DEFAULT_S3_ENDPOINT
     s3_bucket: str = DEFAULT_S3_BUCKET
     s3_prefix: str = DEFAULT_S3_PREFIX
-    s3_auth_source: str = DEFAULT_S3_AUTH_SOURCE
     s3_shard_contains: str = DEFAULT_S3_SHARD_CONTAINS
     s3_shard_suffix: str = DEFAULT_S3_SHARD_SUFFIX
     s3_max_shards: int = 0
-    s3_doppler_project: str = "arbos"
-    s3_doppler_config: str = "dev"
     seq_len: int = Field(default=DEFAULT_SEQ_LEN, ge=2)
     tokenizer_backend: Literal["huggingface", "gigatoken"] = DEFAULT_TOKENIZER_BACKEND
     attn_implementation: Literal["eager"] = DEFAULT_ATTN_IMPLEMENTATION
@@ -430,110 +425,6 @@ def materialize_model(repo_or_url: str, digest: str = "", on_phase=None) -> str:
     if not snapshot_has_required_files(path):
         raise RuntimeError(f"materialized R2 snapshot is incomplete: {path}")
     return str(path)
-
-
-def preflight_deps() -> None:
-    if not chain_config.ARCH_MODULE.endswith(".quasar"):
-        return
-    missing = []
-    for module_name, package_hint in (("causal_conv1d", "causal-conv1d"),):
-        try:
-            __import__(module_name)
-        except Exception:
-            missing.append((module_name, package_hint))
-    if missing:
-        installs = " ".join(pkg for _, pkg in missing)
-        modules = ", ".join(mod for mod, _ in missing)
-        raise RuntimeError(f"missing required module(s): {modules}; install with `pip install {installs}`")
-
-
-def patch_transformers_masking_compat() -> None:
-    if not chain_config.ARCH_MODULE.endswith(".quasar"):
-        return
-    try:
-        import transformers.masking_utils as masking_utils
-    except Exception:
-        return
-    fn = getattr(masking_utils, "create_causal_mask", None)
-    if fn is None or getattr(fn, "_quasar_compat", False):
-        return
-    try:
-        params = inspect.signature(fn).parameters
-    except Exception:
-        return
-    if "cache_position" in params:
-        return
-
-    def create_causal_mask_compat(*args, **kwargs):
-        cache_position = kwargs.pop("cache_position", None)
-        past_key_values = kwargs.get("past_key_values")
-        original_get_mask_sizes = None
-        if cache_position is not None and hasattr(past_key_values, "get_mask_sizes"):
-            original_get_mask_sizes = past_key_values.get_mask_sizes
-
-            def get_mask_sizes_compat(self, query_length, layer_idx):
-                try:
-                    return original_get_mask_sizes(cache_position, layer_idx)
-                except Exception:
-                    return int(query_length), 0
-
-            past_key_values.get_mask_sizes = types.MethodType(get_mask_sizes_compat, past_key_values)
-        try:
-            return fn(*args, **kwargs)
-        finally:
-            if original_get_mask_sizes is not None:
-                past_key_values.get_mask_sizes = original_get_mask_sizes
-
-    create_causal_mask_compat._quasar_compat = True
-    masking_utils.create_causal_mask = create_causal_mask_compat
-    log.info("patched transformers.masking_utils.create_causal_mask for Quasar")
-
-
-_triton_autotune_lock = threading.Lock()
-
-
-def patch_triton_autotuner_thread_safety() -> None:
-    """Make triton's Autotuner.run() safe to call from multiple threads at once.
-
-    King and challenger share the same compiled fla kernels (e.g. l2norm_fwd_kernel
-    inside chunk_gated_delta_rule), and run_eval's ThreadPoolExecutor drives their
-    forward passes concurrently. triton.runtime.autotuner.Autotuner.cache is a plain
-    dict with no locking, so two threads racing a cache-miss on the same kernel can
-    corrupt the in-flight entry and crash with "TypeError: 'NoneType' object is not
-    a mapping". King and challenger run on disjoint GPUs with independent CUDA
-    streams, so serializing the brief Python-side dispatch doesn't block actual GPU
-    overlap.
-    """
-    if not chain_config.ARCH_MODULE.endswith(".quasar"):
-        return
-
-    from triton.runtime.autotuner import Autotuner
-
-    if getattr(Autotuner, "_quasar_thread_safe", False):
-        return
-
-    original_run = Autotuner.run
-
-    def run_locked(self, *args, **kwargs):
-        with _triton_autotune_lock:
-            return original_run(self, *args, **kwargs)
-
-    Autotuner.run = run_locked
-    Autotuner._quasar_thread_safe = True
-    log.info("patched triton.runtime.autotuner.Autotuner.run for thread-safety")
-
-
-def patch_loaded_quasar_modules() -> None:
-    try:
-        import transformers.masking_utils as masking_utils
-    except Exception:
-        return
-    patched_fn = getattr(masking_utils, "create_causal_mask", None)
-    if patched_fn is None:
-        return
-    for name, module in list(sys.modules.items()):
-        if name.endswith("modeling_qwen3_5") and hasattr(module, "create_causal_mask"):
-            setattr(module, "create_causal_mask", patched_fn)
 
 
 CONFIG_MATCH_KEYS = (
@@ -1171,8 +1062,6 @@ def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: Eva
     if torch.cuda.is_available():
         for gpu_id in effective_ids:
             torch.cuda.synchronize(gpu_id)
-    if chain_config.ARCH_MODULE.endswith(".quasar"):
-        patch_loaded_quasar_modules()
     if getattr(config, "model_type", "") == "mimo_v2":
         enable_grouped_mimo_moe(model)
     model.eval()
@@ -1223,99 +1112,16 @@ def expand_globs(patterns: list[str]) -> list[str]:
     return files
 
 
-def doppler_secret(name: str, project: str, config: str) -> str:
-    return subprocess.check_output(
-        ["doppler", "secrets", "get", name, "--project", project, "--config", config, "--plain"],
-        text=True,
-    ).strip()
-
-
-def first_env(names: tuple[str, ...]) -> str | None:
-    for name in names:
-        value = (os.environ.get(name) or "").strip()
-        if value:
-            return value
-    return None
-
-
-def s3_env_credentials(*, include_generic: bool = True) -> tuple[str, str] | None:
-    access_names = [
-        "TEUTONIC_DS_ACCESS_KEY",
-    ]
-    secret_names = [
-        "TEUTONIC_DS_SECRET_KEY",
-    ]
-    if include_generic:
-        access_names.extend((
-            "HIPPIUS_ACCESS_KEY",
-            "HIPPIUS_ACCESS_KEY_ID",
-            "AWS_ACCESS_KEY_ID",
-        ))
-        secret_names.extend((
-            "HIPPIUS_SECRET_KEY",
-            "HIPPIUS_SECRET_ACCESS_KEY",
-            "AWS_SECRET_ACCESS_KEY",
-        ))
-    access = first_env(tuple(access_names))
-    secret = first_env(tuple(secret_names))
-    if access and secret:
-        return access, secret
-    return None
-
-
-def s3_doppler_credentials(req: EvalRequest) -> tuple[str, str]:
-    return (
-        doppler_secret("HIPPIUS_ACCESS_KEY", req.s3_doppler_project, req.s3_doppler_config),
-        doppler_secret("HIPPIUS_SECRET_KEY", req.s3_doppler_project, req.s3_doppler_config),
-    )
-
-
-def s3_credentials(req: EvalRequest) -> tuple[str, str]:
-    source = (req.s3_auth_source or "doppler").lower()
-    if source == "env":
-        creds = s3_env_credentials(include_generic=True)
-        if creds:
-            return creds
-        raise RuntimeError("s3_auth_source='env' but no S3 credential env pair was found")
-    if source == "doppler":
-        try:
-            return s3_doppler_credentials(req)
-        except Exception as exc:
-            raise RuntimeError(
-                "Could not resolve S3 credentials via Doppler. Make "
-                "`doppler secrets get HIPPIUS_ACCESS_KEY/HIPPIUS_SECRET_KEY "
-                f"--project {req.s3_doppler_project} --config {req.s3_doppler_config}` available, "
-                "or pass s3_auth_source='env' with TEUTONIC_DS_ACCESS_KEY/"
-                "TEUTONIC_DS_SECRET_KEY."
-            ) from exc
-    if source != "auto":
-        raise ValueError("s3_auth_source must be one of: doppler, env, auto")
-
-    explicit = s3_env_credentials(include_generic=False)
-    if explicit:
-        return explicit
-    try:
-        return s3_doppler_credentials(req)
-    except Exception:
-        generic = s3_env_credentials(include_generic=True)
-        if generic:
-            return generic
-        raise
-
-
 def make_s3_client(req: EvalRequest):
     import boto3
+    from botocore import UNSIGNED
     from botocore.config import Config as BotoConfig
 
-    access, secret = s3_credentials(req)
     return boto3.client(
         "s3",
-        endpoint_url=req.s3_endpoint,
-        aws_access_key_id=access,
-        aws_secret_access_key=secret,
-        region_name="decentralized",
+        endpoint_url=req.s3_endpoint or None,
         config=BotoConfig(
-            signature_version="s3v4",
+            signature_version=UNSIGNED,
             s3={"addressing_style": "path"},
             retries={"max_attempts": DEFAULT_S3_CLIENT_MAX_ATTEMPTS, "mode": "adaptive"},
             connect_timeout=30,
@@ -1884,8 +1690,6 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
     pipeline = None
     loaded_key = None
     try:
-        patch_transformers_masking_compat()
-        patch_triton_autotuner_thread_safety()
         while True:
             command = command_queue.get()
             if command["type"] == "shutdown":
@@ -2431,10 +2235,6 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
         req = internal_request_from_v2(protocol_request, king_snapshot, challenger_snapshot)
         limits_meta = apply_eval_limits(req, eval_id)
         on_phase({"phase": "limits_applied", **limits_meta})
-        preflight_deps()
-        patch_transformers_masking_compat()
-        patch_triton_autotuner_thread_safety()
-
         check_eval_runtime(t0)
         king_snapshot = materialize_model(req.king_repo, req.king_digest, on_phase=on_phase)
         check_eval_runtime(t0)

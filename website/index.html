@@ -751,16 +751,8 @@ var HTML_ENDPOINTS = STORAGE_ENDPOINTS.map(function(base) { return base + "/inde
 var DATASET_MANIFEST_ENDPOINTS = [
     "https://s3.hippius.com/teutonic-sn3/" + DATASET_MANIFEST_KEY
 ];
-var BENCH_ENDPOINTS = [
-    "https://us-east-1.hippius.com/teutonic-sn3/king-benchmark-daily/all-kings/latest.json",
-    "https://eu-central-1.hippius.com/teutonic-sn3/king-benchmark-daily/all-kings/latest.json",
-    "https://s3.hippius.com/teutonic-sn3/king-benchmark-daily/all-kings/latest.json"
-];
-var BENCH_INDEX_ENDPOINTS = [
-    "https://us-east-1.hippius.com/teutonic-sn3/king-benchmark-daily/all-kings/index.json",
-    "https://eu-central-1.hippius.com/teutonic-sn3/king-benchmark-daily/all-kings/index.json",
-    "https://s3.hippius.com/teutonic-sn3/king-benchmark-daily/all-kings/index.json"
-];
+var BENCH_ENDPOINTS = [];
+var BENCH_INDEX_ENDPOINTS = [];
 var BENCHMARK_ORDER = [
     { name: "MMLU", task: "mmlu", fewshot: 0 },
     { name: "BBH", task: "leaderboard_bbh", fewshot: 3 },
@@ -1185,9 +1177,9 @@ function hubUrl(repo, digest) {
     if (!repo) return "#";
     if (String(repo).indexOf("http://") === 0 || String(repo).indexOf("https://") === 0) return repo;
     var parts = repo.split("/");
-    if (parts.length < 2) return digest && String(digest).indexOf("hf:") === 0 ? "https://huggingface.co" : "https://hub.hippius.com/models";
+    if (parts.length < 2) return "https://huggingface.co";
     var path = parts[0] + "/" + parts.slice(1).join("/");
-    return digest && String(digest).indexOf("hf:") === 0 ? "https://huggingface.co/" + path : "https://hub.hippius.com/models/" + path;
+    return "https://huggingface.co/" + path;
 }
 function modelLink(repo, digest, label) {
     if (!repo) return esc(label || "--");
@@ -1659,6 +1651,10 @@ function renderBenchmarkHistory() {
 }
 
 function pollBenchmarkHistory() {
+    if (!BENCH_INDEX_ENDPOINTS.length) {
+        renderBenchmarkHistory();
+        return;
+    }
     var failures = 0;
     var buster = Date.now();
     BENCH_INDEX_ENDPOINTS.forEach(function(url) {
@@ -1684,6 +1680,10 @@ function pollBenchmarkHistory() {
 }
 
 async function pollBenchmarks() {
+    if (!BENCH_ENDPOINTS.length) {
+        renderBenchmarks(null);
+        return;
+    }
     var failures = 0;
     var buster = Date.now();
     BENCH_ENDPOINTS.forEach(function(url) {

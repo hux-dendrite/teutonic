@@ -602,9 +602,13 @@ CREATE TABLE control_plane.weight_publications (
     competition_id uuid NOT NULL,
     source_reign_id uuid NOT NULL,
     policy_version text NOT NULL,
+    policy_hotkeys text[] NOT NULL,
+    target_hotkeys text[] NOT NULL,
     target_uids integer[] NOT NULL,
     normalized_weights double precision[] NOT NULL,
     payload_sha256 character(64) NOT NULL,
+    payload_revision integer DEFAULT 1 NOT NULL,
+    mapping_finalized_block bigint NOT NULL,
     idempotency_key text NOT NULL,
     state text NOT NULL,
     owner_instance_id text,
@@ -637,9 +641,13 @@ CREATE TABLE control_plane.weight_publications (
     CONSTRAINT weight_publications_last_attempted_block_check CHECK ((last_attempted_block >= 0)),
     CONSTRAINT weight_publications_next_due_block_check CHECK ((next_due_block >= 0)),
     CONSTRAINT weight_publications_payload_sha256_check CHECK ((payload_sha256 ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT weight_publications_payload_revision_check CHECK ((payload_revision > 0)),
+    CONSTRAINT weight_publications_mapping_finalized_block_check CHECK ((mapping_finalized_block >= 0)),
     CONSTRAINT weight_publications_state_check CHECK ((state = ANY (ARRAY['requested'::text, 'claimed'::text, 'submitting'::text, 'submitted'::text, 'included'::text, 'finalized'::text, 'retry_pending'::text, 'failed'::text, 'superseded'::text]))),
     CONSTRAINT weight_publications_target_uids_check CHECK ((cardinality(target_uids) > 0)),
     CONSTRAINT weight_publications_target_uids_check1 CHECK ((0 <= ALL (target_uids))),
+    CONSTRAINT weight_publications_policy_hotkeys_check CHECK ((cardinality(policy_hotkeys) > 0)),
+    CONSTRAINT weight_publications_target_hotkeys_check CHECK ((cardinality(target_hotkeys) = cardinality(target_uids))),
     CONSTRAINT weight_supersession_complete CHECK (((state <> 'superseded'::text) OR ((superseded_by IS NOT NULL) AND (superseded_at IS NOT NULL))))
 );
 
@@ -657,7 +665,7 @@ CREATE VIEW control_plane.dashboard_current_king WITH (security_barrier='true') 
     r.reign_number,
     r.hotkey,
     identity.coldkey,
-    r.uid,
+    COALESCE(current_weights.target_uids[array_position(current_weights.target_hotkeys, r.hotkey)], r.uid) AS uid,
     public_upload.model_name AS public_model_name,
     r.model_digest AS public_model_digest,
     r.public_prefix AS public_model_reference,
@@ -669,7 +677,7 @@ CREATE VIEW control_plane.dashboard_current_king WITH (security_barrier='true') 
     (cause.verdict_summary ->> 'avg_king_loss'::text) AS avg_king_loss,
     (cause.verdict_summary ->> 'avg_challenger_loss'::text) AS avg_challenger_loss,
     (cause.verdict_summary ->> 'wall_time_s'::text) AS wall_time_s,
-    current_weights.normalized_weights[array_position(current_weights.target_uids, r.uid)] AS current_weight
+    current_weights.normalized_weights[array_position(current_weights.target_hotkeys, r.hotkey)] AS current_weight
    FROM (((((control_plane.competitions c
      JOIN control_plane.king_reigns r ON ((r.reign_id = c.current_reign_id)))
      LEFT JOIN control_plane.uploads public_upload ON ((public_upload.upload_id = r.accepted_upload_id)))
@@ -825,7 +833,10 @@ CREATE VIEW control_plane.dashboard_king_reigns WITH (security_barrier='true') A
     r.reign_number,
     r.hotkey,
     identity.coldkey,
-    r.uid,
+        CASE
+            WHEN (c.current_reign_id = r.reign_id) THEN COALESCE(current_weights.target_uids[array_position(current_weights.target_hotkeys, r.hotkey)], r.uid)
+            ELSE r.uid
+        END AS uid,
     public_upload.model_name AS public_model_name,
     r.model_digest AS public_model_digest,
     r.public_prefix AS public_model_reference,
@@ -838,7 +849,7 @@ CREATE VIEW control_plane.dashboard_king_reigns WITH (security_barrier='true') A
             ELSE 'replaced'::text
         END AS replacement_reason,
         CASE
-            WHEN (c.current_reign_id = r.reign_id) THEN current_weights.normalized_weights[array_position(current_weights.target_uids, r.uid)]
+            WHEN (c.current_reign_id = r.reign_id) THEN current_weights.normalized_weights[array_position(current_weights.target_hotkeys, r.hotkey)]
             ELSE NULL::double precision
         END AS current_weight
    FROM ((((control_plane.king_reigns r
@@ -988,6 +999,11 @@ CREATE TABLE control_plane.weight_submission_attempts (
     sequence integer NOT NULL,
     scheduled_block bigint NOT NULL,
     idempotency_key text NOT NULL,
+    payload_revision integer NOT NULL,
+    target_hotkeys text[] NOT NULL,
+    target_uids integer[] NOT NULL,
+    normalized_weights double precision[] NOT NULL,
+    payload_sha256 character(64) NOT NULL,
     state text NOT NULL,
     owner_instance_id text,
     lease_expires_at timestamp with time zone,
@@ -1016,10 +1032,16 @@ CREATE TABLE control_plane.weight_submission_attempts (
     CONSTRAINT weight_submission_attempts_finalized_block_check CHECK ((finalized_block >= 0)),
     CONSTRAINT weight_submission_attempts_included_block_check CHECK ((included_block >= 0)),
     CONSTRAINT weight_submission_attempts_observed_last_update_check CHECK ((observed_last_update >= 0)),
+    CONSTRAINT weight_submission_attempts_payload_revision_check CHECK ((payload_revision > 0)),
+    CONSTRAINT weight_submission_attempts_payload_sha256_check CHECK ((payload_sha256 ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT weight_submission_attempts_publisher_mode_check CHECK ((publisher_mode = ANY (ARRAY['dry_run'::text, 'active'::text]))),
     CONSTRAINT weight_submission_attempts_scheduled_block_check CHECK ((scheduled_block >= 0)),
     CONSTRAINT weight_submission_attempts_sequence_check CHECK ((sequence > 0)),
     CONSTRAINT weight_submission_attempts_state_check CHECK ((state = ANY (ARRAY['claimed'::text, 'submitting'::text, 'submitted'::text, 'included'::text, 'finalized'::text, 'retry_pending'::text, 'failed'::text, 'superseded'::text]))),
+    CONSTRAINT weight_submission_attempts_target_uids_check CHECK ((cardinality(target_uids) > 0)),
+    CONSTRAINT weight_submission_attempts_target_uids_check1 CHECK ((0 <= ALL (target_uids))),
+    CONSTRAINT weight_submission_attempts_target_hotkeys_check CHECK ((cardinality(target_hotkeys) = cardinality(target_uids))),
+    CONSTRAINT weight_submission_attempts_payload_cardinality_check CHECK ((cardinality(target_uids) = cardinality(normalized_weights))),
     CONSTRAINT weight_submission_attempts_submission_expires_block_check CHECK ((submission_expires_block >= 0)),
     CONSTRAINT weight_submission_attempts_submission_started_block_check CHECK ((submission_started_block >= 0)),
     CONSTRAINT weight_submission_attempts_try_count_check CHECK ((try_count >= 0))

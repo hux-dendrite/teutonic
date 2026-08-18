@@ -30,6 +30,8 @@ class WeightPlan:
     current_reign_id: str
     reign_number: int
     policy_version: str
+    payload_revision: int
+    target_hotkeys: tuple[str, ...]
     target_uids: tuple[int, ...]
     normalized_weights: tuple[float, ...]
     payload_sha256: str
@@ -45,6 +47,14 @@ class WeightPlan:
     extrinsic_id: str | None = None
 
     def validate(self, *, uid_count: int | None = None) -> None:
+        if self.payload_revision < 1:
+            raise WeightPlanError("weight payload revision must be positive")
+        if (
+            not self.target_hotkeys
+            or len(self.target_hotkeys) != len(self.target_uids)
+            or len(set(self.target_hotkeys)) != len(self.target_hotkeys)
+        ):
+            raise WeightPlanError("weight plan hotkey mapping is invalid")
         if not self.target_uids or len(self.target_uids) != len(self.normalized_weights):
             raise WeightPlanError("weight plan cardinality is invalid")
         if len(set(self.target_uids)) != len(self.target_uids):

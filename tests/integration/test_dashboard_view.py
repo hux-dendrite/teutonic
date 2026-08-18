@@ -76,6 +76,7 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         hotkey = "5" + "H" * 47
         coldkey = "5" + "C" * 47
         king_hotkey = "5" + "K" * 47
+        self.king_hotkey = king_hotkey
         snapshot = self.owner.execute(
             """
             INSERT INTO control_plane.metagraph_snapshots (
@@ -189,12 +190,14 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         self.owner.execute(
             """
             INSERT INTO control_plane.weight_publications (
-                competition_id, source_reign_id, policy_version, target_uids,
-                normalized_weights, payload_sha256, idempotency_key, state
-            ) VALUES (%s, %s, 'weights-v1', ARRAY[0], ARRAY[1.0]::double precision[],
-                      %s, 'phase8-weight', 'requested')
+                competition_id, source_reign_id, policy_version, policy_hotkeys,
+                target_hotkeys, target_uids, normalized_weights, payload_sha256,
+                mapping_finalized_block, idempotency_key, state
+            ) VALUES (%s, %s, 'weights-v1', %s, %s, ARRAY[0],
+                      ARRAY[1.0]::double precision[], %s, 900,
+                      'phase8-weight', 'requested')
             """,
-            (competition, reign, "6" * 64),
+            (competition, reign, [king_hotkey], [king_hotkey], "6" * 64),
         )
         self.owner.execute(
             """
@@ -228,6 +231,20 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             "immutable_bucket",
         ):
             self.assertNotIn(marker.lower(), text.lower())
+
+    def test_current_king_uses_remapped_uid_from_latest_weight_revision(self):
+        self.owner.execute(
+            """
+            UPDATE control_plane.weight_publications
+               SET target_hotkeys = %s, target_uids = ARRAY[19], payload_revision = 2,
+                   mapping_finalized_block = 1001
+            """,
+            ([self.king_hotkey],),
+        )
+        payload = self.repository.project(now=NOW)
+        self.assertEqual(payload["king"]["uid"], 19)
+        self.assertEqual(payload["king_payout"]["weight"], 1.0)
+        self.assertEqual(payload["king_chain"][0]["uid"], 19)
 
     def test_fresh_database_projects_a_valid_empty_state(self):
         self.owner.execute(

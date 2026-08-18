@@ -176,9 +176,13 @@ class WeightPublicationRepository:
                     """
                     INSERT INTO control_plane.weight_submission_attempts (
                         weight_publication_id, sequence, scheduled_block,
-                        idempotency_key, state, owner_instance_id, lease_expires_at,
-                        try_count, claimed_at
-                    ) VALUES (%s, %s, %s, %s, 'claimed', %s, %s, 1, %s)
+                        idempotency_key, payload_revision, target_hotkeys, target_uids,
+                        normalized_weights, payload_sha256, state,
+                        owner_instance_id, lease_expires_at, try_count, claimed_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        'claimed', %s, %s, 1, %s
+                    )
                     RETURNING *
                     """,
                     (
@@ -186,6 +190,11 @@ class WeightPublicationRepository:
                         sequence,
                         current_block,
                         f"{publication['idempotency_key']}:attempt:{sequence}",
+                        publication["payload_revision"],
+                        publication["target_hotkeys"],
+                        publication["target_uids"],
+                        publication["normalized_weights"],
+                        publication["payload_sha256"],
                         self.instance_id,
                         now + lease,
                         now,
@@ -227,9 +236,11 @@ class WeightPublicationRepository:
             current_reign_id=str(publication["current_reign_id"]),
             reign_number=int(publication["reign_number"]),
             policy_version=publication["policy_version"],
-            target_uids=tuple(int(uid) for uid in publication["target_uids"]),
-            normalized_weights=tuple(float(weight) for weight in publication["normalized_weights"]),
-            payload_sha256=publication["payload_sha256"],
+            payload_revision=int(attempt["payload_revision"]),
+            target_hotkeys=tuple(str(value) for value in attempt["target_hotkeys"]),
+            target_uids=tuple(int(uid) for uid in attempt["target_uids"]),
+            normalized_weights=tuple(float(weight) for weight in attempt["normalized_weights"]),
+            payload_sha256=attempt["payload_sha256"],
             idempotency_key=publication["idempotency_key"],
             previous_state=previous_state,
             attempt_count=int(attempt["try_count"]),

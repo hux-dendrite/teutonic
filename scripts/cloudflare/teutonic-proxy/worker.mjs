@@ -7,16 +7,9 @@
 // Worker:  teutonic-proxy
 // Deploy:  scripts/cloudflare/deploy.sh
 //
-// IMPORTANT: The old Hippius origin was buggy in two ways that this worker
-// compensates for if similar storage metadata issues recur:
-//   1) Last-Modified is a static timestamp that never updates on PUT, so a
-//      browser's If-Modified-Since revalidation always returns 304 and the
-//      browser keeps showing whatever HTML body it cached the first time.
-//   2) Hippius forces Cache-Control: public, max-age=300, sw-revalidate=60
-//      regardless of what we set when uploading.
-// For HTML/JSON/markdown we strip the conditional-request headers on the
-// way out, drop Last-Modified on the way back, and rewrite Cache-Control to
-// no-cache so browsers always revalidate via ETag (which IS correct).
+// For HTML/JSON/markdown we strip conditional-request headers on the way out,
+// drop Last-Modified on the way back, and disable caching so live dashboard
+// state is never hidden by stale browser or intermediary responses.
 
 const ORIGIN = "https://pub-e2009eec1ca9488699de6263f40bb7e7.r2.dev";
 
@@ -29,19 +22,11 @@ const NO_CACHE_TYPES = [
   /^text\/plain/i,
 ];
 
-// Conditional-request headers that we never want to forward to Hippius,
-// because Hippius's static Last-Modified would turn them into bogus 304s.
+// Conditional-request headers are not forwarded for live dashboard assets.
 const REQ_STRIP = ["if-modified-since", "if-none-match"];
 
 // Upstream noise we don't need to expose.
-const RESP_STRIP = [
-  "x-hippius-gateway-time-ms",
-  "x-hippius-api-time-ms",
-  "x-hippius-ray-id",
-  "x-hippius-access-mode",
-  "x-hippius-source",
-  "server",
-];
+const RESP_STRIP = ["server"];
 
 export default {
   async fetch(request) {

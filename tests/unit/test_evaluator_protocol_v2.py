@@ -100,6 +100,20 @@ class EvaluatorProtocolV2ContractTests(unittest.TestCase):
             {"huggingface_hub", "hippius_hub", "model_store"}.isdisjoint(imported)
         )
 
+    def test_evaluator_has_no_dataset_authentication(self) -> None:
+        source = (Path(__file__).parents[2] / "eval_server_quasar_pair.py").read_text()
+        forbidden = (
+            "HIPPIUS_ACCESS_KEY",
+            "HIPPIUS_SECRET_KEY",
+            "TEUTONIC_DS_ACCESS_KEY",
+            "TEUTONIC_DS_SECRET_KEY",
+            "s3_auth_source",
+            "s3_doppler_project",
+            "s3_doppler_config",
+        )
+        self.assertTrue(all(value not in source for value in forbidden))
+        self.assertIn("signature_version=UNSIGNED", source)
+
     def test_multi_source_launcher_exports_the_protocol_v2_app(self) -> None:
         app = object()
         base = SimpleNamespace(app=app)

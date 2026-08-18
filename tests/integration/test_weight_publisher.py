@@ -161,14 +161,19 @@ class WeightPublisherIntegrationTests(unittest.TestCase):
         publication = self.connection.execute(
             """
             INSERT INTO control_plane.weight_publications (
-                competition_id, source_reign_id, policy_version, target_uids,
-                normalized_weights, payload_sha256, idempotency_key, state
-            ) VALUES (%s, %s, 'policy-v1', %s, ARRAY[1.0], %s, %s, 'requested')
+                competition_id, source_reign_id, policy_version, policy_hotkeys,
+                target_hotkeys, target_uids, normalized_weights, payload_sha256,
+                mapping_finalized_block, idempotency_key, state
+            ) VALUES (
+                %s, %s, 'policy-v1', %s, %s, %s, ARRAY[1.0], %s, 100, %s, 'requested'
+            )
             RETURNING weight_publication_id
             """,
             (
                 competition,
                 reign,
+                [f"king-{number}"],
+                [f"king-{number}"],
                 [number + 1],
                 payload if digest_valid else "f" * 64,
                 f"publish-weights:{reign}",
@@ -221,6 +226,35 @@ class WeightPublisherIntegrationTests(unittest.TestCase):
         ).fetchall()
         self.assertEqual(attempts, [(1, 1000, "finalized"), (2, 1101, "finalized")])
         self.assertEqual(self.chain.submit_calls, 2)
+
+    def test_uid_remap_revision_keeps_prior_attempt_payload_immutable(self) -> None:
+        worker = self.worker()
+        self.assertTrue(worker.run_one(propagate=True))
+        remapped_digest = weight_payload_digest([7], [1.0])
+        self.connection.execute(
+            """
+            UPDATE control_plane.weight_publications
+               SET target_uids = ARRAY[7], normalized_weights = ARRAY[1.0],
+                   target_hotkeys = ARRAY['king-0'],
+                   payload_sha256 = %s, payload_revision = 2,
+                   mapping_finalized_block = 1001, state = 'requested',
+                   next_due_block = 1001, finalized_block = NULL,
+                   submitted_at = NULL, included_at = NULL, finalized_at = NULL
+             WHERE weight_publication_id = %s
+            """,
+            (remapped_digest, self.publication_id),
+        )
+        self.assertTrue(worker.run_one(propagate=True))
+        attempts = self.connection.execute(
+            """
+            SELECT sequence, payload_revision, target_hotkeys, target_uids, payload_sha256
+              FROM control_plane.weight_submission_attempts
+             ORDER BY sequence
+            """
+        ).fetchall()
+        self.assertEqual(attempts[0][0:4], (1, 1, ["king-0"], [1]))
+        self.assertEqual(attempts[1][0:4], (2, 2, ["king-0"], [7]))
+        self.assertNotEqual(attempts[0][4], attempts[1][4])
 
     def test_restart_after_external_return_does_not_resubmit(self) -> None:
         def crash(name, _plan, _receipt):

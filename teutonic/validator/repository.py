@@ -536,17 +536,233 @@ class ValidatorRepository:
             if row is None:
                 raise LeaseLostError("evaluation cannot be adopted")
 
+    def promotion_weight_hotkeys(self, promotion_id: str, *, limit: int = 5) -> tuple[str, ...]:
+        """Return the promoted challenger followed by the recent king hotkeys.
+
+        UID resolution deliberately happens against a finalized metagraph in the
+        runtime. PostgreSQL supplies only the durable reign ordering here.
+        """
+        self._require_lock()
+        if limit < 1:
+            raise ValueError("weight hotkey limit must be positive")
+        with self.connection.cursor(row_factory=dict_row) as cursor:
+            row = cursor.execute(
+                """
+                SELECT u.signalling_hotkey, e.competition_id
+                  FROM control_plane.model_promotions p
+                  JOIN control_plane.evaluations e ON e.evaluation_id = p.evaluation_id
+                  JOIN control_plane.uploads u ON u.upload_id = p.upload_id
+                 WHERE p.promotion_id = %s
+                   AND p.disposition = 'winner' AND p.state = 'promoted'
+                """,
+                (promotion_id,),
+            ).fetchone()
+            if row is None:
+                raise SchedulerInvariantError("only a promoted winner has weight targets")
+            reigns = cursor.execute(
+                """
+                SELECT hotkey
+                  FROM control_plane.king_reigns
+                 WHERE competition_id = %s
+                 ORDER BY reign_number DESC
+                 LIMIT %s
+                """,
+                (row["competition_id"], limit),
+            ).fetchall()
+        ordered = [row["signalling_hotkey"], *(item["hotkey"] for item in reigns)]
+        return tuple(dict.fromkeys(ordered))[:limit]
+
+    def current_weight_policy(self) -> Mapping[str, Any] | None:
+        self._require_lock()
+        with self.connection.cursor(row_factory=dict_row) as cursor:
+            row = cursor.execute(
+                """
+                SELECT w.weight_publication_id, w.payload_revision,
+                       w.mapping_finalized_block, w.policy_hotkeys
+                  FROM control_plane.competitions c
+                  JOIN control_plane.weight_publications w
+                    ON w.source_reign_id = c.current_reign_id
+                 WHERE c.netuid = %s AND c.chain_generation = %s AND c.name = %s
+                """,
+                (self.netuid, self.chain_generation, self.competition),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "publication_id": str(row["weight_publication_id"]),
+            "payload_revision": int(row["payload_revision"]),
+            "mapping_finalized_block": int(row["mapping_finalized_block"]),
+            "policy_hotkeys": tuple(str(value) for value in row["policy_hotkeys"]),
+        }
+
+    def refresh_current_weight_plan(
+        self,
+        *,
+        publication_id: str,
+        expected_revision: int,
+        mapping_finalized_block: int,
+        target_hotkeys: Sequence[str],
+        target_uids: Sequence[int],
+        normalized_weights: Sequence[float],
+        now: datetime,
+    ) -> bool:
+        """Create a new frozen payload revision after a finalized UID remap.
+
+        An in-flight attempt always keeps its original payload. Refresh is deferred
+        until that attempt becomes terminal, and every attempt stores its own payload.
+        """
+        self._require_lock()
+        if (
+            len(target_uids) != len(normalized_weights)
+            or len(target_hotkeys) != len(target_uids)
+            or not target_uids
+        ):
+            raise ValueError("weight target and value arrays must be non-empty and equal length")
+        payload = {
+            "target_uids": list(target_uids),
+            "normalized_weights": list(normalized_weights),
+        }
+        digest = _json_digest(payload)
+        with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
+            row = cursor.execute(
+                """
+                SELECT w.*
+                  FROM control_plane.competitions c
+                  JOIN control_plane.weight_publications w
+                    ON w.source_reign_id = c.current_reign_id
+                 WHERE c.netuid = %s AND c.chain_generation = %s AND c.name = %s
+                   AND w.weight_publication_id = %s
+                 FOR UPDATE OF w
+                """,
+                (
+                    self.netuid,
+                    self.chain_generation,
+                    self.competition,
+                    publication_id,
+                ),
+            ).fetchone()
+            if row is None or int(row["payload_revision"]) != expected_revision:
+                return False
+            if mapping_finalized_block <= int(row["mapping_finalized_block"]):
+                return False
+            if digest == row["payload_sha256"]:
+                mapping_changed = list(target_hotkeys) != list(row["target_hotkeys"])
+                cursor.execute(
+                    """
+                    UPDATE control_plane.weight_publications
+                       SET target_hotkeys = %s,
+                           payload_revision = payload_revision + %s,
+                           mapping_finalized_block = %s,
+                           updated_at = clock_timestamp()
+                     WHERE weight_publication_id = %s
+                    """,
+                    (
+                        list(target_hotkeys),
+                        1 if mapping_changed else 0,
+                        mapping_finalized_block,
+                        publication_id,
+                    ),
+                )
+                return mapping_changed
+            active = cursor.execute(
+                """
+                SELECT 1
+                  FROM control_plane.weight_submission_attempts
+                 WHERE weight_publication_id = %s
+                   AND state IN ('claimed', 'submitting', 'submitted', 'included', 'retry_pending')
+                 LIMIT 1
+                """,
+                (publication_id,),
+            ).fetchone()
+            if active is not None:
+                return False
+            cursor.execute(
+                """
+                UPDATE control_plane.weight_publications
+                   SET target_hotkeys = %s, target_uids = %s,
+                       normalized_weights = %s, payload_sha256 = %s,
+                       payload_revision = payload_revision + 1,
+                       mapping_finalized_block = %s, state = 'requested',
+                       owner_instance_id = NULL, lease_expires_at = NULL,
+                       next_retry_at = NULL, extrinsic_id = NULL,
+                       included_block = NULL, finalized_block = NULL,
+                       last_error_code = NULL, requested_at = %s,
+                       submitted_at = NULL, included_at = NULL, finalized_at = NULL,
+                       cadence_enabled = true,
+                       next_due_block = CASE
+                           WHEN last_attempted_block IS NULL THEN NULL
+                           ELSE GREATEST(last_attempted_block + 1, %s)
+                       END,
+                       updated_at = clock_timestamp()
+                 WHERE weight_publication_id = %s
+                """,
+                (
+                    list(target_hotkeys),
+                    list(target_uids),
+                    list(normalized_weights),
+                    digest,
+                    mapping_finalized_block,
+                    now,
+                    mapping_finalized_block,
+                    publication_id,
+                ),
+            )
+        return True
+
+    def heartbeat_service(
+        self,
+        *,
+        now: datetime,
+        phase: str,
+        software_version: str,
+        state: str = "active",
+        current_work_id: str | None = None,
+        restart_reason: str | None = None,
+    ) -> None:
+        with self.connection.transaction():
+            self.connection.execute(
+                """
+                INSERT INTO control_plane.service_instances (
+                    service_name, instance_id, software_version, state, phase,
+                    current_work_id, started_at, heartbeat_at, restart_reason
+                ) VALUES ('validator', %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (service_name, instance_id) DO UPDATE
+                   SET software_version = EXCLUDED.software_version,
+                       state = EXCLUDED.state, phase = EXCLUDED.phase,
+                       current_work_id = EXCLUDED.current_work_id,
+                       heartbeat_at = EXCLUDED.heartbeat_at,
+                       restart_reason = EXCLUDED.restart_reason
+                """,
+                (
+                    self.instance_id,
+                    software_version,
+                    state,
+                    phase,
+                    current_work_id,
+                    now,
+                    now,
+                    restart_reason,
+                ),
+            )
+
     def crown_promoted_winner(
         self,
         promotion_id: str,
         *,
         now: datetime,
         crowned_finalized_block: int,
+        policy_hotkeys: Sequence[str],
+        target_hotkeys: Sequence[str],
         target_uids: Sequence[int],
         normalized_weights: Sequence[float],
     ) -> str | None:
         self._require_lock()
-        if len(target_uids) != len(normalized_weights) or not target_uids:
+        if (
+            len(target_uids) != len(normalized_weights)
+            or len(target_hotkeys) != len(target_uids)
+            or not target_uids
+            or not policy_hotkeys
+        ):
             raise ValueError("weight target and value arrays must be non-empty and equal length")
         with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
@@ -647,18 +863,22 @@ class ValidatorRepository:
             cursor.execute(
                 """
                 INSERT INTO control_plane.weight_publications (
-                    competition_id, source_reign_id, policy_version, target_uids,
-                    normalized_weights, payload_sha256, idempotency_key, state
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'requested')
+                    competition_id, source_reign_id, policy_version, policy_hotkeys,
+                    target_hotkeys, target_uids, normalized_weights, payload_sha256,
+                    mapping_finalized_block, idempotency_key, state
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'requested')
                 ON CONFLICT (source_reign_id) DO NOTHING
                 """,
                 (
                     row["competition_id"],
                     reign_id,
                     row["policy_version"],
+                    list(policy_hotkeys),
+                    list(target_hotkeys),
                     list(target_uids),
                     list(normalized_weights),
                     _json_digest(weight_payload),
+                    crowned_finalized_block,
                     f"publish-weights:{reign_id}",
                 ),
             )

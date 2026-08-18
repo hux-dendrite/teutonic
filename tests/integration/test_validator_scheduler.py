@@ -141,6 +141,7 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         self.connection.execute(
             """
             TRUNCATE TABLE
+                control_plane.service_instances,
                 control_plane.notification_outbox,
                 control_plane.weight_publications,
                 control_plane.model_promotions,
@@ -548,6 +549,8 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             str(promotion),
             now=NOW,
             crowned_finalized_block=110,
+            policy_hotkeys=["hotkey-3", "genesis-hotkey"],
+            target_hotkeys=["hotkey-3", "genesis-hotkey"],
             target_uids=[1, 2],
             normalized_weights=[0.75, 0.25],
         )
@@ -555,6 +558,8 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             str(promotion),
             now=NOW,
             crowned_finalized_block=110,
+            policy_hotkeys=["hotkey-3", "genesis-hotkey"],
+            target_hotkeys=["hotkey-3", "genesis-hotkey"],
             target_uids=[1, 2],
             normalized_weights=[0.75, 0.25],
         )
@@ -577,6 +582,79 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             ).fetchone()[0],
             1,
         )
+
+    def test_promoted_winner_precedes_recent_kings_in_frozen_weight_policy(self) -> None:
+        claim = self.repository.claim_next(now=NOW, policy=policy())
+        promotion = self._accept_and_promote(claim)
+        self.assertEqual(
+            self.repository.promotion_weight_hotkeys(str(promotion), limit=5),
+            (claim.request["miner"]["hotkey"], "genesis-hotkey"),
+        )
+
+    def test_current_reign_weight_plan_revises_after_winner_uid_remap(self) -> None:
+        claim = self.repository.claim_next(now=NOW, policy=policy())
+        promotion = self._accept_and_promote(claim)
+        reign = self.repository.crown_promoted_winner(
+            str(promotion),
+            now=NOW,
+            crowned_finalized_block=110,
+            policy_hotkeys=[claim.request["miner"]["hotkey"], "genesis-hotkey"],
+            target_hotkeys=["burn:uid:0"],
+            target_uids=[0],
+            normalized_weights=[1.0],
+        )
+        self.assertIsNotNone(reign)
+        current = self.repository.current_weight_policy()
+        self.assertEqual(current["payload_revision"], 1)
+        self.assertTrue(
+            self.repository.refresh_current_weight_plan(
+                publication_id=current["publication_id"],
+                expected_revision=1,
+                mapping_finalized_block=120,
+                target_hotkeys=[claim.request["miner"]["hotkey"]],
+                target_uids=[17],
+                normalized_weights=[1.0],
+                now=NOW + timedelta(minutes=2),
+            )
+        )
+        row = self.connection.execute(
+            """
+            SELECT policy_hotkeys, target_hotkeys, target_uids, payload_revision,
+                   mapping_finalized_block, state
+              FROM control_plane.weight_publications
+            """
+        ).fetchone()
+        self.assertEqual(
+            row,
+            (
+                [claim.request["miner"]["hotkey"], "genesis-hotkey"],
+                [claim.request["miner"]["hotkey"]],
+                [17],
+                2,
+                120,
+                "requested",
+            ),
+        )
+
+    def test_validator_service_heartbeat_is_upserted(self) -> None:
+        self.repository.heartbeat_service(
+            now=NOW,
+            phase="evaluating",
+            software_version="release-1",
+        )
+        self.repository.heartbeat_service(
+            now=NOW + timedelta(seconds=30),
+            phase="idle",
+            software_version="release-1",
+        )
+        row = self.connection.execute(
+            """
+            SELECT state, phase, heartbeat_at
+              FROM control_plane.service_instances
+             WHERE service_name = 'validator' AND instance_id = 'validator-a'
+            """
+        ).fetchone()
+        self.assertEqual(row, ("active", "idle", NOW + timedelta(seconds=30)))
 
     def test_rejected_verdict_is_terminal_without_publication_by_default(self) -> None:
         claim = self.repository.claim_next(now=NOW, policy=policy())
@@ -636,6 +714,8 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             str(promotion),
             now=NOW,
             crowned_finalized_block=110,
+            policy_hotkeys=["hotkey-3"],
+            target_hotkeys=["hotkey-3"],
             target_uids=[1],
             normalized_weights=[1.0],
         )

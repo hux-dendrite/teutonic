@@ -15,6 +15,7 @@ env/
 # Environment / secrets
 .env
 .env.*
+.gpu.env
 
 # PyTorch artifacts
 *.pt
@@ -48,15 +49,6 @@ hf_cache/
 backup-r2-state-*/
 *.toml.bak
 
-# Symlink dir from older deploy layout, not actual repo content.
-teutonic/
-
-# Hippius PoC bench harness writes per-run env files containing live secrets.
-scripts/experiments/hippius_poc/runs/*/remote.env
-scripts/experiments/services/
 runs/
 models/
-tunnel.sh
 /completed_safetensors_sha256.txt
-
-scripts/king_benchmark_service/repair-backups

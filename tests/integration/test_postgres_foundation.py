@@ -694,10 +694,12 @@ class PostgresFoundationTests(unittest.TestCase):
         weight_id = self.connection.execute(
             """
             INSERT INTO control_plane.weight_publications (
-                competition_id, source_reign_id, policy_version, target_uids,
-                normalized_weights, payload_sha256, idempotency_key, state
-            ) VALUES (%s, %s, 'role-policy', ARRAY[0], ARRAY[1.0], %s,
-                      'weight-role-test', 'requested')
+                competition_id, source_reign_id, policy_version, policy_hotkeys,
+                target_hotkeys, target_uids, normalized_weights, payload_sha256,
+                mapping_finalized_block, idempotency_key, state
+            ) VALUES (%s, %s, 'role-policy', ARRAY['seed-hotkey'],
+                      ARRAY['seed-hotkey'], ARRAY[0],
+                      ARRAY[1.0], %s, 0, 'weight-role-test', 'requested')
             RETURNING weight_publication_id
             """,
             (self.seed["competition_id"], self.seed["reign_id"], "7" * 64),

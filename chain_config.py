@@ -1,10 +1,8 @@
 """Single source of truth for the active king chain.
 
-Reads `chain.toml` at the repo root and exposes constants used by
-`validator.py`, `miner.py`, eval/seed/smoke scripts, and the website
-(indirectly via dashboard.json). To swap the king to a new generation,
-edit `chain.toml` (and add `archs/<new>/` if the architecture changes);
-no code edits should be necessary.
+Reads `chain.toml` at the repo root and exposes constants used by the evaluator
+and architecture checks. To switch architectures, edit `chain.toml` and add
+`archs/<new>/` when required.
 
 Override knob: `TEUTONIC_CHAIN_OVERRIDE` env var, when set, points at
 an alternate TOML (relative to repo root or absolute path). Used by local
@@ -35,16 +33,7 @@ _chain = _doc.get("chain", {})
 _arch = _doc.get("arch", {})
 _seed = _doc.get("seed", {})
 
-_VALID_SEED_REPO_BACKENDS = {"hf", "hippius"}
-
-
-def _default_seed_repo_backend(seed_digest: str) -> str:
-    digest = (seed_digest or "").strip()
-    if digest.startswith("sha256:"):
-        return "hippius"
-    if digest.startswith("hf:"):
-        return "hf"
-    return "hf"
+_VALID_SEED_REPO_BACKENDS = {"hf"}
 
 NAME: str = _chain["name"]
 SEED_REPO: str = _chain["seed_repo"]
@@ -55,7 +44,7 @@ EXTRA_LOCK_KEYS: tuple[str, ...] = tuple(_arch.get("extra_lock_keys", []))
 
 SEED_TOKENIZER_REPO: str = _seed.get("tokenizer_repo", "")
 SEED_DIGEST: str = _seed.get("seed_digest", "")
-SEED_REPO_BACKEND: str = (_seed.get("repo_backend") or _default_seed_repo_backend(SEED_DIGEST)).strip().lower()
+SEED_REPO_BACKEND: str = (_seed.get("repo_backend") or "hf").strip().lower()
 if SEED_REPO_BACKEND not in _VALID_SEED_REPO_BACKENDS:
     raise RuntimeError(
         f"chain.toml [seed].repo_backend must be one of "
