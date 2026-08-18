@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """Paired model-eval engine used by the multi-source evaluation service.
 
-- model refs are materialized from Hippius Hub / Hugging Face into a local cache,
+- protocol-v2 R2 artifact refs are verified and materialized into a local cache,
 - the king model is cached across evals,
 - each eval has an id, status endpoint, SSE stream, phase/progress events,
 - final verdicts are written to disk as JSON audit artifacts.
 
-It evaluates configured-chain checkpoints on local FineWeb-Edu data. Model
-snapshots are treated as self-contained by default: their own config/custom code
-is used and compared before any weights are loaded. ``code_model`` remains only
-as an explicit debug fallback for older, weights-only snapshots.
+It evaluates configured-chain checkpoints on local or multi-source data. Model
+snapshots must be self-contained: their own config/custom code is used and
+compared before any weights are loaded.
 """
 from __future__ import annotations
 
@@ -40,7 +39,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Literal
-from urllib.parse import urlparse
 
 import numpy as np
 import torch
@@ -56,6 +54,18 @@ if str(_repo_root) not in sys.path:
 
 import chain_config
 from eval.tokenization import DEFAULT_TOKENIZER_BACKEND, encode_batch, prepare_tokenizer
+from teutonic.evaluation import (
+    PROTOCOL_VERSION,
+    AttemptBusyError,
+    AttemptConflictError,
+    EvaluationAttemptRegistry,
+    EvaluationRequestV2,
+    ProtocolValidationError,
+    paired_bootstrap_verdict,
+    result_provenance,
+    validate_result_v2,
+)
+from teutonic.storage.artifacts import R2ArtifactResolver
 
 log = logging.getLogger("eval_server_quasar_pair")
 eval_log = logging.getLogger("eval_torch")
@@ -75,10 +85,6 @@ SHARD_CACHE_DIR = Path(
         os.environ.get("TEUTONIC_PARQUET_CACHE_DIR", "/tmp/teutonic/finewebedu_shards"),
     )
 )
-DEFAULT_CODE_MODEL = os.environ.get(
-    "TEUTONIC_CODE_MODEL",
-    os.environ.get("QUASAR_CODE_MODEL", chain_config.SEED_REPO),
-)
 DEFAULT_PARQUET_GLOB = os.environ.get("TEUTONIC_PARQUET_GLOB", "/root/data/fineweb-edu-10BT/sample/10BT/**/*.parquet")
 DEFAULT_DATASET_SOURCE = os.environ.get("TEUTONIC_DATASET_SOURCE", "s3")
 DEFAULT_S3_ENDPOINT = os.environ.get("TEUTONIC_DS_ENDPOINT", "https://s3.hippius.com")
@@ -95,6 +101,11 @@ DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.0015"))
 DEFAULT_BOOTSTRAP_B = int(os.environ.get("EVAL_BOOTSTRAP_B", "10000"))
 DEFAULT_N = int(os.environ.get("EVAL_N", "25000"))
 DEFAULT_ATTN_IMPLEMENTATION = "eager"
+EVALUATOR_VERSION = os.environ.get("TEUTONIC_EVALUATOR_VERSION", "pair-evaluator-v2")
+EVALUATION_POLICY_VERSION = os.environ.get(
+    "TEUTONIC_EVALUATION_POLICY_VERSION", "paired-bootstrap-v1"
+)
+EVALUATOR_CODE_VERSION = os.environ.get("TEUTONIC_EVALUATOR_CODE_VERSION", "")
 
 # Server-side caps. The validator can request a larger eval_n / n_bootstrap
 # in its POST body; we clamp to these to keep per-eval wall time bounded
@@ -102,28 +113,14 @@ DEFAULT_ATTN_IMPLEMENTATION = "eager"
 EVAL_N_CAP = int(os.environ.get("EVAL_N_CAP", "25000"))
 EVAL_BOOTSTRAP_B_CAP = int(os.environ.get("EVAL_BOOTSTRAP_B_CAP", "999999"))
 
-PROBE_ENABLED = os.environ.get("TEUTONIC_PROBE_ENABLED", "1") == "1"
-
 EVAL_MAX_RUNTIME_S = int(os.environ.get("EVAL_MAX_RUNTIME_S", "0"))
 DEFAULT_LM_HEAD_CHUNK = int(os.environ.get("TEUTONIC_LM_HEAD_CHUNK", "1024"))
 DEFAULT_LOG_EVERY_BATCHES = int(os.environ.get("EVAL_LOG_EVERY_BATCHES", "1"))
 DEFAULT_MODEL_DEVICE_MAP = os.environ.get("TEUTONIC_MODEL_DEVICE_MAP", "auto")
-DEFAULT_PARALLEL_MODELS = os.environ.get("TEUTONIC_PARALLEL_MODELS", "1") == "1"
 DEFAULT_GPU_MEMORY_FRACTION = float(os.environ.get("TEUTONIC_GPU_MEMORY_FRACTION", "0.45"))
 GPUS_PER_MODEL_INSTANCE = 2
 MODEL_INSTANCES_PER_SIDE = 2
 MODEL_WORKER_PROCESSES = MODEL_INSTANCES_PER_SIDE * 2
-DEFAULT_MODEL_DOWNLOAD_RETRIES = int(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_RETRIES", "3"))
-DEFAULT_MODEL_DOWNLOAD_RETRY_BACKOFF_S = float(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_RETRY_BACKOFF_S", "15"))
-# Early stopping: abort once the challenger has no mathematical chance to win.
-# After at least EARLY_STOP_MIN_FRACTION of sequences are evaluated, check
-# whether (d_sum + remaining * d_max_observed) / n_total < delta_threshold.
-# Since LCB <= mu_hat, if that upper bound on mu_hat is below the threshold the
-# challenger cannot reach it regardless of the remaining samples.
-EVAL_EARLY_STOP = False
-EVAL_EARLY_STOP_MIN_FRACTION = float(os.environ.get("EVAL_EARLY_STOP_MIN_FRACTION", "0.2"))
-EVAL_EARLY_STOP_ADVANTAGE_QUANTILE = float(os.environ.get("EVAL_EARLY_STOP_ADVANTAGE_QUANTILE", "0.95"))
-DEFAULT_MODEL_DOWNLOAD_WORKERS = int(os.environ.get("TEUTONIC_MODEL_DOWNLOAD_WORKERS", "4"))
 KERNEL_CACHE_DIR = Path(
     os.environ.get("TEUTONIC_KERNEL_CACHE_DIR", "/tmp/teutonic/kernel_cache")
 )
@@ -134,30 +131,10 @@ DEFAULT_S3_CLIENT_MAX_ATTEMPTS = int(os.environ.get("TEUTONIC_S3_CLIENT_MAX_ATTE
 DEFAULT_S3_TRANSFER_ATTEMPTS = int(os.environ.get("TEUTONIC_S3_TRANSFER_ATTEMPTS", "10"))
 DEFAULT_S3_TRANSFER_CONCURRENCY = int(os.environ.get("TEUTONIC_S3_TRANSFER_CONCURRENCY", "1"))
 DEFAULT_S3_TRANSFER_CHUNK_MB = int(os.environ.get("TEUTONIC_S3_TRANSFER_CHUNK_MB", "64"))
-DEFAULT_ALLOW_CODE_MODEL_FALLBACK = os.environ.get("TEUTONIC_ALLOW_CODE_MODEL_FALLBACK", "").lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
 CACHE_HIGH_WATERMARK_GB = float(os.environ.get("MODEL_CACHE_HIGH_WATERMARK_GB", "500"))
 
-MODEL_ALLOW_PATTERNS = [
-    "*.safetensors",
-    "*.json",
-    "*.py",
-    "tokenizer*",
-    "special_tokens*",
-    "*.model",
-    "*.tiktoken",
-    "merges.txt",
-    "vocab.*",
-    "*.txt",
-    "*.jinja",
-]
-
 _eval_lock = threading.Lock()
-_evals: dict[str, dict] = {}
+_attempts = EvaluationAttemptRegistry()
 _gpu_ids: list[int] = []
 _king_model = None
 _king_key: tuple[str, ...] | None = None
@@ -172,8 +149,6 @@ class EvalRequest(BaseModel):
     challenger_repo: str
     king_digest: str = ""
     challenger_digest: str = ""
-    code_model: str = DEFAULT_CODE_MODEL
-    allow_code_model_fallback: bool = DEFAULT_ALLOW_CODE_MODEL_FALLBACK
     revision: str | None = None
     block_hash: str = ""
     hotkey: str = ""
@@ -210,6 +185,44 @@ class EvalRequest(BaseModel):
     gpu_memory_fraction: float = DEFAULT_GPU_MEMORY_FRACTION
     parallel_models: Literal[True] = True
     parallel_batch_size: Literal[1] = DEFAULT_PARALLEL_BATCH_SIZE
+
+
+def internal_request_from_v2(
+    request: EvaluationRequestV2,
+    king_snapshot: str,
+    challenger_snapshot: str,
+) -> EvalRequest:
+    """Adapt protocol v2 to the unchanged scoring engine's internal request."""
+    return EvalRequest(
+        king_repo=king_snapshot,
+        challenger_repo=challenger_snapshot,
+        hotkey=str(request.miner["hotkey"]),
+        coldkey=str(request.miner["coldkey"]),
+        dataset_source=str(request.dataset["source"]),
+        tokenizer_backend=request.tokenizer["backend"],
+        n=int(request.limits["n"]),
+        seq_len=int(request.limits["seq_len"]),
+        n_bootstrap=int(request.limits["n_bootstrap"]),
+        alpha=float(request.limits["alpha"]),
+        delta_threshold=float(request.limits["delta_threshold"]),
+        batch_size=int(request.limits["batch_size"]),
+        seed=int(request.sampling["seed"]),
+        bootstrap_seed=int(request.sampling["bootstrap_seed"]),
+    )
+
+
+def validate_protocol_versions(request: EvaluationRequestV2) -> None:
+    expected = {
+        "evaluator": EVALUATOR_VERSION,
+        "evaluation_policy": EVALUATION_POLICY_VERSION,
+    }
+    if EVALUATOR_CODE_VERSION:
+        expected["code"] = EVALUATOR_CODE_VERSION
+    for field, actual in expected.items():
+        if request.versions[field] != actual:
+            raise ProtocolValidationError(
+                f"versions.{field} must match deployed version {actual!r}"
+            )
 
 
 def setup_logging() -> None:
@@ -253,15 +266,10 @@ def model_worker_specs(gpu_ids: list[int]) -> list[dict]:
 
 
 def normalize_model_ref(ref: str) -> str:
-    ref = (ref or "").strip()
-    if ref.startswith("http://") or ref.startswith("https://"):
-        parsed = urlparse(ref)
-        parts = [p for p in parsed.path.split("/") if p]
-        if parsed.netloc.endswith("huggingface.co") and len(parts) >= 2:
-            return "/".join(parts[:2])
-        if "hippius.com" in parsed.netloc and parts and parts[0] == "models" and len(parts) >= 3:
-            return "/".join(parts[1:3])
-    return ref
+    path = Path((ref or "").strip())
+    if not path.exists():
+        raise FileNotFoundError("protocol-v2 evaluator accepts only materialized R2 snapshots")
+    return str(path.resolve())
 
 
 def dataset_seed_material(req: EvalRequest) -> str:
@@ -360,69 +368,6 @@ def safetensors_digest_from_file_digests(file_digests: dict[str, str]) -> str:
     return h.hexdigest()
 
 
-def remote_snapshot_safetensors_digest(
-    repo_or_url: str,
-    revision: str = "",
-    on_phase=None,
-) -> str | None:
-    repo = normalize_model_ref(repo_or_url)
-    if not repo or Path(repo).exists():
-        return None
-    if on_phase:
-        on_phase({"phase": "remote_safetensors_check_start", "repo": repo})
-    try:
-        if revision.startswith("hf:") or (
-            repo_or_url.startswith(("http://", "https://")) and "huggingface.co" in repo_or_url
-        ):
-            from huggingface_hub import HfApi
-
-            api = HfApi(token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"))
-            siblings = api.list_repo_tree(
-                repo,
-                recursive=True,
-                expand=True,
-                revision=revision[3:] if revision.startswith("hf:") else (revision or None),
-            )
-        else:
-            import hippius_hub
-
-            from model_store import get_hub_token
-
-            info = hippius_hub.model_info(
-                repo,
-                revision=revision or "main",
-                files_metadata=True,
-                token=get_hub_token(),
-            )
-            siblings = info.siblings
-
-        file_digests = {}
-        for item in siblings:
-            name = getattr(item, "path", "") or getattr(item, "rfilename", "")
-            if "/" in name.strip("/") or not name.endswith(".safetensors"):
-                continue
-            lfs = getattr(item, "lfs", None)
-            digest = getattr(lfs, "sha256", None) or getattr(item, "blob_id", None)
-            if not digest:
-                raise ValueError(f"{name}: hub did not provide a content SHA-256")
-            file_digests[name] = digest
-        digest = safetensors_digest_from_file_digests(file_digests)
-    except Exception as exc:
-        log.warning(
-            "remote safetensors SHA metadata unavailable for %s@%s; falling back to local check: %s",
-            repo,
-            revision or "latest",
-            exc,
-        )
-        if on_phase:
-            on_phase({"phase": "remote_safetensors_check_fallback", "repo": repo})
-        return None
-
-    if on_phase:
-        on_phase({"phase": "remote_safetensors_check_done", "sha256": digest[:16]})
-    return digest
-
-
 def snapshot_safetensors_digest(snapshot_dir: str) -> str:
     path = Path(snapshot_dir)
     shard_names = snapshot_safetensor_names(snapshot_dir)
@@ -479,128 +424,12 @@ def record_completed_safetensors_sha(digest: str) -> None:
 
 
 def materialize_model(repo_or_url: str, digest: str = "", on_phase=None) -> str:
-    """Download or reuse a model snapshot from local path, HF, or Hippius."""
-    repo = normalize_model_ref(repo_or_url)
-    local = Path(repo)
-    if local.exists():
-        return str(local.resolve())
-
-    target = MODEL_CACHE_DIR / repo.replace("/", "--") / (digest.replace(":", "-") if digest else "latest")
-    if target.exists() and snapshot_has_required_files(target):
-        return str(target)
-    if target.exists():
-        shutil.rmtree(target)
-
-    if on_phase:
-        on_phase({"phase": "download_start", "repo": repo, "digest": digest or "latest"})
-
-    def download_once() -> str:
-        target.mkdir(parents=True, exist_ok=True)
-        if (repo_or_url.startswith(("http://", "https://")) and "huggingface.co" in repo_or_url) or digest.startswith("hf:"):
-            from huggingface_hub import snapshot_download
-
-            revision = digest[3:] if digest.startswith("hf:") else (digest or None)
-            return snapshot_download(
-                repo_id=repo,
-                revision=revision,
-                local_dir=str(target),
-                allow_patterns=MODEL_ALLOW_PATTERNS,
-                max_workers=DEFAULT_MODEL_DOWNLOAD_WORKERS,
-                token=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_API_KEY"),
-            )
-
-        from hippius_hub import snapshot_download
-        from model_store import get_hub_token
-
-        return snapshot_download(
-            repo_id=repo,
-            revision=digest or None,
-            local_dir=str(target),
-            allow_patterns=MODEL_ALLOW_PATTERNS,
-            max_workers=DEFAULT_MODEL_DOWNLOAD_WORKERS,
-            token=get_hub_token(),
-        )
-
-    attempts = max(1, DEFAULT_MODEL_DOWNLOAD_RETRIES)
-    last_exc: Exception | None = None
-    path = ""
-    for attempt in range(1, attempts + 1):
-        if target.exists():
-            shutil.rmtree(target)
-        try:
-            if on_phase:
-                on_phase({
-                    "phase": "download_attempt",
-                    "repo": repo,
-                    "digest": digest or "latest",
-                    "attempt": attempt,
-                    "attempts": attempts,
-                    "workers": DEFAULT_MODEL_DOWNLOAD_WORKERS,
-                })
-            path = download_once()
-            if not snapshot_has_required_files(Path(path)):
-                raise RuntimeError(f"downloaded snapshot is incomplete: {path}")
-            break
-        except Exception as exc:
-            last_exc = exc
-            log.warning(
-                "model download failed for %s@%s attempt %d/%d: %s",
-                repo,
-                digest or "latest",
-                attempt,
-                attempts,
-                exc,
-                exc_info=True,
-            )
-            if target.exists():
-                shutil.rmtree(target, ignore_errors=True)
-            if attempt >= attempts:
-                raise RuntimeError(
-                    f"failed to download model {repo}@{digest or 'latest'} after {attempts} attempts: {exc}"
-                ) from exc
-            delay = DEFAULT_MODEL_DOWNLOAD_RETRY_BACKOFF_S * attempt
-            if on_phase:
-                on_phase({
-                    "phase": "download_retry_wait",
-                    "repo": repo,
-                    "digest": digest or "latest",
-                    "attempt": attempt,
-                    "attempts": attempts,
-                    "sleep_s": round(delay, 1),
-                    "error": str(exc),
-                })
-            time.sleep(delay)
-    else:
-        raise RuntimeError(f"failed to download model {repo}@{digest or 'latest'}: {last_exc}")
-
-    if on_phase:
-        on_phase({"phase": "download_done", "repo": repo, "path": str(path)})
+    """Accept only a complete local snapshot materialized by the R2 resolver."""
+    del digest, on_phase
+    path = Path(normalize_model_ref(repo_or_url))
+    if not snapshot_has_required_files(path):
+        raise RuntimeError(f"materialized R2 snapshot is incomplete: {path}")
     return str(path)
-
-
-def prepare_remote_code(model_id: str, revision: str | None) -> str:
-    path = Path(model_id)
-    if path.exists():
-        code_dir = str(path.resolve())
-    else:
-        from huggingface_hub import snapshot_download
-
-        code_dir = snapshot_download(
-            repo_id=model_id,
-            revision=revision,
-            allow_patterns=[
-                "*.py",
-                "*.json",
-                "tokenizer.*",
-                "*.model",
-                "*.tiktoken",
-                "merges.txt",
-                "vocab.*",
-            ],
-        )
-    if code_dir not in sys.path:
-        sys.path.insert(0, code_dir)
-    return code_dir
 
 
 def preflight_deps() -> None:
@@ -860,8 +689,6 @@ def checkpoint_load_key(snapshot_dir: str, req: EvalRequest, gpu_ids: list[int])
         "dtype": "bfloat16",
         "attn_implementation": req.attn_implementation,
         "model_device_map": req.model_device_map,
-        "allow_code_model_fallback": req.allow_code_model_fallback,
-        "code_model": req.code_model,
         "revision": req.revision,
     }
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
@@ -1013,18 +840,9 @@ def load_model_config(snapshot_dir: str, req: EvalRequest, label: str, on_phase=
             source = "snapshot_local_auto_map_compat"
             log.warning("%s AutoConfig dynamic load failed; loaded config from local code: %s", label, exc)
     except Exception as exc:
-        if not req.allow_code_model_fallback:
-            raise RuntimeError(
-                f"{label} snapshot is not self-contained enough to load its config/custom code: {exc}. "
-                "Add config/custom-code files to the model snapshot, or set "
-                "allow_code_model_fallback=true for a debug-only compatibility run."
-            ) from exc
-        if not req.code_model:
-            raise RuntimeError(f"{label} config load failed and no code_model fallback was provided") from exc
-        log.warning("%s config load from snapshot failed; falling back to code_model=%s", label, req.code_model)
-        prepare_remote_code(req.code_model, req.revision)
-        config = AutoConfig.from_pretrained(req.code_model, revision=req.revision, trust_remote_code=True)
-        source = f"code_model:{req.code_model}"
+        raise RuntimeError(
+            f"{label} snapshot is not self-contained enough to load its config/custom code: {exc}"
+        ) from exc
     config.use_cache = False
     config._attn_implementation = req.attn_implementation
     if on_phase:
@@ -1057,21 +875,12 @@ def load_eval_tokenizer(king_snapshot: str, req: EvalRequest, on_phase=None):
         )
         tokenizer_source = "king_snapshot"
     except Exception as exc:
-        if not req.allow_code_model_fallback:
-            if tokenizer_required:
-                raise RuntimeError(
-                    f"king snapshot tokenizer could not be loaded: {exc}. "
-                    "For local parquet evals the evaluated model snapshot must provide tokenizer files, "
-                    "or allow_code_model_fallback=true must be set for a debug-only run."
-                ) from exc
-            return None, {"source": "missing_but_not_needed"}
-        hf_tokenizer = AutoTokenizer.from_pretrained(
-            req.code_model,
-            revision=req.revision,
-            trust_remote_code=True,
-            use_fast=True,
-        )
-        tokenizer_source = f"code_model:{req.code_model}"
+        if tokenizer_required:
+            raise RuntimeError(
+                f"king snapshot tokenizer could not be loaded: {exc}. "
+                "Local parquet evaluations require tokenizer files in the immutable snapshot."
+            ) from exc
+        return None, {"source": "missing_but_not_needed"}
     if hf_tokenizer.pad_token is None:
         hf_tokenizer.pad_token = hf_tokenizer.eos_token
     tokenizer, tokenizer_backend = prepare_tokenizer(hf_tokenizer, req.tokenizer_backend)
@@ -2403,29 +2212,14 @@ def score_with_model_workers(
 
 
 def bootstrap_verdict(king_losses: list[float], challenger_losses: list[float], req: EvalRequest) -> dict:
-    diff = np.asarray(king_losses, dtype=np.float64) - np.asarray(challenger_losses, dtype=np.float64)
-    rng = np.random.default_rng(req.bootstrap_seed)
-    boot = np.empty(req.n_bootstrap, dtype=np.float64)
-    for i in range(req.n_bootstrap):
-        idx = rng.integers(0, len(diff), size=len(diff))
-        boot[i] = diff[idx].mean()
-    mu_hat = float(diff.mean())
-    lcb = float(np.quantile(boot, req.alpha))
-    accepted = lcb > req.delta_threshold
-    return {
-        "accepted": accepted,
-        "verdict": "challenger" if accepted else "king",
-        "mu_hat": round(mu_hat, 6),
-        "lcb": round(lcb, 6),
-        "delta": req.delta_threshold,
-        "delta_threshold": req.delta_threshold,
-        "alpha": req.alpha,
-        "n_bootstrap": req.n_bootstrap,
-        "n_sequences": len(diff),
-        "avg_king_loss": round(float(np.mean(king_losses)), 6),
-        "avg_challenger_loss": round(float(np.mean(challenger_losses)), 6),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
+    return paired_bootstrap_verdict(
+        king_losses,
+        challenger_losses,
+        bootstrap_seed=req.bootstrap_seed,
+        n_bootstrap=req.n_bootstrap,
+        alpha=req.alpha,
+        delta_threshold=req.delta_threshold,
+    )
 
 
 def _compute_source_scores(
@@ -2582,28 +2376,36 @@ def cleanup_model_cache() -> None:
         log.warning("cache cleanup failed", exc_info=True)
 
 
-def write_record(eval_id: str, payload: dict) -> str:
+def write_record(eval_id: str, payload: dict) -> tuple[str, str]:
     EVAL_RECORD_DIR.mkdir(parents=True, exist_ok=True)
     path = EVAL_RECORD_DIR / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{eval_id}.json"
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
-    return str(path)
+    encoded = json.dumps(payload, indent=2, sort_keys=True).encode()
+    path.write_bytes(encoded)
+    return str(path), hashlib.sha256(encoded).hexdigest()
 
 
-def run_eval(eval_id: str, req: EvalRequest) -> None:
-    record = _evals[eval_id]
-    events: Queue = record["events"]
-    record["state"] = "running"
+def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
+    record = _attempts.get(eval_id)
+    if record is None:
+        try:
+            _eval_lock.release()
+        except RuntimeError:
+            pass
+        return
+    events: Queue = record.events
+    record.state = "running"
     t0 = time.time()
+    started_at = datetime.now(timezone.utc).isoformat()
 
     def on_phase(info: dict):
-        record["progress"] = info
-        events.put({"type": "progress", "data": info})
+        record.progress = info
+        events.put(record.event("progress", info))
 
     heartbeat_stop = threading.Event()
 
     def heartbeat_loop():
         while not heartbeat_stop.wait(30):
-            current = dict(record.get("progress") or {})
+            current = dict(record.progress or {})
             current["heartbeat_at"] = time.time()
             on_phase(current or {"phase": "heartbeat"})
 
@@ -2611,6 +2413,22 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
 
     try:
         on_phase({"phase": "setup_start"})
+        resolver = R2ArtifactResolver(MODEL_CACHE_DIR / "immutable-r2")
+        on_phase({"phase": "artifact_materialization_start", "role": "king"})
+        king_snapshot = resolver.resolve(protocol_request.king)
+        on_phase({
+            "phase": "artifact_materialization_verified",
+            "role": "king",
+            "digest": protocol_request.king.expected_digest,
+        })
+        on_phase({"phase": "artifact_materialization_start", "role": "challenger"})
+        challenger_snapshot = resolver.resolve(protocol_request.challenger)
+        on_phase({
+            "phase": "artifact_materialization_verified",
+            "role": "challenger",
+            "digest": protocol_request.challenger.expected_digest,
+        })
+        req = internal_request_from_v2(protocol_request, king_snapshot, challenger_snapshot)
         limits_meta = apply_eval_limits(req, eval_id)
         on_phase({"phase": "limits_applied", **limits_meta})
         preflight_deps()
@@ -2618,34 +2436,12 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         patch_triton_autotuner_thread_safety()
 
         check_eval_runtime(t0)
-        remote_challenger_digest = remote_snapshot_safetensors_digest(
-            req.challenger_repo,
-            req.challenger_digest,
-            on_phase=on_phase,
-        )
-        if remote_challenger_digest:
-            reject_reused_safetensors(remote_challenger_digest, on_phase=on_phase)
-        check_eval_runtime(t0)
         king_snapshot = materialize_model(req.king_repo, req.king_digest, on_phase=on_phase)
         check_eval_runtime(t0)
         challenger_snapshot = materialize_model(req.challenger_repo, req.challenger_digest, on_phase=on_phase)
         check_eval_runtime(t0)
         duplicate_meta = reject_duplicate_safetensors(king_snapshot, challenger_snapshot, on_phase=on_phase)
         local_challenger_digest = duplicate_meta["challenger_safetensors_sha256"]
-        if remote_challenger_digest and remote_challenger_digest != local_challenger_digest:
-            log.warning(
-                "remote/local challenger safetensors SHA mismatch for %s@%s: %s != %s",
-                normalize_model_ref(req.challenger_repo),
-                req.challenger_digest or "latest",
-                remote_challenger_digest,
-                local_challenger_digest,
-            )
-        duplicate_meta["remote_challenger_safetensors_sha256"] = remote_challenger_digest
-        duplicate_meta["remote_challenger_safetensors_sha256_matches_local"] = (
-            remote_challenger_digest == local_challenger_digest
-            if remote_challenger_digest
-            else None
-        )
         duplicate_meta.update(
             reject_reused_safetensors(local_challenger_digest, on_phase=on_phase)
         )
@@ -2739,14 +2535,11 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
         verdict["source_scores"] = _compute_source_scores(
             king_losses, challenger_losses, source_labels
         )
+        completed_at = datetime.now(timezone.utc).isoformat()
         verdict.update({
             "eval_id": eval_id,
-            "king_repo": normalize_model_ref(req.king_repo),
-            "challenger_repo": normalize_model_ref(req.challenger_repo),
-            "king_digest": req.king_digest,
-            "challenger_digest": req.challenger_digest,
-            "code_model": req.code_model,
-            "allow_code_model_fallback": req.allow_code_model_fallback,
+            "king_digest": protocol_request.king.expected_digest,
+            "challenger_digest": protocol_request.challenger.expected_digest,
             "king_device": king_device,
             "challenger_device": challenger_device,
             "parallel_models": use_parallel,
@@ -2772,25 +2565,47 @@ def run_eval(eval_id: str, req: EvalRequest) -> None:
             "dataset_source": req.dataset_source,
             "wall_time_s": round(time.time() - t0, 1),
         })
-        verdict["record_path"] = write_record(eval_id, {"request": req.model_dump(), "verdict": verdict})
+        verdict.update(
+            result_provenance(
+                protocol_request,
+                started_at=started_at,
+                completed_at=completed_at,
+                requested_sequences=int(protocol_request.limits["n"]),
+                completed_sequences=int(
+                    verdict.get("n_sequences_evaluated", verdict.get("n_sequences", 0))
+                ),
+                early_stopped=bool(verdict.get("early_stopped", False)),
+                hardware={
+                    "gpu_ids": list(_gpu_ids),
+                    "workers": [spec["worker_id"] for spec in worker_specs],
+                    "model_parallel_strategy": "layer_sharding",
+                },
+            )
+        )
+        record_path, result_artifact_sha256 = write_record(
+            eval_id,
+            {"request": protocol_request.request_payload, "verdict": verdict},
+        )
+        verdict["record_path"] = record_path
+        verdict["result_artifact_sha256"] = result_artifact_sha256
+        validate_result_v2(verdict, protocol_request)
         if verdict.get("accepted"):
             write_current_king_ref(challenger_snapshot)
             on_phase({
                 "phase": "king_promoted",
-                "repo": normalize_model_ref(req.challenger_repo),
-                "digest": req.challenger_digest or "latest",
+                "digest": protocol_request.challenger.expected_digest,
             })
         record_completed_safetensors_sha(duplicate_meta["challenger_safetensors_sha256"])
-        record["state"] = "completed"
-        record["verdict"] = verdict
-        events.put({"type": "verdict", "data": verdict})
+        record.state = "completed"
+        record.verdict = verdict
+        events.put(record.event("verdict", verdict))
     except Exception as exc:
         log.exception("eval %s failed", eval_id)
         reason = str(exc)
-        record["state"] = "failed"
-        record["error"] = reason
-        record["reason"] = reason
-        events.put({"type": "error", "data": {"error": reason, "reason": reason}})
+        record.state = "failed"
+        record.error = reason
+        record.reason = reason
+        events.put(record.event("error", {"error": reason, "reason": reason}))
     finally:
         heartbeat_stop.set()
         cleanup_model_cache()
@@ -2835,7 +2650,13 @@ async def health():
         "arch": chain_config.ARCH_MODULE,
         "gpu_ids": _gpu_ids,
         "king_loaded": _king_key,
-        "active_evals": len(_evals),
+        "protocol_version": PROTOCOL_VERSION,
+        "versions": {
+            "evaluator": EVALUATOR_VERSION,
+            "evaluation_policy": EVALUATION_POLICY_VERSION,
+            "code": EVALUATOR_CODE_VERSION or None,
+        },
+        "active_evals": _attempts.active_count(),
         "cache_dir": str(MODEL_CACHE_DIR),
         "shard_cache_dir": str(SHARD_CACHE_DIR),
         "record_dir": str(EVAL_RECORD_DIR),
@@ -2871,62 +2692,66 @@ async def health():
             "eval_bootstrap_b_cap": EVAL_BOOTSTRAP_B_CAP,
             "eval_max_runtime_s": EVAL_MAX_RUNTIME_S,
         },
-        "early_stop": {
-            "enabled": EVAL_EARLY_STOP,
-            "min_fraction": EVAL_EARLY_STOP_MIN_FRACTION,
-            "advantage_quantile": EVAL_EARLY_STOP_ADVANTAGE_QUANTILE,
-        },
-        "download": {
-            "retries": DEFAULT_MODEL_DOWNLOAD_RETRIES,
-            "retry_backoff_s": DEFAULT_MODEL_DOWNLOAD_RETRY_BACKOFF_S,
-            "workers": DEFAULT_MODEL_DOWNLOAD_WORKERS,
-            "allow_patterns": MODEL_ALLOW_PATTERNS,
-        },
-        "probe_enabled": PROBE_ENABLED,
-        "allow_code_model_fallback_default": DEFAULT_ALLOW_CODE_MODEL_FALLBACK,
     }
 
 
 @app.post("/eval")
-async def start_eval(req: EvalRequest):
-    if not _eval_lock.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="an eval is already running")
-    eval_id = uuid.uuid4().hex[:8]
-    _evals[eval_id] = {
-        "state": "pending",
-        "progress": {},
-        "verdict": None,
-        "error": None,
-        "reason": None,
-        "request": req.model_dump(),
-        "events": Queue(),
-        "created_at": time.time(),
-    }
-    threading.Thread(target=run_eval, args=(eval_id, req), daemon=True, name=f"eval-{eval_id}").start()
-    return {"eval_id": eval_id}
+async def start_eval(payload: dict):
+    try:
+        request = EvaluationRequestV2.from_mapping(payload)
+        validate_protocol_versions(request)
+    except ProtocolValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_protocol_v2_request", "message": str(exc)},
+        ) from exc
+    try:
+        record, duplicate = _attempts.start(
+            request,
+            created_at=time.time(),
+            admit_new=lambda: _eval_lock.acquire(blocking=False),
+        )
+    except AttemptConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "attempt_conflict", "message": str(exc)},
+        ) from exc
+    except AttemptBusyError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "evaluator_busy", "message": str(exc)},
+        ) from exc
+
+    if not duplicate:
+        threading.Thread(
+            target=run_eval,
+            args=(request.eval_id, request),
+            daemon=True,
+            name=f"eval-{request.eval_id}",
+        ).start()
+    return record.response(duplicate=duplicate)
 
 
 @app.get("/eval/{eval_id}")
 async def get_eval(eval_id: str):
-    if eval_id not in _evals:
+    rec = _attempts.get(eval_id)
+    if rec is None:
         raise HTTPException(status_code=404, detail="eval not found")
-    rec = _evals[eval_id]
     return {
-        "eval_id": eval_id,
-        "state": rec["state"],
-        "progress": rec["progress"],
-        "verdict": rec["verdict"],
-        "error": rec["error"],
-        "reason": rec["reason"],
+        **rec.response(),
+        "progress": rec.progress,
+        "verdict": rec.verdict,
+        "error": rec.error,
+        "reason": rec.reason,
     }
 
 
 @app.get("/eval/{eval_id}/stream")
 async def stream_eval(eval_id: str):
-    if eval_id not in _evals:
+    rec = _attempts.get(eval_id)
+    if rec is None:
         raise HTTPException(status_code=404, detail="eval not found")
-    rec = _evals[eval_id]
-    event_q: Queue = rec["events"]
+    event_q: Queue = rec.events
 
     async def generate():
         while True:
@@ -2934,13 +2759,13 @@ async def stream_eval(eval_id: str):
                 event = event_q.get(block=False)
             except Empty:
                 await asyncio.sleep(0.5)
-                if rec["state"] in ("completed", "failed") and event_q.empty():
-                    final = rec["verdict"] or {
-                        "error": rec.get("error"),
-                        "reason": rec.get("reason") or rec.get("error"),
+                if rec.state in ("completed", "failed") and event_q.empty():
+                    final = rec.verdict or {
+                        "error": rec.error,
+                        "reason": rec.reason or rec.error,
                     }
-                    final_type = "verdict" if rec["state"] == "completed" else "error"
-                    yield f"data: {json.dumps({'type': final_type, 'data': final})}\n\n"
+                    final_type = "verdict" if rec.state == "completed" else "error"
+                    yield f"data: {json.dumps(rec.event(final_type, final))}\n\n"
                     break
                 continue
             yield f"data: {json.dumps(event)}\n\n"

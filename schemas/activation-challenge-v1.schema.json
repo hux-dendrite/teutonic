@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://teutonic.ai/schemas/activation-challenge-v1.schema.json",
+  "title": "Teutonic activation challenge v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "signature_scheme",
+    "registration_id",
+    "netuid",
+    "uid",
+    "hotkey",
+    "validator_nonce",
+    "expires_at",
+    "message"
+  ],
+  "properties": {
+    "protocol_version": { "const": 1 },
+    "signature_scheme": { "const": "ed25519" },
+    "registration_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "netuid": { "type": "integer", "minimum": 0 },
+    "uid": { "type": "integer", "minimum": 0 },
+    "hotkey": { "type": "string", "minLength": 40, "maxLength": 64 },
+    "validator_nonce": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "message": { "type": "string", "pattern": "^activate\\|v1\\|" }
+  }
+}

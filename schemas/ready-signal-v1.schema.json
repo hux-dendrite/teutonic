@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://teutonic.ai/schemas/ready-signal-v1.schema.json",
+  "title": "Parsed Teutonic ready signal v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "registration_id",
+    "manifest_sha256",
+    "block_number",
+    "extrinsic_index",
+    "event_index"
+  ],
+  "properties": {
+    "protocol_version": { "const": 1 },
+    "registration_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "manifest_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "block_number": { "type": "integer", "minimum": 0 },
+    "extrinsic_index": { "type": "integer", "minimum": 0 },
+    "event_index": { "type": "integer", "minimum": 0 }
+  }
+}
