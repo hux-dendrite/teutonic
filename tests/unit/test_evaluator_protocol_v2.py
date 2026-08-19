@@ -89,7 +89,9 @@ class FakeS3Client:
 
 class EvaluatorProtocolV2ContractTests(unittest.TestCase):
     def test_evaluator_has_no_legacy_model_registry_imports(self) -> None:
-        source = (Path(__file__).parents[2] / "eval_server_quasar_pair.py").read_text()
+        source = (
+            Path(__file__).parents[2] / "teutonic" / "evaluator" / "engine.py"
+        ).read_text()
         imported = set()
         for node in ast.walk(ast.parse(source)):
             if isinstance(node, ast.Import):
@@ -101,7 +103,9 @@ class EvaluatorProtocolV2ContractTests(unittest.TestCase):
         )
 
     def test_evaluator_has_no_dataset_authentication(self) -> None:
-        source = (Path(__file__).parents[2] / "eval_server_quasar_pair.py").read_text()
+        source = (
+            Path(__file__).parents[2] / "teutonic" / "evaluator" / "engine.py"
+        ).read_text()
         forbidden = (
             "HIPPIUS_ACCESS_KEY",
             "HIPPIUS_SECRET_KEY",
@@ -114,18 +118,26 @@ class EvaluatorProtocolV2ContractTests(unittest.TestCase):
         self.assertTrue(all(value not in source for value in forbidden))
         self.assertIn("signature_version=UNSIGNED", source)
 
-    def test_multi_source_launcher_exports_the_protocol_v2_app(self) -> None:
+    def test_evaluator_app_exports_the_protocol_v2_app(self) -> None:
         app = object()
         base = SimpleNamespace(app=app)
-        sources = ModuleType("npy_sources")
-        module_path = Path(__file__).parents[2] / "eval_server_two_sources.py"
-        spec = spec_from_file_location("_test_eval_server_two_sources", module_path)
+        sources = ModuleType("teutonic.evaluator.sources")
+        evaluator_package = ModuleType("teutonic.evaluator")
+        evaluator_package.__path__ = []
+        evaluator_package.engine = base
+        evaluator_package.sources = sources
+        module_path = Path(__file__).parents[2] / "teutonic" / "evaluator" / "app.py"
+        spec = spec_from_file_location("teutonic.evaluator._test_app", module_path)
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)
         module = module_from_spec(spec)
         with patch.dict(
             "sys.modules",
-            {"eval_server_quasar_pair": base, "npy_sources": sources},
+            {
+                "teutonic.evaluator": evaluator_package,
+                "teutonic.evaluator.engine": base,
+                "teutonic.evaluator.sources": sources,
+            },
         ):
             spec.loader.exec_module(module)
         self.assertIs(module.app, app)

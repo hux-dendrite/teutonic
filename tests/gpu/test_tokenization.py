@@ -6,7 +6,11 @@ from unittest.mock import patch
 
 import pytest
 
-from eval.tokenization import encode_batch, normalize_tokenizer_backend, prepare_tokenizer
+from teutonic.evaluator.tokenization import (
+    encode_batch,
+    normalize_tokenizer_backend,
+    prepare_tokenizer,
+)
 
 
 class FakeHFTokenizer:
@@ -48,4 +52,3 @@ def test_gigatoken_backend_uses_hf_compat_wrapper():
 
     assert prepared is compat
     assert backend == "gigatoken"
-

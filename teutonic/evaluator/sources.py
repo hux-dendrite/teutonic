@@ -13,9 +13,9 @@ from urllib.request import Request, urlopen
 import numpy as np
 from pydantic import BaseModel, Field
 
-import eval_server_quasar_pair as base
+from teutonic.evaluator import engine as base
 
-log = logging.getLogger("eval_server_two_sources")
+log = logging.getLogger("teutonic.evaluator.sources")
 
 # ---------------------------------------------------------------------------
 # Source registry – fetched from the bundle manifest, env-configurable

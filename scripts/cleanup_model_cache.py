@@ -33,7 +33,7 @@ from pathlib import Path
 
 log = logging.getLogger("cleanup_model_cache")
 
-DEFAULT_CACHE_DIR = Path(os.environ.get("TEUTONIC_MODEL_CACHE_DIR", "/tmp/teutonic/quasar_pair_models"))
+DEFAULT_CACHE_DIR = Path(os.environ.get("TEUTONIC_MODEL_CACHE_DIR", "/tmp/teutonic/pair_models"))
 DEFAULT_MIN_AGE_H = float(os.environ.get("MODEL_CACHE_MIN_AGE_H", "3"))
 DEFAULT_MAX_AGE_DAYS = float(os.environ.get("MODEL_CACHE_MAX_AGE_DAYS", str(2 / 24)))
 DEFAULT_KEEP_RECENT = int(os.environ.get("MODEL_CACHE_KEEP_RECENT", "1"))

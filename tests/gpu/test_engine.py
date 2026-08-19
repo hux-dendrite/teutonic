@@ -9,8 +9,8 @@ import pytest
 import torch
 from transformers import GPT2Config, GPT2LMHeadModel
 
-import eval_server_quasar_pair as eval_server
-from eval_server_quasar_pair import (
+from teutonic.evaluator import engine as eval_server
+from teutonic.evaluator.engine import (
     EvalRequest,
     MODEL_INSTANCES_PER_SIDE,
     MODEL_WORKER_PROCESSES,

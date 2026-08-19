@@ -25,8 +25,8 @@ const scheduled = {
 module.exports = {
   apps: [
     {
-      name: "teutonic-eval-quasar",
-      script: "./start_eval_quasar.sh",
+      name: "teutonic-evaluator",
+      script: "scripts/start_evaluator.sh",
       interpreter: "/bin/bash",
       cwd: root,
       exec_mode: "fork",

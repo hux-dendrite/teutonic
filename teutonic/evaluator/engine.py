@@ -47,12 +47,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 
-_repo_root = Path(__file__).resolve().parent
+_repo_root = Path(__file__).resolve().parents[2]
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 import chain_config
-from eval.tokenization import DEFAULT_TOKENIZER_BACKEND, encode_batch, prepare_tokenizer
+from teutonic.evaluator.tokenization import (
+    DEFAULT_TOKENIZER_BACKEND,
+    encode_batch,
+    prepare_tokenizer,
+)
 from teutonic.evaluation import (
     PROTOCOL_VERSION,
     AttemptBusyError,
@@ -66,8 +70,8 @@ from teutonic.evaluation import (
 )
 from teutonic.storage.artifacts import R2ArtifactResolver
 
-log = logging.getLogger("eval_server_quasar_pair")
-eval_log = logging.getLogger("eval_torch")
+log = logging.getLogger("teutonic.evaluator.engine")
+eval_log = logging.getLogger("teutonic.evaluator.scoring")
 
 MODEL_CACHE_DIR = Path(os.environ.get("TEUTONIC_MODEL_CACHE_DIR", "/tmp/teutonic/pair_models"))
 EVAL_RECORD_DIR = Path(os.environ.get("TEUTONIC_EVAL_RECORD_DIR", "/tmp/teutonic/pair_evals"))

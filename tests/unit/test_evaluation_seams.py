@@ -91,7 +91,7 @@ def public_aggregate(entries):
 
 
 def legacy_bootstrap_verdict(policy_input, now):
-    """Frozen pre-extraction implementation from eval_server_quasar_pair.py."""
+    """Frozen pre-extraction implementation from the evaluator engine."""
     king_losses = policy_input["king_losses"]
     challenger_losses = policy_input["challenger_losses"]
     diff = np.asarray(king_losses, dtype=np.float64) - np.asarray(

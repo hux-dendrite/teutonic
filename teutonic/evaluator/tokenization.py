@@ -1,4 +1,4 @@
-"""Tokenizer backend selection for raw-text evaluation datasets."""
+"""Tokenizer backend selection for GPU evaluation datasets."""
 from __future__ import annotations
 
 import os
