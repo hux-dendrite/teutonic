@@ -316,7 +316,12 @@ def classify_eval_error(exc: BaseException | str) -> tuple[bool, str]:
     """Return the legacy retry decision and stable reason marker."""
     if isinstance(exc, asyncio.CancelledError):
         return True, "validator_cancelled"
+    # httpx transport exceptions frequently have an empty message (notably
+    # when an evaluator disappears mid-stream). Include the concrete exception
+    # type so retry classification does not depend on optional error text.
     text = str(exc).lower()
+    if isinstance(exc, BaseException):
+        text = f"{type(exc).__name__.lower()} {text}"
     if ("stuck cdn" in text) or ("prefetch" in text and "exceeded" in text):
         return False, "prefetch_exhausted"
     if (

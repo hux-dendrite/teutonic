@@ -122,6 +122,17 @@ def legacy_bootstrap_verdict(policy_input, now):
 
 
 class EvaluationPolicyRegressionTests(unittest.TestCase):
+    def test_empty_message_transport_errors_are_retryable(self) -> None:
+        cases = (
+            (httpx.ConnectError(""), "connecterror"),
+            (httpx.ReadError(""), "readerror"),
+            (httpx.ReadTimeout(""), "timeout"),
+            (httpx.RemoteProtocolError(""), "remoteprotocolerror"),
+        )
+        for error, expected_marker in cases:
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual(classify_eval_error(error), (True, expected_marker))
+
     def test_legacy_behavior_fixtures(self) -> None:
         identity = FIXTURE["identity"]
         now = lambda: FIXTURE["fixed_now"]
