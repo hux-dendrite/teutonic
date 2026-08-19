@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import os
 import shutil
+import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 if TYPE_CHECKING:
     from teutonic.evaluation.protocol_v2 import R2Artifact
@@ -13,6 +16,16 @@ if TYPE_CHECKING:
 
 class ArtifactIntegrityError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ArtifactDownloadProfile:
+    backend: str = "rclone"
+    file_concurrency: int = 5
+    streams_per_file: int = 16
+    cutoff_mib: int = 32
+    chunk_mib: int = 64
+    rclone_binary: str = "rclone"
 
 
 def model_digest_from_inventory(files: list[tuple[str, int, str]]) -> str:
@@ -84,12 +97,16 @@ class R2ArtifactResolver:
         *,
         s3_client: Any | None = None,
         allowed_bucket: str | None = None,
+        download_profile: ArtifactDownloadProfile | None = None,
+        command_runner: Callable[[list[str], Mapping[str, str]], None] | None = None,
     ) -> None:
         self.cache_dir = Path(cache_dir)
         self.allowed_bucket = allowed_bucket or os.environ.get(
             "TEUTONIC_EVALUATOR_R2_BUCKET", ""
         )
         self._s3_client = s3_client
+        self.download_profile = download_profile or ArtifactDownloadProfile()
+        self._command_runner = command_runner or self._run_command
 
     def _client(self):
         if self._s3_client is None:
@@ -100,6 +117,8 @@ class R2ArtifactResolver:
             secret_key = os.environ.get("TEUTONIC_EVALUATOR_R2_SECRET_ACCESS_KEY", "")
             if not endpoint or not access_key or not secret_key:
                 raise RuntimeError("evaluator private-model R2 credentials are not configured")
+            from botocore.config import Config
+
             self._s3_client = boto3.client(
                 "s3",
                 endpoint_url=endpoint,
@@ -107,8 +126,22 @@ class R2ArtifactResolver:
                 aws_secret_access_key=secret_key,
                 aws_session_token=os.environ.get("TEUTONIC_EVALUATOR_R2_SESSION_TOKEN") or None,
                 region_name=os.environ.get("TEUTONIC_EVALUATOR_R2_REGION", "auto"),
+                config=Config(
+                    signature_version="s3v4",
+                    retries={"max_attempts": 5, "mode": "standard"},
+                    max_pool_connections=(
+                        self.download_profile.file_concurrency
+                        * self.download_profile.streams_per_file
+                    ),
+                    request_checksum_calculation="when_required",
+                    response_checksum_validation="when_required",
+                ),
             )
         return self._s3_client
+
+    @staticmethod
+    def _run_command(command: list[str], environ: Mapping[str, str]) -> None:
+        subprocess.run(command, env=dict(environ), check=True)
 
     @staticmethod
     def _relative_key(prefix: str, key: str) -> Path:
@@ -143,6 +176,111 @@ class R2ArtifactResolver:
             raise ArtifactIntegrityError("immutable R2 artifact prefix is empty")
         return sorted(objects, key=lambda item: item["Key"])
 
+    def _verify_downloaded_inventory(
+        self,
+        root: Path,
+        artifact: R2Artifact,
+        objects: list[dict[str, Any]],
+    ) -> None:
+        expected = {
+            self._relative_key(artifact.prefix, item["Key"]): int(item["Size"])
+            for item in objects
+        }
+        downloaded = {path.relative_to(root) for path in root.rglob("*") if path.is_file()}
+        if downloaded != set(expected):
+            missing = sorted(path.as_posix() for path in set(expected) - downloaded)
+            extra = sorted(path.as_posix() for path in downloaded - set(expected))
+            raise ArtifactIntegrityError(
+                f"downloaded inventory mismatch; missing={missing[:5]} extra={extra[:5]}"
+            )
+        for relative, expected_size in expected.items():
+            destination = root / relative
+            if destination.is_symlink():
+                raise ArtifactIntegrityError("immutable artifacts may not contain symlinks")
+            if destination.stat().st_size != expected_size:
+                raise ArtifactIntegrityError(
+                    f"downloaded size mismatch for {relative.as_posix()}"
+                )
+
+    def _download_boto3(
+        self,
+        artifact: R2Artifact,
+        objects: list[dict[str, Any]],
+        root: Path,
+    ) -> None:
+        from boto3.s3.transfer import TransferConfig
+
+        profile = self.download_profile
+        transfer_config = TransferConfig(
+            multipart_threshold=profile.cutoff_mib * 1024 * 1024,
+            multipart_chunksize=profile.chunk_mib * 1024 * 1024,
+            max_concurrency=profile.streams_per_file,
+            num_download_attempts=10,
+            use_threads=True,
+        )
+
+        def download(item: dict[str, Any]) -> None:
+            relative = self._relative_key(artifact.prefix, item["Key"])
+            destination = root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            self._client().download_file(
+                artifact.bucket,
+                item["Key"],
+                str(destination),
+                Config=transfer_config,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=profile.file_concurrency
+        ) as executor:
+            list(executor.map(download, objects))
+
+    def _rclone_environment(self) -> dict[str, str]:
+        endpoint = os.environ.get("TEUTONIC_EVALUATOR_R2_ENDPOINT", "").strip()
+        access_key = os.environ.get("TEUTONIC_EVALUATOR_R2_ACCESS_KEY_ID", "").strip()
+        secret_key = os.environ.get("TEUTONIC_EVALUATOR_R2_SECRET_ACCESS_KEY", "").strip()
+        if not endpoint or not access_key or not secret_key:
+            raise RuntimeError("evaluator private-model R2 credentials are not configured")
+        environ = os.environ.copy()
+        environ.update(
+            {
+                "RCLONE_CONFIG_TEUTONICMODEL_TYPE": "s3",
+                "RCLONE_CONFIG_TEUTONICMODEL_PROVIDER": "Cloudflare",
+                "RCLONE_CONFIG_TEUTONICMODEL_ACCESS_KEY_ID": access_key,
+                "RCLONE_CONFIG_TEUTONICMODEL_SECRET_ACCESS_KEY": secret_key,
+                "RCLONE_CONFIG_TEUTONICMODEL_ENDPOINT": endpoint,
+                "RCLONE_CONFIG_TEUTONICMODEL_REGION": os.environ.get(
+                    "TEUTONIC_EVALUATOR_R2_REGION", "auto"
+                ),
+                "RCLONE_CONFIG_TEUTONICMODEL_NO_CHECK_BUCKET": "true",
+            }
+        )
+        session_token = os.environ.get("TEUTONIC_EVALUATOR_R2_SESSION_TOKEN", "").strip()
+        if session_token:
+            environ["RCLONE_CONFIG_TEUTONICMODEL_SESSION_TOKEN"] = session_token
+        return environ
+
+    def _download_rclone(self, artifact: R2Artifact, root: Path) -> None:
+        profile = self.download_profile
+        command = [
+            profile.rclone_binary,
+            "copy",
+            f"teutonicmodel:{artifact.bucket}/{artifact.prefix}",
+            str(root),
+            "--transfers",
+            str(profile.file_concurrency),
+            "--multi-thread-streams",
+            str(profile.streams_per_file),
+            "--multi-thread-cutoff",
+            f"{profile.cutoff_mib}M",
+            "--s3-chunk-size",
+            f"{profile.chunk_mib}M",
+            "--stats",
+            "10s",
+            "--stats-one-line",
+        ]
+        self._command_runner(command, self._rclone_environment())
+
     def resolve(self, artifact: R2Artifact) -> str:
         if self.allowed_bucket and artifact.bucket != self.allowed_bucket:
             raise ArtifactIntegrityError("artifact bucket is outside the evaluator allowlist")
@@ -154,18 +292,12 @@ class R2ArtifactResolver:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         temporary = Path(tempfile.mkdtemp(prefix="artifact-", dir=self.cache_dir))
         try:
-            for item in self._list_objects(artifact):
-                relative = self._relative_key(artifact.prefix, item["Key"])
-                destination = temporary / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                self._client().download_file(artifact.bucket, item["Key"], str(destination))
-                if destination.is_symlink():
-                    raise ArtifactIntegrityError("immutable artifacts may not contain symlinks")
-                expected_size = item.get("Size")
-                if expected_size is not None and destination.stat().st_size != expected_size:
-                    raise ArtifactIntegrityError(
-                        f"downloaded size mismatch for {relative.as_posix()}"
-                    )
+            objects = self._list_objects(artifact)
+            if self.download_profile.backend == "rclone":
+                self._download_rclone(artifact, temporary)
+            else:
+                self._download_boto3(artifact, objects, temporary)
+            self._verify_downloaded_inventory(temporary, artifact, objects)
             verify_snapshot(temporary, artifact.expected_digest)
             try:
                 temporary.rename(target)

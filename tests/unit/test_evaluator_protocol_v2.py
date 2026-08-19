@@ -20,6 +20,7 @@ from teutonic.evaluation import (
     validate_result_v2,
 )
 from teutonic.storage.artifacts import (
+    ArtifactDownloadProfile,
     ArtifactIntegrityError,
     R2ArtifactResolver,
     snapshot_digest,
@@ -73,6 +74,7 @@ def request_payload(king_digest: str = "a" * 64, challenger_digest: str = "b" * 
 class FakeS3Client:
     def __init__(self, objects: dict[tuple[str, str], bytes]) -> None:
         self.objects = objects
+        self.transfer_configs = []
 
     def list_objects_v2(self, *, Bucket, Prefix, ContinuationToken=None):
         del ContinuationToken
@@ -83,7 +85,8 @@ class FakeS3Client:
         ]
         return {"Contents": contents, "IsTruncated": False}
 
-    def download_file(self, bucket: str, key: str, destination: str) -> None:
+    def download_file(self, bucket: str, key: str, destination: str, Config=None) -> None:
+        self.transfer_configs.append(Config)
         Path(destination).write_bytes(self.objects[(bucket, key)])
 
 
@@ -266,6 +269,8 @@ class EvaluatorProtocolV2ContractTests(unittest.TestCase):
 
 
 class R2ArtifactResolverTests(unittest.TestCase):
+    BOTO_PROFILE = ArtifactDownloadProfile(backend="boto3")
+
     def _snapshot_files(self, root: Path) -> tuple[dict[str, bytes], str]:
         (root / "config.json").write_text('{"architectures":["TestModel"]}')
         (root / "model.safetensors").write_bytes(b"immutable-weights")
@@ -292,10 +297,73 @@ class R2ArtifactResolverTests(unittest.TestCase):
                 cache_dir,
                 s3_client=client,
                 allowed_bucket="private-models",
+                download_profile=self.BOTO_PROFILE,
             )
             materialized = Path(resolver.resolve(artifact))
             self.assertEqual(snapshot_digest(materialized), digest)
             self.assertEqual(materialized.parent, Path(cache_dir))
+            self.assertTrue(
+                all(config.max_concurrency == 16 for config in client.transfer_configs)
+            )
+
+    def test_rclone_uses_verified_production_profile_and_evaluator_credentials(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as source_dir,
+            tempfile.TemporaryDirectory() as cache_dir,
+        ):
+            files, digest = self._snapshot_files(Path(source_dir))
+            prefix = f"models/sha256/{digest}/"
+            client = FakeS3Client(
+                {("private-models", prefix + name): body for name, body in files.items()}
+            )
+            artifact = EvaluationRequestV2.from_mapping(
+                request_payload(king_digest=digest, challenger_digest=digest)
+            ).king
+            commands = []
+
+            def run(command, environ):
+                commands.append((command, environ))
+                destination = Path(command[3])
+                for name, body in files.items():
+                    path = destination / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(body)
+
+            configured = {
+                "TEUTONIC_EVALUATOR_R2_ENDPOINT": "https://account.r2.example",
+                "TEUTONIC_EVALUATOR_R2_ACCESS_KEY_ID": "read-key",
+                "TEUTONIC_EVALUATOR_R2_SECRET_ACCESS_KEY": "read-secret",
+                "TEUTONIC_EVALUATOR_R2_SESSION_TOKEN": "temporary-session",
+            }
+            with patch.dict("os.environ", configured, clear=False):
+                resolver = R2ArtifactResolver(
+                    cache_dir,
+                    s3_client=client,
+                    allowed_bucket="private-models",
+                    download_profile=ArtifactDownloadProfile(),
+                    command_runner=run,
+                )
+                materialized = Path(resolver.resolve(artifact))
+
+            self.assertEqual(snapshot_digest(materialized), digest)
+            self.assertEqual(len(commands), 1)
+            command, environ = commands[0]
+            self.assertEqual(
+                command[:3],
+                ["rclone", "copy", f"teutonicmodel:private-models/{prefix}"],
+            )
+            self.assertIn("--transfers", command)
+            self.assertEqual(command[command.index("--transfers") + 1], "5")
+            self.assertEqual(command[command.index("--multi-thread-streams") + 1], "16")
+            self.assertEqual(command[command.index("--multi-thread-cutoff") + 1], "32M")
+            self.assertEqual(command[command.index("--s3-chunk-size") + 1], "64M")
+            self.assertNotIn("read-secret", command)
+            self.assertEqual(
+                environ["RCLONE_CONFIG_TEUTONICMODEL_SECRET_ACCESS_KEY"], "read-secret"
+            )
+            self.assertEqual(
+                environ["RCLONE_CONFIG_TEUTONICMODEL_SESSION_TOKEN"], "temporary-session"
+            )
 
     def test_digest_mismatch_and_bucket_escape_fail_closed(self) -> None:
         with (
@@ -315,6 +383,7 @@ class R2ArtifactResolverTests(unittest.TestCase):
                 cache_dir,
                 s3_client=client,
                 allowed_bucket="private-models",
+                download_profile=self.BOTO_PROFILE,
             )
             with self.assertRaises(ArtifactIntegrityError):
                 resolver.resolve(artifact)
