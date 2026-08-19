@@ -47,3 +47,4 @@ extra_lock_keys = [
 tokenizer_repo = "dendriteholdings/mimo-v2.5-pro-104b-64e-w1024-top4"
 repo_backend = "hf"
 seed_digest = "hf:56fc5b83784cb00a32c3f59e5ef92b9b58a7d7a9"
+genesis_hotkey = "5E6yHkmZmSpBT5aa2rNZcmeYa1y3N9jw1h7g53oNPzMUpnqG"

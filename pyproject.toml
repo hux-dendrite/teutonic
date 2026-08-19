@@ -9,6 +9,7 @@ dependencies = [
     "bittensor>=10.3,<11",
     "boto3",
     "httpx",
+    "huggingface-hub>=0.34,<2",
     "numpy",
     "safetensors",
     "torch",

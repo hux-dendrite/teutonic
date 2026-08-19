@@ -45,11 +45,14 @@ EXTRA_LOCK_KEYS: tuple[str, ...] = tuple(_arch.get("extra_lock_keys", []))
 SEED_TOKENIZER_REPO: str = _seed.get("tokenizer_repo", "")
 SEED_DIGEST: str = _seed.get("seed_digest", "")
 SEED_REPO_BACKEND: str = (_seed.get("repo_backend") or "hf").strip().lower()
+SEED_HOTKEY: str = _seed.get("genesis_hotkey", "").strip()
 if SEED_REPO_BACKEND not in _VALID_SEED_REPO_BACKENDS:
     raise RuntimeError(
         f"chain.toml [seed].repo_backend must be one of "
         f"{sorted(_VALID_SEED_REPO_BACKENDS)}, got {SEED_REPO_BACKEND!r}"
     )
+if not SEED_HOTKEY:
+    raise RuntimeError("chain.toml [seed].genesis_hotkey is required")
 
 # HF namespace inferred from the seed repo. Miners default their challenger
 # repo to "<namespace>/<NAME>-<suffix>" though they can override to publish
@@ -78,6 +81,7 @@ __all__ = [
     "SEED_TOKENIZER_REPO",
     "SEED_DIGEST",
     "SEED_REPO_BACKEND",
+    "SEED_HOTKEY",
     "SEED_NAMESPACE",
     "load_arch",
 ]

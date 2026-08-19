@@ -11,6 +11,7 @@ def test_mimo_chain_is_pinned_to_immutable_hf_seed():
     )
     assert chain_config.SEED_DIGEST == "hf:56fc5b83784cb00a32c3f59e5ef92b9b58a7d7a9"
     assert chain_config.SEED_REPO_BACKEND == "hf"
+    assert chain_config.SEED_HOTKEY == "5E6yHkmZmSpBT5aa2rNZcmeYa1y3N9jw1h7g53oNPzMUpnqG"
     assert mimo.MODEL_TYPE == "mimo_v2"
     assert set(mimo.ALLOWED_CODE_FILES) == {
         "configuration_mimo_v2.py",
