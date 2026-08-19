@@ -296,7 +296,7 @@ class R2ArtifactResolverTests(unittest.TestCase):
             resolver = R2ArtifactResolver(
                 cache_dir,
                 s3_client=client,
-                allowed_bucket="private-models",
+                allowed_buckets={"private-models"},
                 download_profile=self.BOTO_PROFILE,
             )
             materialized = Path(resolver.resolve(artifact))
@@ -339,7 +339,7 @@ class R2ArtifactResolverTests(unittest.TestCase):
                 resolver = R2ArtifactResolver(
                     cache_dir,
                     s3_client=client,
-                    allowed_bucket="private-models",
+                    allowed_buckets={"private-models"},
                     download_profile=ArtifactDownloadProfile(),
                     command_runner=run,
                 )
@@ -382,7 +382,7 @@ class R2ArtifactResolverTests(unittest.TestCase):
             resolver = R2ArtifactResolver(
                 cache_dir,
                 s3_client=client,
-                allowed_bucket="private-models",
+                allowed_buckets={"private-models"},
                 download_profile=self.BOTO_PROFILE,
             )
             with self.assertRaises(ArtifactIntegrityError):
@@ -393,3 +393,34 @@ class R2ArtifactResolverTests(unittest.TestCase):
             escaped = EvaluationRequestV2.from_mapping(escaped_payload).king
             with self.assertRaisesRegex(ArtifactIntegrityError, "allowlist"):
                 resolver.resolve(escaped)
+
+    def test_fresh_gpu_downloads_public_king_from_production_bucket(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as source_dir,
+            tempfile.TemporaryDirectory() as cache_dir,
+        ):
+            files, digest = self._snapshot_files(Path(source_dir))
+            prefix = f"models/sha256/{digest}/"
+            client = FakeS3Client(
+                {
+                    ("teutonic-models", prefix + name): body
+                    for name, body in files.items()
+                }
+            )
+            payload = request_payload(king_digest=digest)
+            payload["king"]["bucket"] = "teutonic-models"
+            artifact = EvaluationRequestV2.from_mapping(payload).king
+            resolver = R2ArtifactResolver(
+                cache_dir,
+                s3_client=client,
+                download_profile=self.BOTO_PROFILE,
+            )
+
+            materialized = Path(resolver.resolve(artifact))
+
+            self.assertEqual(snapshot_digest(materialized), digest)
+            self.assertEqual(materialized.name, digest)
+            self.assertEqual(
+                resolver.allowed_buckets,
+                {"teutonic-models", "teutonic-private-models"},
+            )

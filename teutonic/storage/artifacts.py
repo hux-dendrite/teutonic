@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable, Mapping
@@ -16,6 +17,14 @@ if TYPE_CHECKING:
 
 class ArtifactIntegrityError(RuntimeError):
     pass
+
+
+EVALUATOR_MODEL_BUCKETS = frozenset(
+    {
+        "teutonic-models",
+        "teutonic-private-models",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -96,14 +105,20 @@ class R2ArtifactResolver:
         cache_dir: str | Path,
         *,
         s3_client: Any | None = None,
-        allowed_bucket: str | None = None,
+        allowed_buckets: Collection[str] | None = None,
         download_profile: ArtifactDownloadProfile | None = None,
         command_runner: Callable[[list[str], Mapping[str, str]], None] | None = None,
     ) -> None:
         self.cache_dir = Path(cache_dir)
-        self.allowed_bucket = allowed_bucket or os.environ.get(
-            "TEUTONIC_EVALUATOR_R2_BUCKET", ""
+        self.allowed_buckets = frozenset(
+            bucket.strip()
+            for bucket in (
+                EVALUATOR_MODEL_BUCKETS if allowed_buckets is None else allowed_buckets
+            )
+            if bucket.strip()
         )
+        if not self.allowed_buckets:
+            raise ValueError("evaluator model bucket allowlist cannot be empty")
         self._s3_client = s3_client
         self.download_profile = download_profile or ArtifactDownloadProfile()
         self._command_runner = command_runner or self._run_command
@@ -116,7 +131,7 @@ class R2ArtifactResolver:
             access_key = os.environ.get("TEUTONIC_EVALUATOR_R2_ACCESS_KEY_ID", "")
             secret_key = os.environ.get("TEUTONIC_EVALUATOR_R2_SECRET_ACCESS_KEY", "")
             if not endpoint or not access_key or not secret_key:
-                raise RuntimeError("evaluator private-model R2 credentials are not configured")
+                raise RuntimeError("evaluator model R2 credentials are not configured")
             from botocore.config import Config
 
             self._s3_client = boto3.client(
@@ -240,7 +255,7 @@ class R2ArtifactResolver:
         access_key = os.environ.get("TEUTONIC_EVALUATOR_R2_ACCESS_KEY_ID", "").strip()
         secret_key = os.environ.get("TEUTONIC_EVALUATOR_R2_SECRET_ACCESS_KEY", "").strip()
         if not endpoint or not access_key or not secret_key:
-            raise RuntimeError("evaluator private-model R2 credentials are not configured")
+            raise RuntimeError("evaluator model R2 credentials are not configured")
         environ = os.environ.copy()
         environ.update(
             {
@@ -282,7 +297,7 @@ class R2ArtifactResolver:
         self._command_runner(command, self._rclone_environment())
 
     def resolve(self, artifact: R2Artifact) -> str:
-        if self.allowed_bucket and artifact.bucket != self.allowed_bucket:
+        if artifact.bucket not in self.allowed_buckets:
             raise ArtifactIntegrityError("artifact bucket is outside the evaluator allowlist")
         target = self.cache_dir / artifact.expected_digest
         if target.exists():
