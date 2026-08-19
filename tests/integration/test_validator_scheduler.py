@@ -483,7 +483,8 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         self.assertTrue(asyncio.run(scheduler.run_once()))
         row = self.connection.execute(
             """
-            SELECT e.state, e.verdict, e.progress_summary, u.state
+            SELECT e.state, e.verdict, e.progress_summary, u.state,
+                   e.verdict_summary ->> 'delta'
               FROM control_plane.evaluations e
               JOIN control_plane.uploads u ON u.upload_id = e.upload_id
             """
@@ -491,6 +492,7 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         self.assertEqual(row[0:2], ("completed", "accepted"))
         self.assertNotIn("private_worker_hostname", row[2])
         self.assertEqual(row[3], "accepted_pending_promotion")
+        self.assertEqual(row[4], "0.0015")
         self.assertEqual(
             self.connection.execute(
                 "SELECT count(*) FROM control_plane.model_promotions"

@@ -279,9 +279,17 @@ class AccessControllerIntegrationTests(unittest.TestCase):
         manifest = signed_manifest(self.miner, registration, files)
         prefix = f"models/registrations/{registration}/"
         for path, value in files.items():
-            self.s3.put_object(Bucket="private", Key=f"{prefix}{path}", Body=value)
+            self.s3.put_object(
+                Bucket="private",
+                Key=f"{prefix}{path}",
+                Body=value,
+                Metadata={"sha256": hashlib.sha256(value).hexdigest()},
+            )
         self.s3.put_object(
-            Bucket="private", Key=f"{prefix}manifest.json", Body=manifest.as_bytes()
+            Bucket="private",
+            Key=f"{prefix}manifest.json",
+            Body=manifest.as_bytes(),
+            Metadata={"sha256": manifest.manifest_sha256},
         )
         upload_id = self.repository.accept_ready_signal(
             ReadySignal.parse(

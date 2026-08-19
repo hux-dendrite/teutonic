@@ -6,6 +6,7 @@ from .contracts import (
     MetagraphSnapshot,
     ReadySignal,
     UidAssignment,
+    ready_signal_payload,
 )
 from .crypto import (
     MailboxCipher,
@@ -32,5 +33,6 @@ __all__ = [
     "UidAssignment",
     "decode_ss58_public_key",
     "encode_ss58_public_key",
+    "ready_signal_payload",
     "verify_hotkey_signature",
 ]

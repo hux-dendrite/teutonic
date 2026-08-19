@@ -17,6 +17,7 @@ from teutonic.access import (
     ReadySignal,
     UidAssignment,
     encode_ss58_public_key,
+    ready_signal_payload,
 )
 from teutonic.access.crypto import SecretCipher, encode_signature
 from teutonic.storage.artifacts import ArtifactIntegrityError, model_digest_from_inventory
@@ -114,6 +115,18 @@ class AccessControllerContractTests(unittest.TestCase):
             event_index=3,
         )
         self.assertEqual(signal.manifest_sha256, "b" * 64)
+        compact = ready_signal_payload(self.registration, "b" * 64)
+        self.assertLessEqual(len(compact.encode()), 128)
+        compact_signal = ReadySignal.parse(
+            compact,
+            signalling_hotkey=self.hotkey,
+            block_number=100,
+            extrinsic_index=2,
+            event_index=3,
+        )
+        self.assertEqual(compact_signal.registration_id, self.registration)
+        self.assertEqual(compact_signal.manifest_sha256, "b" * 64)
+        self.assertEqual(compact_signal.raw_payload, compact)
         with self.assertRaises(ValueError):
             ReadySignal.parse(
                 "r2ready:v2|bad",
@@ -152,8 +165,18 @@ class AccessControllerContractTests(unittest.TestCase):
         prefix = f"models/registrations/{self.registration}/"
         s3 = FakeS3()
         for path, value in files.items():
-            s3.put_object(Bucket="private", Key=f"{prefix}{path}", Body=value)
-        s3.put_object(Bucket="private", Key=f"{prefix}manifest.json", Body=manifest.as_bytes())
+            s3.put_object(
+                Bucket="private",
+                Key=f"{prefix}{path}",
+                Body=value,
+                Metadata={"sha256": hashlib.sha256(value).hexdigest()},
+            )
+        s3.put_object(
+            Bucket="private",
+            Key=f"{prefix}manifest.json",
+            Body=manifest.as_bytes(),
+            Metadata={"sha256": manifest.manifest_sha256},
+        )
         controller = R2UploadController(s3, private_model_bucket="private")
         verified = controller.verify_manifest(
             model_prefix=prefix,
@@ -176,8 +199,18 @@ class AccessControllerContractTests(unittest.TestCase):
         manifest = signed_manifest(self.miner, self.registration, files)
         prefix = f"models/registrations/{self.registration}/"
         s3 = FakeS3()
-        s3.put_object(Bucket="private", Key=f"{prefix}model.bin", Body=files["model.bin"])
-        s3.put_object(Bucket="private", Key=f"{prefix}manifest.json", Body=manifest.as_bytes())
+        s3.put_object(
+            Bucket="private",
+            Key=f"{prefix}model.bin",
+            Body=files["model.bin"],
+            Metadata={"sha256": hashlib.sha256(files["model.bin"]).hexdigest()},
+        )
+        s3.put_object(
+            Bucket="private",
+            Key=f"{prefix}manifest.json",
+            Body=manifest.as_bytes(),
+            Metadata={"sha256": manifest.manifest_sha256},
+        )
         s3.put_object(Bucket="private", Key=f"{prefix}undeclared.bin", Body=b"bad")
         controller = R2UploadController(s3, private_model_bucket="private")
         with self.assertRaises(ArtifactIntegrityError):
@@ -191,6 +224,26 @@ class AccessControllerContractTests(unittest.TestCase):
         s3.multipart.append({"Key": f"{prefix}unfinished.bin", "UploadId": "upload-1"})
         with self.assertRaises(ArtifactIntegrityError):
             controller.verify_manifest(
+                model_prefix=prefix,
+                registration_id=self.registration,
+                hotkey=self.hotkey,
+                expected_manifest_sha256=manifest.manifest_sha256,
+            )
+
+    def test_verifier_rejects_missing_sha256_metadata_before_evaluation(self) -> None:
+        files = {"model.bin": b"phase-four"}
+        manifest = signed_manifest(self.miner, self.registration, files)
+        prefix = f"models/registrations/{self.registration}/"
+        s3 = FakeS3()
+        s3.put_object(Bucket="private", Key=f"{prefix}model.bin", Body=files["model.bin"])
+        s3.put_object(
+            Bucket="private",
+            Key=f"{prefix}manifest.json",
+            Body=manifest.as_bytes(),
+            Metadata={"sha256": manifest.manifest_sha256},
+        )
+        with self.assertRaisesRegex(ArtifactIntegrityError, "metadata"):
+            R2UploadController(s3, private_model_bucket="private").verify_manifest(
                 model_prefix=prefix,
                 registration_id=self.registration,
                 hotkey=self.hotkey,

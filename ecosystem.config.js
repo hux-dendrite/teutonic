@@ -50,6 +50,13 @@ module.exports = {
     },
     {
       ...longRunning,
+      name: "teutonic-promotion-worker",
+      script: "scripts/promotion_worker.py",
+      kill_timeout: 30000,
+      env: commonEnv,
+    },
+    {
+      ...longRunning,
       name: "teutonic-weight-publisher",
       script: "scripts/weight_publisher.py",
       env: {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -12,9 +13,21 @@ from teutonic.storage.artifacts import ArtifactIntegrityError, model_digest_from
 
 
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
-_READY_SIGNAL = re.compile(
+_LEGACY_READY_SIGNAL = re.compile(
     r"^r2ready:v1\|(?P<registration_id>[0-9a-f]{64})\|(?P<manifest_sha256>[0-9a-f]{64})$"
 )
+_COMPACT_READY_SIGNAL = re.compile(r"^r2ready:v1:(?P<identity>[A-Za-z0-9_-]{86})$")
+
+
+def ready_signal_payload(registration_id: str, manifest_sha256: str) -> str:
+    """Encode two SHA-256 identities into Bittensor-sized commitment text."""
+    if not _HEX_DIGEST.fullmatch(registration_id):
+        raise ValueError("ready signal registration ID must be a lowercase SHA-256 digest")
+    if not _HEX_DIGEST.fullmatch(manifest_sha256):
+        raise ValueError("ready signal manifest SHA-256 must be a lowercase digest")
+    identity = bytes.fromhex(registration_id) + bytes.fromhex(manifest_sha256)
+    encoded = base64.urlsafe_b64encode(identity).rstrip(b"=").decode("ascii")
+    return f"r2ready:v1:{encoded}"
 
 
 def _utc_text(value: datetime) -> str:
@@ -97,16 +110,31 @@ class ReadySignal:
         extrinsic_index: int,
         event_index: int,
     ) -> ReadySignal:
-        match = _READY_SIGNAL.fullmatch(payload)
-        if match is None:
-            raise ValueError("ready signal must match r2ready:v1|<registration>|<manifest-sha256>")
+        compact = _COMPACT_READY_SIGNAL.fullmatch(payload)
+        legacy = _LEGACY_READY_SIGNAL.fullmatch(payload)
+        if compact is not None:
+            try:
+                identity = base64.b64decode(
+                    compact.group("identity") + "==", altchars=b"-_", validate=True
+                )
+            except ValueError as exc:
+                raise ValueError("ready signal contains invalid base64url") from exc
+            if len(identity) != 64:
+                raise ValueError("ready signal identity must contain two SHA-256 digests")
+            registration_id = identity[:32].hex()
+            manifest_sha256 = identity[32:].hex()
+        elif legacy is not None:
+            registration_id = legacy.group("registration_id")
+            manifest_sha256 = legacy.group("manifest_sha256")
+        else:
+            raise ValueError("ready signal is not a valid r2ready:v1 commitment")
         if min(block_number, extrinsic_index, event_index) < 0:
             raise ValueError("ready signal chain position must be non-negative")
         if not signalling_hotkey:
             raise ValueError("ready signal signalling hotkey is required")
         return cls(
-            registration_id=match.group("registration_id"),
-            manifest_sha256=match.group("manifest_sha256"),
+            registration_id=registration_id,
+            manifest_sha256=manifest_sha256,
             signalling_hotkey=signalling_hotkey,
             block_number=block_number,
             extrinsic_index=extrinsic_index,

@@ -542,7 +542,6 @@ class ValidatorRepository:
         UID resolution deliberately happens against a finalized metagraph in the
         runtime. PostgreSQL supplies only the durable reign ordering here.
         """
-        self._require_lock()
         if limit < 1:
             raise ValueError("weight hotkey limit must be positive")
         with self.connection.cursor(row_factory=dict_row) as cursor:
@@ -756,7 +755,6 @@ class ValidatorRepository:
         target_uids: Sequence[int],
         normalized_weights: Sequence[float],
     ) -> str | None:
-        self._require_lock()
         if (
             len(target_uids) != len(normalized_weights)
             or len(target_hotkeys) != len(target_uids)

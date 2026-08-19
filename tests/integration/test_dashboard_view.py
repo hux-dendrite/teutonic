@@ -188,7 +188,7 @@ class DashboardViewIntegrationTests(unittest.TestCase):
                 upload,
                 competition,
                 reign,
-                '{"mu_hat":0.01,"lcb":0.005,"delta":0.02,"avg_king_loss":2.1,'
+                '{"mu_hat":0.01,"lcb":0.005,"delta_threshold":0.02,"avg_king_loss":2.1,'
                 '"avg_challenger_loss":2.09,"wall_time_s":42,"n_sequences":64}',
                 NOW,
             ),
@@ -226,6 +226,7 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         text = body.decode()
         self.assertEqual(payload["source_watermark"] > 0, True)
         self.assertEqual(len(payload["history"]), 1)
+        self.assertEqual(payload["history"][0]["delta"], 0.02)
         self.assertEqual(payload["history"][0]["model_identity"], "hidden_until_promotion")
         self.assertIsNone(payload["history"][0]["challenger_repo"])
         self.assertEqual(payload["king"]["coldkey"], "5" + "G" * 47)

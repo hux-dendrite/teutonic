@@ -93,7 +93,7 @@ class R2UploadController:
 
     def _read_and_hash(
         self, bucket: str, key: str, *, capture: bool = False
-    ) -> tuple[bytes | None, int, str, str | None]:
+    ) -> tuple[bytes | None, int, str, str | None, str | None]:
         response = self.s3.get_object(Bucket=bucket, Key=key)
         body = response["Body"]
         digest = hashlib.sha256()
@@ -113,7 +113,11 @@ class R2UploadController:
             if close is not None:
                 close()
         captured = b"".join(chunks) if chunks is not None else None
-        return captured, size, digest.hexdigest(), response.get("ETag")
+        metadata = {
+            str(name).lower(): str(value).lower()
+            for name, value in (response.get("Metadata") or {}).items()
+        }
+        return captured, size, digest.hexdigest(), response.get("ETag"), metadata.get("sha256")
 
     def verify_manifest(
         self,
@@ -130,11 +134,17 @@ class R2UploadController:
         manifest_key = f"{model_prefix}manifest.json"
         if manifest_key not in objects:
             raise ArtifactIntegrityError("private model prefix does not contain manifest.json")
-        raw, manifest_size, manifest_digest, _ = self._read_and_hash(
+        raw, manifest_size, manifest_digest, _, manifest_metadata_digest = self._read_and_hash(
             self.private_model_bucket, manifest_key, capture=True
         )
         if manifest_size == 0 or manifest_digest != expected_manifest_sha256:
-            raise ArtifactIntegrityError("manifest object does not match the finalized ready signal")
+            raise ArtifactIntegrityError(
+                "manifest object does not match the finalized ready signal"
+            )
+        if manifest_metadata_digest != manifest_digest:
+            raise ArtifactIntegrityError(
+                "manifest object SHA-256 metadata is missing or incorrect"
+            )
         try:
             manifest = Manifest.from_bytes(raw or b"")
         except ValueError as exc:
@@ -159,12 +169,20 @@ class R2UploadController:
         etags: dict[str, str | None] = {}
         for item in manifest.files:
             key = f"{model_prefix}{item.path}"
-            _, size, digest, etag = self._read_and_hash(self.private_model_bucket, key)
+            _, size, digest, etag, metadata_digest = self._read_and_hash(
+                self.private_model_bucket, key
+            )
             if size != item.size or digest != item.sha256:
                 raise ArtifactIntegrityError(f"object bytes do not match manifest: {item.path}")
+            if metadata_digest != item.sha256:
+                raise ArtifactIntegrityError(
+                    f"object SHA-256 metadata is missing or incorrect: {item.path}"
+                )
             listed_size = objects[key].get("Size")
             if listed_size is not None and int(listed_size) != size:
-                raise ArtifactIntegrityError(f"R2 listing size changed during verification: {item.path}")
+                raise ArtifactIntegrityError(
+                    f"R2 listing size changed during verification: {item.path}"
+                )
             etags[item.path] = etag or objects[key].get("ETag")
         return VerifiedManifest(
             manifest=manifest,

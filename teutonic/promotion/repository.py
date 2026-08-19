@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta
 
 from psycopg.rows import dict_row
-
-from teutonic.validator.repository import SchedulerLockUnavailable, scheduler_lock_key
 
 from .contracts import PromotionClaim, PromotionObject, inventory_digest
 
@@ -15,6 +14,15 @@ class PromotionInvariantError(RuntimeError):
 
 class PromotionLeaseLostError(RuntimeError):
     pass
+
+
+class PromotionWorkerLockUnavailable(RuntimeError):
+    pass
+
+
+def promotion_worker_lock_key(netuid: int, chain_generation: str, competition: str) -> int:
+    material = f"teutonic-promotion-worker-v1|{netuid}|{chain_generation}|{competition}".encode()
+    return int.from_bytes(hashlib.sha256(material).digest()[:8], "big", signed=True)
 
 
 class PromotionRepository:
@@ -32,7 +40,7 @@ class PromotionRepository:
         self.chain_generation = chain_generation
         self.competition = competition
         self.instance_id = instance_id
-        self._lock_key = scheduler_lock_key(netuid, chain_generation, competition)
+        self._lock_key = promotion_worker_lock_key(netuid, chain_generation, competition)
         self._lock_held = False
 
     def acquire_lock(self) -> None:
@@ -40,7 +48,7 @@ class PromotionRepository:
             "SELECT pg_try_advisory_lock(%s)", (self._lock_key,)
         ).fetchone()[0]
         if not acquired:
-            raise SchedulerLockUnavailable("another validator holds the competition lock")
+            raise PromotionWorkerLockUnavailable("another promotion worker holds the lock")
         self._lock_held = True
 
     def release_lock(self) -> None:
@@ -50,7 +58,40 @@ class PromotionRepository:
 
     def _require_lock(self) -> None:
         if not self._lock_held:
-            raise SchedulerLockUnavailable("competition scheduler lock is not held")
+            raise PromotionWorkerLockUnavailable("promotion worker lock is not held")
+
+    def heartbeat_service(
+        self,
+        *,
+        now: datetime,
+        phase: str,
+        software_version: str,
+        state: str = "active",
+        current_work_id: str | None = None,
+    ) -> None:
+        with self.connection.transaction():
+            self.connection.execute(
+                """
+                INSERT INTO control_plane.service_instances (
+                    service_name, instance_id, software_version, state, phase,
+                    current_work_id, started_at, heartbeat_at
+                ) VALUES ('promotion-worker', %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (service_name, instance_id) DO UPDATE
+                   SET software_version = EXCLUDED.software_version,
+                       state = EXCLUDED.state, phase = EXCLUDED.phase,
+                       current_work_id = EXCLUDED.current_work_id,
+                       heartbeat_at = EXCLUDED.heartbeat_at
+                """,
+                (
+                    self.instance_id,
+                    software_version,
+                    state,
+                    phase,
+                    current_work_id,
+                    now,
+                    now,
+                ),
+            )
 
     def claim_next(self, *, now: datetime, lease: timedelta) -> PromotionClaim | None:
         self._require_lock()

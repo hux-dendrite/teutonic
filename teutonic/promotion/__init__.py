@@ -11,6 +11,8 @@ from .repository import (
     PromotionInvariantError,
     PromotionLeaseLostError,
     PromotionRepository,
+    PromotionWorkerLockUnavailable,
+    promotion_worker_lock_key,
 )
 from .service import PromotionWorker
 
@@ -28,5 +30,7 @@ __all__ = [
     "PromotionInvariantError",
     "PromotionLeaseLostError",
     "PromotionRepository",
+    "PromotionWorkerLockUnavailable",
     "PromotionWorker",
+    "promotion_worker_lock_key",
 ]

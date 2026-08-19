@@ -100,12 +100,14 @@ class ValidatorScheduler:
     def _persist_terminal(self, claim: ClaimedEvaluation, result: Mapping[str, Any]) -> None:
         request = EvaluationRequestV2.from_mapping(claim.request)
         validate_result_v2(result, request)
+        persisted = dict(result)
+        persisted.setdefault("delta", persisted["delta_threshold"])
         self.repository.complete_verdict(
             claim.evaluation_id,
-            result=result,
+            result=persisted,
             now=self.clock(),
             publish_non_winning=self.policy.publish_non_winning_models,
-            result_artifact_reference=result.get("result_artifact_reference"),
+            result_artifact_reference=persisted.get("result_artifact_reference"),
         )
 
     def _persist_error(self, claim: ClaimedEvaluation, exc: Exception) -> None:
