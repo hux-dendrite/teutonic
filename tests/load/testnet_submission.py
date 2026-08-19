@@ -8,33 +8,32 @@ import json
 import os
 import re
 import shutil
-import sys
 import tempfile
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path
 
 import boto3
 import bittensor as bt
-import psycopg
+import httpx
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from nacl.signing import SigningKey
 
 from teutonic.access import (
-    AccessControllerRepository,
-    ControllerLockUnavailable,
     MailboxCipher,
     Manifest,
     ManifestFile,
-    MetagraphSnapshot,
     ReadySignal,
-    UidAssignment,
     ready_signal_payload,
 )
 from teutonic.access.crypto import encode_signature
-from teutonic.credentials import ActivationResponse, mailbox_object_key
+from teutonic.credentials import (
+    activation_message,
+    activation_signal_payload,
+    mailbox_object_key,
+    registration_id,
+)
 from teutonic.storage.artifacts import model_digest_from_inventory, sha256_file
 
 
@@ -57,65 +56,57 @@ def required(name: str) -> str:
     return value
 
 
-def now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def acquire_controller_lock(repository: AccessControllerRepository) -> None:
+def finalized_registration(subtensor: bt.Subtensor) -> tuple[int, int, str]:
+    deadline = time.monotonic() + 600
     while True:
-        try:
-            repository.acquire_lock()
-            return
-        except ControllerLockUnavailable:
-            time.sleep(0.5)
-
-
-def endpoint() -> str:
-    return os.environ.get("TEUTONIC_R2_ENDPOINT", "").strip() or (
-        f"https://{required('CLOUDFLARE_ACCOUNT_ID')}.r2.cloudflarestorage.com"
-    )
-
-
-def permanent_s3():
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint(),
-        aws_access_key_id=required("R2_ACCESS_KEY_ID"),
-        aws_secret_access_key=required("R2_SECRET_ACCESS_KEY"),
-        aws_session_token=os.environ.get("R2_SESSION_TOKEN") or None,
-        region_name=os.environ.get("TEUTONIC_R2_REGION", "auto"),
-        config=Config(
-            signature_version="s3v4",
-            retries={"max_attempts": 5, "mode": "standard"},
-            max_pool_connections=256,
-            request_checksum_calculation="when_required",
-            response_checksum_validation="when_required",
-        ),
-    )
-
-
-def finalized_snapshot(subtensor: bt.Subtensor, block: int | None = None) -> MetagraphSnapshot:
-    if block is None:
         block_hash = subtensor.substrate.get_chain_finalised_head()
         block = int(subtensor.substrate.get_block_number(block_hash))
-    else:
-        block_hash = subtensor.substrate.get_block_hash(block)
-    metagraph = subtensor.metagraph(NETUID, block=block, lite=True)
-    assignments = tuple(
-        UidAssignment(uid=int(uid), hotkey=str(hotkey), coldkey=str(coldkey))
-        for uid, hotkey, coldkey in zip(
-            metagraph.uids.tolist(), metagraph.hotkeys, metagraph.coldkeys
+        metagraph = subtensor.metagraph(NETUID, block=block, lite=True)
+        uids = (
+            metagraph.uids.tolist()
+            if hasattr(metagraph.uids, "tolist")
+            else metagraph.uids
         )
-    )
-    return MetagraphSnapshot(
-        netuid=NETUID,
-        chain_generation=required("TEUTONIC_CHAIN_GENERATION"),
-        finalized_block=block,
-        finalized_block_hash=str(block_hash),
-        assignments=assignments,
-        observed_at=now(),
-        complete=True,
-    )
+        registration_blocks = (
+            metagraph.block_at_registration.tolist()
+            if hasattr(metagraph.block_at_registration, "tolist")
+            else metagraph.block_at_registration
+        )
+        for uid, hotkey, registration_block in zip(
+            uids,
+            metagraph.hotkeys,
+            registration_blocks,
+        ):
+            if str(hotkey) == MINER_HOTKEY:
+                identifier = registration_id(
+                    netuid=NETUID,
+                    uid=int(uid),
+                    hotkey=MINER_HOTKEY,
+                    registration_block=int(registration_block),
+                    chain_generation=required("TEUTONIC_CHAIN_GENERATION"),
+                )
+                return int(uid), int(registration_block), identifier
+        if time.monotonic() >= deadline:
+            raise RuntimeError("hotkey did not appear in the finalized metagraph")
+        time.sleep(6)
+
+
+def public_mailbox(registration: str, generation: int = 1) -> bytes:
+    base = required("TEUTONIC_MAILBOX_PUBLIC_BASE_URL").rstrip("/")
+    key = mailbox_object_key(registration, generation)
+    deadline = time.monotonic() + 600
+    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+        attempt = 0
+        while True:
+            response = client.get(f"{base}/{key}", params={"poll": attempt})
+            if response.status_code == 200:
+                return response.content
+            if response.status_code != 404:
+                response.raise_for_status()
+            if time.monotonic() >= deadline:
+                raise RuntimeError("timed out waiting for encrypted public mailbox credential")
+            attempt += 1
+            time.sleep(2)
 
 
 def miner_wallet() -> bt.Wallet:
@@ -260,67 +251,6 @@ def upload_challenger(root: Path, manifest: Manifest, envelope: dict) -> None:
     print(f"Private upload complete: {size / 1e9:.3f} GB in {elapsed:.1f}s", flush=True)
 
 
-def receipt_position(response, subtensor, payload: str, uid: int) -> tuple[int, int, int]:
-    receipt = response.extrinsic_receipt
-    if receipt is None:
-        raise RuntimeError("finalized commitment did not return an extrinsic receipt")
-    block = getattr(receipt, "block_number", None)
-    if block is None:
-        block_hash = getattr(receipt, "block_hash", None)
-        if block_hash is None:
-            raise RuntimeError("commitment receipt omitted its block")
-        block = int(subtensor.substrate.get_block_number(block_hash))
-    index = getattr(receipt, "extrinsic_idx", None)
-    if index is None:
-        index = getattr(receipt, "extrinsic_index", None)
-    if index is None:
-        index = 0
-    if block is None:
-        finalized_hash = subtensor.substrate.get_chain_finalised_head()
-        finalized = int(subtensor.substrate.get_block_number(finalized_hash))
-        first = None
-        for candidate in range(finalized, max(-1, finalized - 64), -1):
-            if subtensor.get_commitment(NETUID, uid, block=candidate) == payload:
-                first = candidate
-            elif first is not None:
-                break
-        block = first
-    if block is None:
-        raise RuntimeError("could not resolve finalized commitment block number")
-
-    block_hash = subtensor.substrate.get_block_hash(int(block))
-    block_value = subtensor.substrate.get_block(block_hash=block_hash)
-    index = None
-    for position, extrinsic in enumerate(block_value.get("extrinsics", [])):
-        value = extrinsic.value
-        call = value.get("call") or {}
-        if (
-            value.get("address") == MINER_HOTKEY
-            and call.get("call_module") == "Commitments"
-            and call.get("call_function") == "set_commitment"
-        ):
-            index = position
-            break
-    if index is None:
-        raise RuntimeError("could not locate the finalized commitment extrinsic")
-    event_index = None
-    for position, event in enumerate(subtensor.substrate.get_events(block_hash)):
-        value = getattr(event, "value", event)
-        attributes = value.get("attributes") or {}
-        if (
-            value.get("extrinsic_idx") is not None
-            and int(value["extrinsic_idx"]) == index
-            and value.get("module_id") == "Commitments"
-            and value.get("event_id") == "Commitment"
-            and attributes.get("who") == MINER_HOTKEY
-        ):
-            event_index = position
-            break
-    if event_index is None:
-        raise RuntimeError("could not locate the finalized commitment event")
-    return int(block), int(index), int(event_index)
-
-
 def main() -> int:
     global MINER_HOTKEY_NAME, MINER_HOTKEY
     parser = argparse.ArgumentParser(description="Run one real testnet miner submission")
@@ -337,175 +267,95 @@ def main() -> int:
     if int(wallet.hotkey.crypto_type) != 0:
         raise RuntimeError(f"{MINER_HOTKEY_NAME} is not an Ed25519 hotkey")
     MINER_HOTKEY = wallet.hotkey.ss58_address
-    with psycopg.connect(required("TEUTONIC_DATABASE_URL"), autocommit=True) as connection:
-        completed = connection.execute(
-            "SELECT upload_id, state FROM control_plane.uploads "
-            "WHERE signalling_hotkey = %s ORDER BY created_at DESC LIMIT 1",
-            (MINER_HOTKEY,),
-        ).fetchone()
-    if completed is not None:
-        print(
-            f"SKIP {MINER_HOTKEY_NAME}: submission eligibility is already consumed "
-            f"by upload={completed[0]} state={completed[1]}",
-            flush=True,
-        )
-        return 0
     subtensor = bt.Subtensor(network="test")
     atexit.register(subtensor.close)
-    s3 = permanent_s3()
-    mailbox_bucket = required("TEUTONIC_DASHBOARD_BUCKET")
     challenger: Path | None = None
-
-    with psycopg.connect(required("TEUTONIC_DATABASE_URL"), autocommit=True) as connection:
-        repository = AccessControllerRepository(
-            connection,
-            registration_nonce=required("TEUTONIC_REGISTRATION_NONCE"),
-            finalized_start_block=0,
-        )
-        acquire_controller_lock(repository)
-        try:
-            snapshot = finalized_snapshot(subtensor)
-            result = repository.apply_finalized_snapshot(snapshot)
-            uid = next(
-                item.uid for item in snapshot.assignments if item.hotkey == MINER_HOTKEY
-            )
-            row = connection.execute(
-                """
-                SELECT registration_id, state
-                  FROM control_plane.registrations
-                 WHERE netuid = %s AND chain_generation = %s AND uid = %s AND hotkey = %s
-                 ORDER BY first_seen_finalized_block DESC LIMIT 1
-                """,
-                (NETUID, required("TEUTONIC_CHAIN_GENERATION"), uid, MINER_HOTKEY),
-            ).fetchone()
-            if row is None:
-                raise RuntimeError("access snapshot did not create the miner registration")
-            registration, state = str(row[0]), str(row[1])
-            print(
-                f"Finalized registration: block={snapshot.finalized_block} uid={uid} "
-                f"registration={registration[:12]}... state={state}",
-                flush=True,
-            )
-            if state not in {"pending_activation", "activating", "active"}:
-                raise RuntimeError(
-                    f"test registration cannot resume (state={state})"
-                )
-            if state in {"pending_activation", "activating"}:
-                challenge = repository.issue_activation_challenge(registration, now=now())
-                activation_signature = wallet.hotkey.sign(challenge.message.encode())
-                repository.verify_activation(
-                    ActivationResponse(
-                        registration_id=registration,
-                        hotkey=MINER_HOTKEY,
-                        validator_nonce=challenge.validator_nonce,
-                        signature=encode_signature(bytes(activation_signature)),
-                    ),
-                    now=now(),
-                )
-                print("Miner activation signature verified", flush=True)
-            else:
-                print("Resuming the already-activated test registration", flush=True)
-            repository.release_lock()
-
-            deadline = time.monotonic() + 300
-            while True:
-                credential = connection.execute(
-                    """
-                    SELECT generation, state
-                      FROM control_plane.credential_generations
-                     WHERE registration_id = %s
-                     ORDER BY generation DESC LIMIT 1
-                    """,
-                    (registration,),
-                ).fetchone()
-                if credential is not None and credential[1] == "published":
-                    generation = int(credential[0])
-                    break
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("timed out waiting for the PM2 access controller mailbox")
-                time.sleep(2)
-
-            key = mailbox_object_key(registration, generation)
-            response = s3.get_object(Bucket=mailbox_bucket, Key=key)
-            try:
-                ciphertext = response["Body"].read()
-            finally:
-                response["Body"].close()
-            envelope = MailboxCipher.decrypt_for_test(ciphertext, miner_nacl_key())
-            if envelope["hotkey"] != MINER_HOTKEY:
-                raise RuntimeError("decrypted mailbox was not addressed to the test miner")
-            if envelope["allowed_prefix"] != f"models/registrations/{registration}/":
-                raise RuntimeError("decrypted mailbox prefix differs from registration prefix")
-            print(
-                f"Miner decrypted mailbox generation {generation} issued by PM2 controller",
-                flush=True,
-            )
-
-            challenger = make_challenger()
-            manifest = signed_manifest(challenger, registration, wallet)
-            upload_challenger(challenger, manifest, envelope)
-
-            payload = ready_signal_payload(registration, manifest.manifest_sha256)
-            # Hold the durable chain cursor while the ready commitment finalizes.
-            # Otherwise a concurrent miner can persist a newer registration
-            # snapshot first, making this ready block stale and unrecordable.
-            acquire_controller_lock(repository)
-            print(f"Submitting finalized ready commitment from {MINER_HOTKEY_NAME}...", flush=True)
-            commitment = subtensor.set_commitment(
-                wallet=wallet,
-                netuid=NETUID,
-                data=payload,
-                raise_error=True,
-                wait_for_inclusion=True,
-                wait_for_finalization=True,
-            )
-            if not commitment.success:
-                raise RuntimeError(f"on-chain ready commitment failed: {commitment.message}")
-            ready_block, extrinsic_index, event_index = receipt_position(
-                commitment, subtensor, payload, uid
-            )
-            repository.apply_finalized_snapshot(finalized_snapshot(subtensor, ready_block))
-            signal = ReadySignal.parse(
-                payload,
+    try:
+        uid, registration_block, registration = finalized_registration(subtensor)
+        current = subtensor.get_commitment(NETUID, uid)
+        if current.startswith("r2ready:v1"):
+            previous = ReadySignal.parse(
+                current,
                 signalling_hotkey=MINER_HOTKEY,
-                block_number=ready_block,
-                extrinsic_index=extrinsic_index,
-                event_index=event_index,
+                block_number=0,
+                extrinsic_index=0,
+                event_index=0,
             )
-            upload_id = repository.accept_ready_signal(signal, now=now())
-            repository.release_lock()
-            print(
-                f"Accepted finalized ready signal: block={ready_block} "
-                f"extrinsic={extrinsic_index} upload={upload_id}",
-                flush=True,
-            )
+            if previous.registration_id == registration:
+                print(
+                    f"SKIP {MINER_HOTKEY_NAME}: this registration is already ready",
+                    flush=True,
+                )
+                return 0
+        print(
+            f"Finalized registration: block={registration_block} uid={uid} "
+            f"registration={registration[:12]}...",
+            flush=True,
+        )
 
-            deadline = time.monotonic() + 1800
-            while True:
-                state = connection.execute(
-                    "SELECT state FROM control_plane.uploads WHERE upload_id = %s",
-                    (upload_id,),
-                ).fetchone()[0]
-                token_state = connection.execute(
-                    "SELECT state FROM control_plane.r2_parent_tokens WHERE registration_id = %s",
-                    (registration,),
-                ).fetchone()[0]
-                if state == "ready_for_evaluation" and token_state == "revoked":
-                    break
-                if state == "verification_failed":
-                    raise RuntimeError("PM2 access controller rejected the uploaded model")
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("timed out waiting for PM2 access-controller verification")
-                time.sleep(2)
-            print(
-                f"PM2 controller complete: upload_state={state} upload_access={token_state}",
-                flush=True,
-            )
-            print(f"UPLOAD_ID={upload_id}", flush=True)
-        finally:
-            repository.release_lock()
-            if challenger is not None:
-                shutil.rmtree(challenger, ignore_errors=True)
+        message = activation_message(
+            netuid=NETUID,
+            uid=uid,
+            hotkey=MINER_HOTKEY,
+            registration_id=registration,
+            registration_block=registration_block,
+            chain_generation=required("TEUTONIC_CHAIN_GENERATION"),
+        )
+        activation_payload = activation_signal_payload(
+            bytes(wallet.hotkey.sign(message.encode()))
+        )
+        print(
+            f"Submitting finalized activation commitment from {MINER_HOTKEY_NAME}...",
+            flush=True,
+        )
+        activation = subtensor.set_commitment(
+            wallet=wallet,
+            netuid=NETUID,
+            data=activation_payload,
+            raise_error=True,
+            wait_for_inclusion=True,
+            wait_for_finalization=True,
+        )
+        if not activation.success:
+            raise RuntimeError(f"on-chain activation failed: {activation.message}")
+
+        ciphertext = public_mailbox(registration)
+        envelope = MailboxCipher.decrypt_for_test(ciphertext, miner_nacl_key())
+        expected = {
+            "hotkey": MINER_HOTKEY,
+            "registration_id": registration,
+            "chain_generation": required("TEUTONIC_CHAIN_GENERATION"),
+            "registration_block": registration_block,
+            "allowed_prefix": f"models/registrations/{registration}/",
+        }
+        for field, value in expected.items():
+            if envelope.get(field) != value:
+                raise RuntimeError(f"decrypted mailbox has an unexpected {field}")
+        print("Miner decrypted public mailbox credential generation 1", flush=True)
+
+        challenger = make_challenger()
+        manifest = signed_manifest(challenger, registration, wallet)
+        upload_challenger(challenger, manifest, envelope)
+
+        payload = ready_signal_payload(registration, manifest.manifest_sha256)
+        print(f"Submitting finalized ready commitment from {MINER_HOTKEY_NAME}...", flush=True)
+        commitment = subtensor.set_commitment(
+            wallet=wallet,
+            netuid=NETUID,
+            data=payload,
+            raise_error=True,
+            wait_for_inclusion=True,
+            wait_for_finalization=True,
+        )
+        if not commitment.success:
+            raise RuntimeError(f"on-chain ready commitment failed: {commitment.message}")
+        print(
+            "Finalized ready commitment submitted; validator processing is independent",
+            flush=True,
+        )
+    finally:
+        if challenger is not None:
+            shutil.rmtree(challenger, ignore_errors=True)
     return 0
 
 

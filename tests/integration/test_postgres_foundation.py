@@ -39,7 +39,6 @@ class PostgresFoundationTests(unittest.TestCase):
                 control_plane.uploads,
                 control_plane.credential_generations,
                 control_plane.r2_parent_tokens,
-                control_plane.activation_challenges,
                 control_plane.registrations,
                 control_plane.metagraph_uid_assignments,
                 control_plane.metagraph_snapshots,
@@ -70,8 +69,8 @@ class PostgresFoundationTests(unittest.TestCase):
         connection.execute(
             """
             INSERT INTO control_plane.metagraph_uid_assignments
-                (snapshot_id, uid, hotkey, coldkey)
-            VALUES (%s, 42, %s, %s)
+                (snapshot_id, uid, hotkey, coldkey, registration_block)
+            VALUES (%s, 42, %s, %s, 100)
             """,
             (snapshot_id, "5" + "A" * 47, "5" + "C" * 47),
         )
@@ -233,7 +232,6 @@ class PostgresFoundationTests(unittest.TestCase):
         self.assertEqual(
             [row[0] for row in tables],
             [
-                "activation_challenges",
                 "chain_cursors",
                 "competitions",
                 "controller_jobs",

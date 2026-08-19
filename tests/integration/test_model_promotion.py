@@ -113,7 +113,6 @@ class ModelPromotionIntegrationTests(unittest.TestCase):
                 control_plane.uploads,
                 control_plane.credential_generations,
                 control_plane.r2_parent_tokens,
-                control_plane.activation_challenges,
                 control_plane.registrations,
                 control_plane.metagraph_uid_assignments,
                 control_plane.metagraph_snapshots,

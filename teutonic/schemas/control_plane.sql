@@ -205,25 +205,6 @@ SET default_tablespace = '';
 SET default_table_access_method = heap;
 
 --
--- Name: activation_challenges; Type: TABLE; Schema: control_plane; Owner: teutonic_schema_owner
---
-
-CREATE TABLE control_plane.activation_challenges (
-    registration_id character(64) NOT NULL,
-    validator_nonce text NOT NULL,
-    message text NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
-    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
-    verified_at timestamp with time zone,
-    CONSTRAINT activation_challenges_check CHECK (((verified_at IS NULL) OR (verified_at <= expires_at))),
-    CONSTRAINT activation_challenges_message_check CHECK (starts_with(message, 'activate|v1|'::text)),
-    CONSTRAINT activation_challenges_validator_nonce_check CHECK (((length(validator_nonce) >= 1) AND (length(validator_nonce) <= 128)))
-);
-
-
-ALTER TABLE control_plane.activation_challenges OWNER TO teutonic_schema_owner;
-
---
 -- Name: chain_cursors; Type: TABLE; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -441,7 +422,10 @@ CREATE TABLE control_plane.metagraph_uid_assignments (
     uid integer NOT NULL,
     hotkey text,
     coldkey text,
+    registration_block bigint,
     CONSTRAINT metagraph_uid_assignments_check CHECK (((hotkey IS NULL) = (coldkey IS NULL))),
+    CONSTRAINT metagraph_uid_assignments_registration_check CHECK (((hotkey IS NULL) = (registration_block IS NULL))),
+    CONSTRAINT metagraph_uid_assignments_registration_block_check CHECK ((registration_block >= 0)),
     CONSTRAINT metagraph_uid_assignments_uid_check CHECK ((uid >= 0))
 );
 
@@ -467,6 +451,11 @@ CREATE TABLE control_plane.registrations (
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     deactivated_at timestamp with time zone,
+    activated_at timestamp with time zone,
+    activation_finalized_block bigint,
+    activation_extrinsic_index integer,
+    activation_event_index integer,
+    activation_payload text,
     CONSTRAINT registrations_check CHECK ((last_seen_finalized_block >= first_seen_finalized_block)),
     CONSTRAINT registrations_check1 CHECK ((model_prefix = (('models/registrations/'::text || (registration_id)::text) || '/'::text))),
     CONSTRAINT registrations_check2 CHECK ((((state = 'inactive'::text) AND (deactivated_finalized_block IS NOT NULL) AND (deactivated_at IS NOT NULL)) OR ((state <> 'inactive'::text) AND (deactivated_finalized_block IS NULL) AND (deactivated_at IS NULL)))),
@@ -474,7 +463,13 @@ CREATE TABLE control_plane.registrations (
     CONSTRAINT registrations_first_seen_finalized_block_check CHECK ((first_seen_finalized_block >= 0)),
     CONSTRAINT registrations_netuid_check CHECK ((netuid >= 0)),
     CONSTRAINT registrations_registration_id_check CHECK ((registration_id ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT registrations_state_check CHECK ((state = ANY (ARRAY['pending_activation'::text, 'activating'::text, 'active'::text, 'inactive'::text]))),
+    CONSTRAINT registrations_activation_fields_check CHECK (((state <> 'pending_activation'::text) OR (num_nonnulls(activated_at, activation_finalized_block, activation_extrinsic_index, activation_event_index, activation_payload) = 0))),
+    CONSTRAINT registrations_activation_group_check CHECK ((num_nonnulls(activated_at, activation_finalized_block, activation_extrinsic_index, activation_event_index, activation_payload) = ANY (ARRAY[0, 5]))),
+    CONSTRAINT registrations_activation_finalized_block_check CHECK ((activation_finalized_block >= 0)),
+    CONSTRAINT registrations_activation_extrinsic_index_check CHECK ((activation_extrinsic_index >= 0)),
+    CONSTRAINT registrations_activation_event_index_check CHECK ((activation_event_index >= 0)),
+    CONSTRAINT registrations_activation_payload_check CHECK ((activation_payload IS NULL OR starts_with(activation_payload, 'r2activate:v1:'::text))),
+    CONSTRAINT registrations_state_check CHECK ((state = ANY (ARRAY['pending_activation'::text, 'active'::text, 'inactive'::text]))),
     CONSTRAINT registrations_uid_check CHECK ((uid >= 0))
 );
 
@@ -1192,22 +1187,6 @@ CREATE TABLE control_plane.verified_uploads (
 ALTER TABLE control_plane.verified_uploads OWNER TO teutonic_schema_owner;
 
 --
--- Name: activation_challenges activation_challenges_pkey; Type: CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
---
-
-ALTER TABLE ONLY control_plane.activation_challenges
-    ADD CONSTRAINT activation_challenges_pkey PRIMARY KEY (registration_id);
-
-
---
--- Name: activation_challenges activation_challenges_validator_nonce_key; Type: CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
---
-
-ALTER TABLE ONLY control_plane.activation_challenges
-    ADD CONSTRAINT activation_challenges_validator_nonce_key UNIQUE (validator_nonce);
-
-
---
 -- Name: chain_cursors chain_cursors_pkey; Type: CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -1552,13 +1531,6 @@ ALTER TABLE ONLY control_plane.weight_submission_attempts
 
 
 --
--- Name: activation_challenges_expiry; Type: INDEX; Schema: control_plane; Owner: teutonic_schema_owner
---
-
-CREATE INDEX activation_challenges_expiry ON control_plane.activation_challenges USING btree (expires_at) WHERE (verified_at IS NULL);
-
-
---
 -- Name: controller_jobs_claimable; Type: INDEX; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -1755,14 +1727,6 @@ CREATE TRIGGER weight_submission_attempts_revision AFTER INSERT OR DELETE OR UPD
 
 
 --
--- Name: activation_challenges activation_challenges_registration_id_fkey; Type: FK CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
---
-
-ALTER TABLE ONLY control_plane.activation_challenges
-    ADD CONSTRAINT activation_challenges_registration_id_fkey FOREIGN KEY (registration_id) REFERENCES control_plane.registrations(registration_id) ON DELETE RESTRICT;
-
-
---
 -- Name: competitions competitions_current_reign_fk; Type: FK CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -1954,14 +1918,6 @@ GRANT USAGE ON SCHEMA control_plane TO teutonic_auditor;
 --
 
 REVOKE ALL ON FUNCTION control_plane.bump_public_state_revision() FROM PUBLIC;
-
-
---
--- Name: TABLE activation_challenges; Type: ACL; Schema: control_plane; Owner: teutonic_schema_owner
---
-
-GRANT SELECT,INSERT,UPDATE ON TABLE control_plane.activation_challenges TO teutonic_access_controller;
-GRANT SELECT ON TABLE control_plane.activation_challenges TO teutonic_auditor;
 
 
 --

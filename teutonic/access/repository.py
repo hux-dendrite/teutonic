@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Mapping
@@ -8,7 +7,7 @@ from typing import Any, Mapping
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from teutonic.credentials import ActivationChallenge, ActivationResponse, activation_message
+from teutonic.credentials import ActivationSignal, activation_message
 from teutonic.credentials.contracts import mailbox_object_key, registration_id
 
 from .contracts import Manifest, MetagraphSnapshot, ReadySignal
@@ -39,13 +38,9 @@ class AccessControllerRepository:
         self,
         connection,
         *,
-        registration_nonce: str,
         finalized_start_block: int,
     ) -> None:
-        if not registration_nonce or "|" in registration_nonce:
-            raise ValueError("registration_nonce must be non-empty and delimiter-safe")
         self.connection = connection
-        self.registration_nonce = registration_nonce
         self.finalized_start_block = finalized_start_block
         self._lock_held = False
 
@@ -67,6 +62,19 @@ class AccessControllerRepository:
     def _require_lock(self) -> None:
         if not self._lock_held:
             raise ControllerLockUnavailable("access controller advisory lock is not held")
+
+    def last_finalized_block(self, *, netuid: int, chain_generation: str) -> int | None:
+        """Return the durable scanner cursor while the controller lock is held."""
+        self._require_lock()
+        row = self.connection.execute(
+            """
+            SELECT last_finalized_block
+              FROM control_plane.chain_cursors
+             WHERE netuid = %s AND chain_generation = %s
+            """,
+            (netuid, chain_generation),
+        ).fetchone()
+        return None if row is None else int(row[0])
 
     def _enqueue_job(
         self,
@@ -147,13 +155,24 @@ class AccessControllerRepository:
             )
             snapshot_id = cursor.fetchone()["snapshot_id"]
             for assignment in snapshot.assignments:
+                registration_block = (
+                    assignment.registration_block
+                    if assignment.registration_block is not None
+                    else snapshot.finalized_block
+                )
                 cursor.execute(
                     """
                     INSERT INTO control_plane.metagraph_uid_assignments
-                        (snapshot_id, uid, hotkey, coldkey)
-                    VALUES (%s, %s, %s, %s)
+                        (snapshot_id, uid, hotkey, coldkey, registration_block)
+                    VALUES (%s, %s, %s, %s, %s)
                     """,
-                    (snapshot_id, assignment.uid, assignment.hotkey, assignment.coldkey),
+                    (
+                        snapshot_id,
+                        assignment.uid,
+                        assignment.hotkey,
+                        assignment.coldkey,
+                        registration_block if assignment.hotkey is not None else None,
+                    ),
                 )
 
             current = {
@@ -163,7 +182,7 @@ class AccessControllerRepository:
             }
             cursor.execute(
                 """
-                SELECT registration_id, uid, hotkey
+                SELECT registration_id, uid, hotkey, first_seen_finalized_block
                   FROM control_plane.registrations
                  WHERE netuid = %s AND chain_generation = %s AND state <> 'inactive'
                  FOR UPDATE
@@ -174,7 +193,16 @@ class AccessControllerRepository:
             deactivated: list[str] = []
             for row in active:
                 assignment = current.get(row["uid"])
-                if assignment is not None and assignment.hotkey == row["hotkey"]:
+                assignment_block = (
+                    assignment.registration_block
+                    if assignment is not None and assignment.registration_block is not None
+                    else snapshot.finalized_block
+                )
+                if (
+                    assignment is not None
+                    and assignment.hotkey == row["hotkey"]
+                    and assignment_block == row["first_seen_finalized_block"]
+                ):
                     cursor.execute(
                         """
                         UPDATE control_plane.registrations
@@ -219,20 +247,25 @@ class AccessControllerRepository:
 
             deactivated_set = set(deactivated)
             active_by_uid = {
-                row["uid"]: row["hotkey"]
+                row["uid"]: (row["hotkey"], row["first_seen_finalized_block"])
                 for row in active
                 if str(row["registration_id"]) not in deactivated_set
             }
             created: list[str] = []
             for uid, assignment in sorted(current.items()):
-                if active_by_uid.get(uid) == assignment.hotkey:
+                registration_block = (
+                    assignment.registration_block
+                    if assignment.registration_block is not None
+                    else snapshot.finalized_block
+                )
+                if active_by_uid.get(uid) == (assignment.hotkey, registration_block):
                     continue
                 identifier = registration_id(
                     netuid=snapshot.netuid,
                     uid=uid,
                     hotkey=assignment.hotkey,
-                    first_seen_finalized_block=snapshot.finalized_block,
-                    validator_nonce=self.registration_nonce,
+                    registration_block=registration_block,
+                    chain_generation=snapshot.chain_generation,
                 )
                 cursor.execute(
                     """
@@ -261,8 +294,8 @@ class AccessControllerRepository:
                             snapshot.chain_generation,
                             uid,
                             assignment.hotkey,
-                            snapshot.finalized_block,
-                            snapshot.finalized_block,
+                            registration_block,
+                            registration_block,
                             snapshot.finalized_block,
                             f"models/registrations/{identifier}/",
                         ),
@@ -283,7 +316,7 @@ class AccessControllerRepository:
                             snapshot.chain_generation,
                             uid,
                             assignment.hotkey,
-                            snapshot.finalized_block,
+                            registration_block,
                             snapshot.finalized_block,
                             f"models/registrations/{identifier}/",
                         ),
@@ -316,163 +349,114 @@ class AccessControllerRepository:
             )
         return SnapshotResult(str(snapshot_id), False, tuple(created), tuple(deactivated))
 
-    def issue_activation_challenge(
-        self,
-        registration: str,
-        *,
-        now: datetime,
-        lifetime: timedelta = timedelta(minutes=15),
-    ) -> ActivationChallenge:
+    def accept_activation_signal(
+        self, signal: ActivationSignal, *, now: datetime
+    ) -> str:
+        """Verify a finalized Ed25519 activation commitment and enqueue credentials."""
         self._require_lock()
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
         with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
-                "SELECT * FROM control_plane.registrations WHERE registration_id = %s FOR UPDATE",
-                (registration,),
+                """
+                SELECT *
+                  FROM control_plane.registrations
+                 WHERE netuid = %s AND chain_generation = %s AND hotkey = %s
+                   AND first_seen_finalized_block <= %s
+                   AND (deactivated_finalized_block IS NULL OR %s < deactivated_finalized_block)
+                 ORDER BY first_seen_finalized_block DESC
+                 LIMIT 1
+                 FOR UPDATE
+                """,
+                (
+                    signal.netuid,
+                    signal.chain_generation,
+                    signal.signalling_hotkey,
+                    signal.block_number,
+                    signal.block_number,
+                ),
             )
             row = cursor.fetchone()
-            if row is None or row["state"] not in {"pending_activation", "activating"}:
-                raise ControllerInvariantError("registration is not eligible for activation")
-            cursor.execute(
-                "SELECT EXISTS (SELECT 1 FROM control_plane.uploads WHERE signalling_hotkey = %s)",
-                (row["hotkey"],),
-            )
-            if cursor.fetchone()["exists"]:
-                raise ControllerInvariantError("hotkey submission eligibility is permanently consumed")
+            if row is None or row["state"] not in {"pending_activation", "active"}:
+                raise ControllerInvariantError("hotkey has no registration eligible for activation")
             cursor.execute(
                 """
-                SELECT EXISTS (
-                    SELECT 1
-                      FROM control_plane.registrations old
-                      JOIN control_plane.r2_parent_tokens token
-                        ON token.registration_id = old.registration_id
-                     WHERE old.netuid = %s AND old.chain_generation = %s AND old.uid = %s
-                       AND old.registration_id <> %s AND token.state <> 'revoked'
-                )
+                SELECT assignment.hotkey, assignment.registration_block
+                  FROM control_plane.metagraph_snapshots snapshot
+                  JOIN control_plane.metagraph_uid_assignments assignment USING (snapshot_id)
+                 WHERE snapshot.netuid = %s AND snapshot.chain_generation = %s
+                   AND snapshot.finalized_block = %s AND assignment.uid = %s
                 """,
-                (row["netuid"], row["chain_generation"], row["uid"], registration),
+                (row["netuid"], row["chain_generation"], signal.block_number, row["uid"]),
             )
-            if cursor.fetchone()["exists"]:
-                raise ControllerInvariantError("replaced registration authority is not yet revoked")
-
-            cursor.execute(
-                "SELECT * FROM control_plane.activation_challenges WHERE registration_id = %s",
-                (registration,),
-            )
-            existing = cursor.fetchone()
-            if existing and existing["verified_at"] is None and existing["expires_at"] > now:
-                return ActivationChallenge(
-                    registration_id=registration,
-                    netuid=row["netuid"],
-                    uid=row["uid"],
-                    hotkey=row["hotkey"],
-                    validator_nonce=existing["validator_nonce"],
-                    expires_at=existing["expires_at"],
+            assignment = cursor.fetchone()
+            if (
+                assignment is None
+                or assignment["hotkey"] != signal.signalling_hotkey
+                or assignment["registration_block"] != row["first_seen_finalized_block"]
+            ):
+                raise ControllerInvariantError(
+                    "hotkey did not own the registration at the activation block"
                 )
-
-            nonce = secrets.token_urlsafe(24)
-            expires_at = now + lifetime
+            registration = str(row["registration_id"])
             message = activation_message(
                 netuid=row["netuid"],
                 uid=row["uid"],
                 hotkey=row["hotkey"],
                 registration_id=registration,
-                validator_nonce=nonce,
-                expires_at=expires_at,
+                registration_block=row["first_seen_finalized_block"],
+                chain_generation=row["chain_generation"],
             )
+            verify_hotkey_signature(row["hotkey"], message.encode(), signal.signature)
+            if row["state"] == "active":
+                return registration
             cursor.execute(
                 """
-                INSERT INTO control_plane.activation_challenges (
-                    registration_id, validator_nonce, message, expires_at
-                ) VALUES (%s, %s, %s, %s)
-                ON CONFLICT (registration_id) DO UPDATE SET
-                    validator_nonce = EXCLUDED.validator_nonce,
-                    message = EXCLUDED.message,
-                    expires_at = EXCLUDED.expires_at,
-                    created_at = clock_timestamp(),
-                    verified_at = NULL
+                UPDATE control_plane.registrations
+                   SET state = 'active', activated_at = %s,
+                       activation_finalized_block = %s,
+                       activation_extrinsic_index = %s,
+                       activation_event_index = %s,
+                       activation_payload = %s,
+                       updated_at = %s
+                 WHERE registration_id = %s
                 """,
-                (registration, nonce, message, expires_at),
+                (
+                    now,
+                    signal.block_number,
+                    signal.extrinsic_index,
+                    signal.event_index,
+                    signal.raw_payload,
+                    now,
+                    registration,
+                ),
             )
-            cursor.execute(
-                "UPDATE control_plane.registrations SET state = 'activating', updated_at = clock_timestamp() WHERE registration_id = %s",
-                (registration,),
-            )
-            return ActivationChallenge(
-                registration_id=registration,
-                netuid=row["netuid"],
-                uid=row["uid"],
-                hotkey=row["hotkey"],
-                validator_nonce=nonce,
-                expires_at=expires_at,
-            )
-
-    def verify_activation(
-        self,
-        response: ActivationResponse,
-        *,
-        now: datetime,
-    ) -> None:
-        self._require_lock()
-        response.as_dict()
-        if now.tzinfo is None:
-            raise ValueError("now must be timezone-aware")
-        with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
-            cursor.execute(
-                """
-                SELECT challenge.*, registration.hotkey, registration.state
-                  FROM control_plane.activation_challenges challenge
-                  JOIN control_plane.registrations registration USING (registration_id)
-                 WHERE challenge.registration_id = %s
-                 FOR UPDATE OF challenge, registration
-                """,
-                (response.registration_id,),
-            )
-            row = cursor.fetchone()
-            if row is None or row["state"] != "activating":
-                raise ControllerInvariantError("activation challenge is not active")
-            if row["verified_at"] is not None:
-                return
-            if row["expires_at"] <= now:
-                raise ControllerInvariantError("activation challenge expired")
-            if response.hotkey != row["hotkey"] or response.validator_nonce != row["validator_nonce"]:
-                raise ControllerInvariantError("activation response identity does not match challenge")
-            verify_hotkey_signature(row["hotkey"], row["message"].encode(), response.signature)
-            cursor.execute(
-                "UPDATE control_plane.activation_challenges SET verified_at = %s WHERE registration_id = %s",
-                (now, response.registration_id),
-            )
-            cursor.execute(
-                "UPDATE control_plane.registrations SET state = 'active', updated_at = %s WHERE registration_id = %s",
-                (now, response.registration_id),
-            )
-            token_name = f"teutonic-registration-{response.registration_id}"
+            token_name = f"teutonic-registration-{registration}"
             cursor.execute(
                 """
                 INSERT INTO control_plane.r2_parent_tokens (registration_id, token_name, state)
                 VALUES (%s, %s, 'pending_create')
                 ON CONFLICT (registration_id) DO NOTHING
                 """,
-                (response.registration_id, token_name),
+                (registration, token_name),
             )
             self._enqueue_job(
                 cursor,
-                registration_id=response.registration_id,
+                registration_id=registration,
                 operation="create_parent_token",
-                idempotency_key=f"create-parent:{response.registration_id}",
+                idempotency_key=f"create-parent:{registration}",
             )
+            return registration
 
     def registration_context(self, registration: str) -> dict[str, Any]:
         self._require_lock()
         with self.connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 """
-                SELECT registration.*, challenge.validator_nonce,
+                SELECT registration.*,
                        token.parent_token_id, token.token_name, token.cloudflare_token_id,
                        token.access_key_id, token.encrypted_secret, token.state AS token_state
                   FROM control_plane.registrations registration
-                  LEFT JOIN control_plane.activation_challenges challenge USING (registration_id)
                   LEFT JOIN control_plane.r2_parent_tokens token USING (registration_id)
                  WHERE registration.registration_id = %s
                 """,
@@ -728,6 +712,19 @@ class AccessControllerRepository:
             registration = cursor.fetchone()
             if registration is None or registration["hotkey"] != signal.signalling_hotkey:
                 raise ControllerInvariantError("ready signal hotkey does not own registration")
+            if registration["state"] != "active":
+                raise ControllerInvariantError("ready signal registration is not active")
+            activation_position = (
+                registration["activation_finalized_block"],
+                registration["activation_extrinsic_index"],
+                registration["activation_event_index"],
+            )
+            if None in activation_position or (
+                signal.block_number,
+                signal.extrinsic_index,
+                signal.event_index,
+            ) <= activation_position:
+                raise ControllerInvariantError("ready signal does not follow activation")
             if signal.block_number < registration["first_seen_finalized_block"] or (
                 registration["deactivated_finalized_block"] is not None
                 and signal.block_number >= registration["deactivated_finalized_block"]
@@ -735,7 +732,7 @@ class AccessControllerRepository:
                 raise ControllerInvariantError("ready signal is outside registration eligibility")
             cursor.execute(
                 """
-                SELECT assignment.hotkey
+                SELECT assignment.hotkey, assignment.registration_block
                   FROM control_plane.metagraph_snapshots snapshot
                   JOIN control_plane.metagraph_uid_assignments assignment USING (snapshot_id)
                  WHERE snapshot.netuid = %s AND snapshot.chain_generation = %s
@@ -749,7 +746,12 @@ class AccessControllerRepository:
                 ),
             )
             assignment = cursor.fetchone()
-            if assignment is None or assignment["hotkey"] != signal.signalling_hotkey:
+            if (
+                assignment is None
+                or assignment["hotkey"] != signal.signalling_hotkey
+                or assignment["registration_block"]
+                != registration["first_seen_finalized_block"]
+            ):
                 raise ControllerInvariantError("hotkey did not occupy the UID at the ready block")
             cursor.execute(
                 """

@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import boto3
+import bittensor as bt
 import httpx
 import psycopg
 from botocore.config import Config
@@ -19,6 +20,7 @@ from teutonic.access import (
     AccessControllerJobRunner,
     AccessControllerRepository,
     ControllerLockUnavailable,
+    FinalizedChainScanner,
     MailboxCipher,
     MailboxStore,
     R2UploadController,
@@ -106,13 +108,18 @@ def main() -> int:
     with (
         psycopg.connect(required("TEUTONIC_DATABASE_URL"), autocommit=True) as connection,
         httpx.Client(timeout=30.0) as http,
+        bt.Subtensor(network=required("TEUTONIC_NETWORK")) as subtensor,
     ):
         repository = AccessControllerRepository(
             connection,
-            registration_nonce=required("TEUTONIC_REGISTRATION_NONCE"),
             finalized_start_block=int(
                 os.environ.get("TEUTONIC_FINALIZED_START_BLOCK", "0")
             ),
+        )
+        scanner = FinalizedChainScanner(
+            subtensor,
+            netuid=int(required("TEUTONIC_NETUID")),
+            chain_generation=required("TEUTONIC_CHAIN_GENERATION"),
         )
         runner = AccessControllerJobRunner(
             repository,
@@ -144,16 +151,27 @@ def main() -> int:
             ),
         )
         log.info("access controller active instance=%s", instance)
+        next_chain_scan = 0.0
         while not stopping:
             acquired = False
             try:
                 repository.acquire_lock()
                 acquired = True
-                recovered = repository.recover_expired_jobs(now=datetime.now(timezone.utc))
+                scanned = accepted = 0
+                if time.monotonic() >= next_chain_scan:
+                    next_chain_scan = time.monotonic() + 6.0
+                    scanned, accepted = scanner.scan(repository)
+                recovered = repository.recover_expired_jobs(
+                    now=datetime.now(timezone.utc)
+                )
                 processed = runner.run_until_idle(maximum_jobs=100)
-                if recovered or processed:
+                if scanned or accepted or recovered or processed:
                     log.info(
-                        "controller jobs recovered=%d processed=%d", recovered, processed
+                        "controller chain_blocks=%d signals=%d jobs_recovered=%d jobs_processed=%d",
+                        scanned,
+                        accepted,
+                        recovered,
+                        processed,
                     )
             except ControllerLockUnavailable:
                 log.info("controller lock busy; retrying")

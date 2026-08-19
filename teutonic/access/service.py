@@ -230,7 +230,8 @@ class AccessControllerJobRunner:
                 secret_access_key=credentials.secret_access_key,
                 session_token=credentials.session_token,
                 expires_at=expires_at,
-                validator_nonce=context["validator_nonce"],
+                chain_generation=context["chain_generation"],
+                registration_block=context["first_seen_finalized_block"],
             )
             checkpoint = {
                 "ciphertext": base64.b64encode(ciphertext).decode(),

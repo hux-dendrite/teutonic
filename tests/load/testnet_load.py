@@ -142,7 +142,7 @@ def validate_environment() -> None:
         raise RuntimeError(f"load runner is restricted to subnet {NETUID}")
     if required("BT_WALLET_NAME") != COLDKEY:
         raise RuntimeError(f"load runner is restricted to coldkey {COLDKEY}")
-    required("CLOUDFLARE_API_TOKEN")
+    required("TEUTONIC_MAILBOX_PUBLIC_BASE_URL")
 
 
 def main() -> int:

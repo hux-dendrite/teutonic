@@ -41,12 +41,17 @@ class UidAssignment:
     uid: int
     hotkey: str | None
     coldkey: str | None
+    registration_block: int | None = None
 
     def __post_init__(self) -> None:
         if self.uid < 0:
             raise ValueError("UID must be non-negative")
         if (self.hotkey is None) != (self.coldkey is None):
             raise ValueError("hotkey and coldkey must both be present or absent")
+        if self.hotkey is None and self.registration_block is not None:
+            raise ValueError("an empty UID cannot have a registration block")
+        if self.registration_block is not None and self.registration_block < 0:
+            raise ValueError("registration block must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +82,7 @@ class MetagraphSnapshot:
                 {
                     "coldkey": assignment.coldkey,
                     "hotkey": assignment.hotkey,
+                    "registration_block": assignment.registration_block,
                     "uid": assignment.uid,
                 }
                 for assignment in sorted(self.assignments)

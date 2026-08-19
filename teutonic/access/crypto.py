@@ -145,7 +145,8 @@ class MailboxCipher:
         secret_access_key: str,
         session_token: str,
         expires_at: datetime,
-        validator_nonce: str,
+        chain_generation: str,
+        registration_block: int,
     ) -> dict[str, Any]:
         unsigned: dict[str, Any] = {
             "protocol_version": 1,
@@ -165,7 +166,8 @@ class MailboxCipher:
             "secret_access_key": secret_access_key,
             "session_token": session_token,
             "expires_at": _utc_text(expires_at),
-            "validator_nonce": validator_nonce,
+            "chain_generation": chain_generation,
+            "registration_block": registration_block,
             "signature_scheme": "ed25519",
         }
         signature = self._signing_key.sign(_canonical_json(unsigned)).signature

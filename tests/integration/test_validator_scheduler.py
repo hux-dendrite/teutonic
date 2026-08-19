@@ -154,7 +154,6 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
                 control_plane.uploads,
                 control_plane.credential_generations,
                 control_plane.r2_parent_tokens,
-                control_plane.activation_challenges,
                 control_plane.registrations,
                 control_plane.metagraph_uid_assignments,
                 control_plane.metagraph_snapshots,
@@ -177,10 +176,11 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
                 cursor.executemany(
                     """
                     INSERT INTO control_plane.metagraph_uid_assignments
-                        (snapshot_id, uid, hotkey, coldkey) VALUES (%s, %s, %s, %s)
+                        (snapshot_id, uid, hotkey, coldkey, registration_block)
+                    VALUES (%s, %s, %s, %s, %s)
                     """,
                     [
-                        (snapshot, uid, f"hotkey-{uid}", f"coldkey-{uid}")
+                        (snapshot, uid, f"hotkey-{uid}", f"coldkey-{uid}", block)
                         for uid in (1, 2, 3, 4)
                     ],
                 )

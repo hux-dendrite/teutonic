@@ -152,7 +152,8 @@ class AccessControllerContractTests(unittest.TestCase):
             secret_access_key="secret",
             session_token="session",
             expires_at=datetime(2026, 8, 25, tzinfo=timezone.utc),
-            validator_nonce="nonce",
+            chain_generation="genesis-1",
+            registration_block=100,
         )
         decrypted = cipher.decrypt_for_test(ciphertext, self.miner)
         self.assertEqual(decrypted, envelope)

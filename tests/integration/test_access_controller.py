@@ -31,7 +31,12 @@ from teutonic.access import (
 from teutonic.access.cloudflare import ParentToken
 from teutonic.access.crypto import SecretCipher, encode_signature
 from teutonic.access.repository import ControllerInvariantError, ControllerLockUnavailable
-from teutonic.credentials import ActivationResponse, mailbox_object_key
+from teutonic.credentials import (
+    ActivationSignal,
+    activation_message,
+    activation_signal_payload,
+    mailbox_object_key,
+)
 from teutonic.storage.artifacts import model_digest_from_inventory
 
 
@@ -170,7 +175,7 @@ class AccessControllerIntegrationTests(unittest.TestCase):
                 control_plane.controller_jobs, control_plane.verified_uploads,
                 control_plane.upload_files, control_plane.uploads,
                 control_plane.credential_generations, control_plane.r2_parent_tokens,
-                control_plane.activation_challenges, control_plane.registrations,
+                control_plane.registrations,
                 control_plane.metagraph_uid_assignments,
                 control_plane.metagraph_snapshots, control_plane.chain_cursors
             RESTART IDENTITY CASCADE
@@ -179,7 +184,7 @@ class AccessControllerIntegrationTests(unittest.TestCase):
         self.miner = SigningKey.generate()
         self.hotkey = encode_ss58_public_key(bytes(self.miner.verify_key))
         self.repository = AccessControllerRepository(
-            self.connection, registration_nonce="phase4-integration", finalized_start_block=100
+            self.connection, finalized_start_block=100
         )
         self.repository.acquire_lock()
         self.s3 = FakeS3()
@@ -204,9 +209,11 @@ class AccessControllerIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.repository.release_lock()
 
-    def snapshot(self, block: int, hotkey: str | None) -> MetagraphSnapshot:
+    def snapshot(
+        self, block: int, hotkey: str | None, registration_block: int = 100
+    ) -> MetagraphSnapshot:
         assignments = (
-            (UidAssignment(42, hotkey, hotkey),)
+            (UidAssignment(42, hotkey, hotkey, registration_block),)
             if hotkey is not None
             else (UidAssignment(42, None, None),)
         )
@@ -222,15 +229,24 @@ class AccessControllerIntegrationTests(unittest.TestCase):
     def activate(self) -> str:
         result = self.repository.apply_finalized_snapshot(self.snapshot(100, self.hotkey))
         registration = result.created_registrations[0]
-        challenge = self.repository.issue_activation_challenge(registration, now=NOW)
-        self.repository.verify_activation(
-            ActivationResponse(
-                registration_id=registration,
-                hotkey=self.hotkey,
-                validator_nonce=challenge.validator_nonce,
-                signature=encode_signature(
-                    self.miner.sign(challenge.message.encode()).signature
-                ),
+        message = activation_message(
+            netuid=3,
+            uid=42,
+            hotkey=self.hotkey,
+            registration_id=registration,
+            registration_block=100,
+            chain_generation="phase4-chain",
+        )
+        payload = activation_signal_payload(self.miner.sign(message.encode()).signature)
+        self.repository.accept_activation_signal(
+            ActivationSignal.parse(
+                payload,
+                netuid=3,
+                chain_generation="phase4-chain",
+                signalling_hotkey=self.hotkey,
+                block_number=100,
+                extrinsic_index=1,
+                event_index=2,
             ),
             now=NOW,
         )
@@ -337,17 +353,15 @@ class AccessControllerIntegrationTests(unittest.TestCase):
             )
 
         self.repository.apply_finalized_snapshot(self.snapshot(102, None))
-        replacement = self.repository.apply_finalized_snapshot(self.snapshot(103, self.hotkey))
+        replacement = self.repository.apply_finalized_snapshot(
+            self.snapshot(103, self.hotkey, registration_block=103)
+        )
         replacement_id = replacement.created_registrations[0]
         replacement_state = self.connection.execute(
             "SELECT state FROM control_plane.registrations WHERE registration_id = %s",
             (replacement_id,),
         ).fetchone()[0]
         self.assertEqual(replacement_state, "inactive")
-        with self.assertRaises(ControllerInvariantError):
-            self.repository.issue_activation_challenge(
-                replacement_id, now=NOW + timedelta(minutes=4)
-            )
         self.runner.run_until_idle(propagate=True)
         incomplete_jobs = self.connection.execute(
             "SELECT count(*) FROM control_plane.controller_jobs WHERE state <> 'completed'"
@@ -387,7 +401,6 @@ class AccessControllerIntegrationTests(unittest.TestCase):
         with psycopg.connect(DATABASE_URL, autocommit=True) as second_connection:
             contender = AccessControllerRepository(
                 second_connection,
-                registration_nonce="phase4-contender",
                 finalized_start_block=100,
             )
             with self.assertRaises(ControllerLockUnavailable):

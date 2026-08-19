@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import base64
 import unittest
-from datetime import datetime, timezone
 
 from teutonic.chain import (
     FINALIZATION_EVENT_EXTRINSIC_INDEX,
@@ -13,8 +12,9 @@ from teutonic.chain import (
 from teutonic.config import BucketNames, WorkflowPolicy
 from teutonic.schemas import SCHEMA_DIR
 from teutonic.credentials import (
-    ActivationChallenge,
+    ActivationSignal,
     activation_message,
+    activation_signal_payload,
     mailbox_object_key,
     registration_id,
 )
@@ -22,7 +22,7 @@ from teutonic.storage import MINER_PREFIX_SCOPE, create_local_temporary_credenti
 
 
 HOTKEY = "5" + "A" * 47
-NONCE = "AQIDBAUGBwgJCgsMDQ4PEA"
+CHAIN_GENERATION = "chain-generation-1"
 
 
 class CredentialContractTests(unittest.TestCase):
@@ -31,22 +31,22 @@ class CredentialContractTests(unittest.TestCase):
             netuid=3,
             uid=42,
             hotkey=HOTKEY,
-            first_seen_finalized_block=100,
-            validator_nonce=NONCE,
+            registration_block=100,
+            chain_generation=CHAIN_GENERATION,
         )
         same = registration_id(
             netuid=3,
             uid=42,
             hotkey=HOTKEY,
-            first_seen_finalized_block=100,
-            validator_nonce=NONCE,
+            registration_block=100,
+            chain_generation=CHAIN_GENERATION,
         )
         later = registration_id(
             netuid=3,
             uid=42,
             hotkey=HOTKEY,
-            first_seen_finalized_block=101,
-            validator_nonce=NONCE,
+            registration_block=101,
+            chain_generation=CHAIN_GENERATION,
         )
         self.assertEqual(one, same)
         self.assertNotEqual(one, later)
@@ -54,9 +54,8 @@ class CredentialContractTests(unittest.TestCase):
 
     def test_activation_message_binds_every_authority_field(self) -> None:
         registration = "a" * 64
-        expiry = datetime(2026, 8, 17, 12, 30, tzinfo=timezone.utc)
         expected = (
-            f"activate|v1|3|42|{HOTKEY}|{registration}|{NONCE}|2026-08-17T12:30:00Z"
+            f"activate|v2|{CHAIN_GENERATION}|3|42|{HOTKEY}|{registration}|100"
         )
         self.assertEqual(
             activation_message(
@@ -64,20 +63,23 @@ class CredentialContractTests(unittest.TestCase):
                 uid=42,
                 hotkey=HOTKEY,
                 registration_id=registration,
-                validator_nonce=NONCE,
-                expires_at=expiry,
+                registration_block=100,
+                chain_generation=CHAIN_GENERATION,
             ),
             expected,
         )
-        challenge = ActivationChallenge(
-            registration_id=registration,
+        payload = activation_signal_payload(b"s" * 64)
+        self.assertLessEqual(len(payload.encode()), 128)
+        signal = ActivationSignal.parse(
+            payload,
             netuid=3,
-            uid=42,
-            hotkey=HOTKEY,
-            validator_nonce=NONCE,
-            expires_at=expiry,
+            chain_generation=CHAIN_GENERATION,
+            signalling_hotkey=HOTKEY,
+            block_number=101,
+            extrinsic_index=2,
+            event_index=3,
         )
-        self.assertEqual(challenge.as_dict()["message"], expected)
+        self.assertEqual(base64.b64decode(signal.signature), b"s" * 64)
 
     def test_mailbox_generations_are_immutable_lexically_ordered_keys(self) -> None:
         registration = "b" * 64
@@ -159,8 +161,7 @@ class ControlPlaneDecisionTests(unittest.TestCase):
     def test_all_contract_schema_files_are_valid_json(self) -> None:
         schema_dir = SCHEMA_DIR
         names = {
-            "activation-challenge-v1.schema.json",
-            "activation-response-v1.schema.json",
+            "activation-signal-v1.schema.json",
             "mailbox-envelope-v1.schema.json",
             "ready-signal-v1.schema.json",
             "dashboard-v1.schema.json",

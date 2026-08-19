@@ -22,7 +22,8 @@
     "secret_access_key",
     "session_token",
     "expires_at",
-    "validator_nonce",
+    "chain_generation",
+    "registration_block",
     "signature_scheme",
     "validator_signature"
   ],
@@ -44,7 +45,8 @@
     "secret_access_key": { "type": "string", "minLength": 1 },
     "session_token": { "type": "string", "minLength": 1 },
     "expires_at": { "type": "string", "format": "date-time" },
-    "validator_nonce": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "chain_generation": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "registration_block": { "type": "integer", "minimum": 0 },
     "signature_scheme": { "const": "ed25519" },
     "validator_signature": { "type": "string", "minLength": 64, "maxLength": 256 }
   }

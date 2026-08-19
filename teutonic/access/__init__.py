@@ -14,7 +14,17 @@ from .crypto import (
     encode_ss58_public_key,
     verify_hotkey_signature,
 )
-from .repository import AccessControllerRepository, ControllerLockUnavailable
+from .chain import (
+    FinalizedChainScanner,
+    activation_signals_from_block,
+    commitment_payload,
+    ready_signals_from_block,
+)
+from .repository import (
+    AccessControllerRepository,
+    ControllerInvariantError,
+    ControllerLockUnavailable,
+)
 from .service import AccessControllerJobRunner, MailboxStore
 from .storage import ImmutableSnapshotResult, R2UploadController
 
@@ -22,6 +32,9 @@ __all__ = [
     "AccessControllerRepository",
     "AccessControllerJobRunner",
     "ControllerLockUnavailable",
+    "ControllerInvariantError",
+    "FinalizedChainScanner",
+    "activation_signals_from_block",
     "ImmutableSnapshotResult",
     "MailboxCipher",
     "MailboxStore",
@@ -34,5 +47,7 @@ __all__ = [
     "decode_ss58_public_key",
     "encode_ss58_public_key",
     "ready_signal_payload",
+    "commitment_payload",
+    "ready_signals_from_block",
     "verify_hotkey_signature",
 ]
