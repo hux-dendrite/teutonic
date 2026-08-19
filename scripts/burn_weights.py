@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Burn the validator's emission by routing 100% weight to a single UID.
+"""Burn validator emission by routing 100% weight to a single UID.
 
 Used as a fallback when the eval server is down (or otherwise unable to score
 challengers) but we still want the validator hotkey to set weights every

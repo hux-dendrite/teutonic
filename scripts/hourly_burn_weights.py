@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Set the validator hotkey's weights to 100% UID 0 on a wall-clock cadence.
+"""Set validator weights to 100% UID 0 on a wall-clock cadence.
 
 This is intentionally simpler than the scoring validator and any block-height
 watchdog: it never looks at challengers or prior winners, and it never derives

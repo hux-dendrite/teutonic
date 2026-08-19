@@ -17,7 +17,7 @@ services:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./schema/control_plane.sql:/docker-entrypoint-initdb.d/001-control-plane.sql:ro
+      - ./teutonic/schemas/control_plane.sql:/docker-entrypoint-initdb.d/001-control-plane.sql:ro
 
 volumes:
   postgres-data:

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The validator-host PM2 process supplies all connection values from .env.
 required=(
   TEUTONIC_EVAL_SSH_HOST
   TEUTONIC_EVAL_SSH_USER

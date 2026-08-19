@@ -9,7 +9,7 @@ seed_repo = "dendriteholdings/mimo-v2.5-pro-104b-64e-w1024-top4"
 repo_pattern = "^[^/]+/mimo-v2\\.5-pro-.+$"
 
 [arch]
-module = "archs.mimo"
+module = "teutonic.archs.mimo"
 extra_lock_keys = [
   "add_full_attention_sink_bias",
   "add_swa_attention_sink_bias",

@@ -13,7 +13,7 @@ services:
       timeout: 3s
       retries: 30
     volumes:
-      - ./schema/control_plane.sql:/docker-entrypoint-initdb.d/001-control-plane.sql:ro
+      - ./teutonic/schemas/control_plane.sql:/docker-entrypoint-initdb.d/001-control-plane.sql:ro
     tmpfs:
       - /var/lib/postgresql/data
 

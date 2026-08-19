@@ -29,7 +29,7 @@ module.exports = {
   apps: [
     {
       name: "teutonic-eval-tunnel",
-      script: "./tunnel.sh",
+      script: "scripts/evaluator_tunnel.sh",
       interpreter: "/bin/bash",
       cwd: root,
       exec_mode: "fork",

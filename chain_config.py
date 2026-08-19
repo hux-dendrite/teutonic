@@ -2,7 +2,7 @@
 
 Reads `chain.toml` at the repo root and exposes constants used by the evaluator
 and architecture checks. To switch architectures, edit `chain.toml` and add
-`archs/<new>/` when required.
+`teutonic/archs/<new>/` when required.
 
 Override knob: `TEUTONIC_CHAIN_OVERRIDE` env var, when set, points at
 an alternate TOML (relative to repo root or absolute path). Used by local

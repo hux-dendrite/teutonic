@@ -1,5 +1,5 @@
 -- Teutonic control-plane fresh-start schema.
--- Loaded once by the PostgreSQL Docker entrypoint for an empty data directory.
+-- Loaded by the PostgreSQL Docker entrypoint for an empty data directory.
 
 BEGIN;
 

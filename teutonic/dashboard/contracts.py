@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import math
 from functools import lru_cache
-from pathlib import Path
 from typing import Any, Mapping
 
 from jsonschema import Draft202012Validator, FormatChecker
 
-SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schemas" / "dashboard-v1.schema.json"
+from teutonic.schemas import SCHEMA_DIR
+
+SCHEMA_PATH = SCHEMA_DIR / "dashboard-v1.schema.json"
 
 
 class DashboardContractError(ValueError):

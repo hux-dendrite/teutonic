@@ -1,4 +1,4 @@
-"""MiMo V2 architecture marker.
+"""MiMo V2 architecture package marker.
 
 MiMo V2.5 Pro checkpoints carry their own pinned Transformers config/model
 modules. The eval server loads those modules from the immutable snapshot with

@@ -4,7 +4,6 @@ import json
 import base64
 import unittest
 from datetime import datetime, timezone
-from pathlib import Path
 
 from teutonic.chain import (
     FINALIZATION_EVENT_EXTRINSIC_INDEX,
@@ -12,6 +11,7 @@ from teutonic.chain import (
     FinalizedPosition,
 )
 from teutonic.config import BucketNames, WorkflowPolicy
+from teutonic.schemas import SCHEMA_DIR
 from teutonic.credentials import (
     ActivationChallenge,
     activation_message,
@@ -158,7 +158,7 @@ class ControlPlaneDecisionTests(unittest.TestCase):
             BucketNames(mailbox="same-bucket", ingest="same-bucket")
 
     def test_all_contract_schema_files_are_valid_json(self) -> None:
-        schema_dir = Path(__file__).parents[2] / "schemas"
+        schema_dir = SCHEMA_DIR
         names = {
             "activation-challenge-v1.schema.json",
             "activation-response-v1.schema.json",
