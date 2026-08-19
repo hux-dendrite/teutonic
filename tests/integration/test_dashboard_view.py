@@ -254,6 +254,69 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["king_payout"]["weight"], 1.0)
         self.assertEqual(payload["king_chain"][0]["uid"], 19)
 
+    def test_king_chain_uses_weights_and_uids_from_current_plan(self):
+        competition, current_reign = self.owner.execute(
+            "SELECT competition_id, current_reign_id FROM control_plane.competitions"
+        ).fetchone()
+        eligible_hotkey = "5" + "P" * 47
+        excluded_hotkey = "5" + "O" * 47
+        self.owner.execute(
+            "UPDATE control_plane.king_reigns SET reign_number = 2 WHERE reign_id = %s",
+            (current_reign,),
+        )
+        self.owner.execute(
+            """
+            INSERT INTO control_plane.king_reigns (
+                competition_id, reign_number, model_digest, public_bucket, public_prefix,
+                hotkey, uid, crowned_at, crowned_finalized_block, ended_at,
+                replacement_reason, operator_provenance
+            ) VALUES
+                (%s, 0, %s, 'teutonic-models', %s, %s, 3, %s, 700, %s,
+                 'accepted_challenger', 'seed'),
+                (%s, 1, %s, 'teutonic-models', %s, %s, 4, %s, 800, %s,
+                 'accepted_challenger', NULL)
+            """,
+            (
+                competition,
+                "7" * 64,
+                f"models/sha256/{'7' * 64}/",
+                excluded_hotkey,
+                NOW,
+                NOW,
+                competition,
+                "8" * 64,
+                f"models/sha256/{'8' * 64}/",
+                eligible_hotkey,
+                NOW,
+                NOW,
+            ),
+        )
+        self.owner.execute(
+            """
+            UPDATE control_plane.weight_publications
+               SET policy_hotkeys = %s, target_hotkeys = %s,
+                   target_uids = ARRAY[19, 23],
+                   normalized_weights = ARRAY[0.5, 0.5]::double precision[],
+                   payload_revision = 2, mapping_finalized_block = 1001
+             WHERE source_reign_id = %s
+            """,
+            (
+                [self.king_hotkey, eligible_hotkey],
+                [self.king_hotkey, eligible_hotkey],
+                current_reign,
+            ),
+        )
+
+        chain = {
+            reign["hotkey"]: reign for reign in self.repository.project(now=NOW)["king_chain"]
+        }
+        self.assertEqual(chain[self.king_hotkey]["weight"], 0.5)
+        self.assertEqual(chain[self.king_hotkey]["uid"], 19)
+        self.assertEqual(chain[eligible_hotkey]["weight"], 0.5)
+        self.assertEqual(chain[eligible_hotkey]["uid"], 23)
+        self.assertIsNone(chain[excluded_hotkey]["weight"])
+        self.assertEqual(chain[excluded_hotkey]["uid"], 3)
+
     def test_fresh_database_projects_a_valid_empty_state(self):
         self.owner.execute(
             """

@@ -833,10 +833,7 @@ CREATE VIEW control_plane.dashboard_king_reigns WITH (security_barrier='true') A
     r.reign_number,
     r.hotkey,
     identity.coldkey,
-        CASE
-            WHEN (c.current_reign_id = r.reign_id) THEN COALESCE(current_weights.target_uids[array_position(current_weights.target_hotkeys, r.hotkey)], r.uid)
-            ELSE r.uid
-        END AS uid,
+    COALESCE(current_weights.target_uids[array_position(current_weights.target_hotkeys, r.hotkey)], r.uid) AS uid,
     public_upload.model_name AS public_model_name,
     r.model_digest AS public_model_digest,
     r.public_prefix AS public_model_reference,
@@ -848,14 +845,11 @@ CREATE VIEW control_plane.dashboard_king_reigns WITH (security_barrier='true') A
             WHEN (r.replacement_reason IS NULL) THEN NULL::text
             ELSE 'replaced'::text
         END AS replacement_reason,
-        CASE
-            WHEN (c.current_reign_id = r.reign_id) THEN current_weights.normalized_weights[array_position(current_weights.target_hotkeys, r.hotkey)]
-            ELSE NULL::double precision
-        END AS current_weight
+    current_weights.normalized_weights[array_position(current_weights.target_hotkeys, r.hotkey)] AS current_weight
    FROM ((((control_plane.king_reigns r
      JOIN control_plane.competitions c ON ((c.competition_id = r.competition_id)))
      LEFT JOIN control_plane.uploads public_upload ON ((public_upload.upload_id = r.accepted_upload_id)))
-     LEFT JOIN control_plane.weight_publications current_weights ON ((current_weights.source_reign_id = r.reign_id)))
+     LEFT JOIN control_plane.weight_publications current_weights ON ((current_weights.source_reign_id = c.current_reign_id)))
      LEFT JOIN LATERAL ( SELECT assignment.coldkey
            FROM (control_plane.metagraph_snapshots snapshot
              JOIN control_plane.metagraph_uid_assignments assignment ON ((assignment.snapshot_id = snapshot.snapshot_id)))
