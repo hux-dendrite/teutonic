@@ -11,9 +11,9 @@ const pythonBin = python.includes("/") ? path.dirname(python) : "";
 const commonEnv = {
   ...fileEnv,
   PYTHONUNBUFFERED: fileEnv.PYTHONUNBUFFERED || "1",
+  PYTHONPATH: [root, fileEnv.PYTHONPATH].filter(Boolean).join(path.delimiter),
   ...(pythonBin ? { PATH: `${pythonBin}:${fileEnv.PATH || ""}` } : {}),
 };
-
 const longRunning = {
   interpreter: python,
   cwd: root,
