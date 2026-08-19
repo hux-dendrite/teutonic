@@ -19,7 +19,6 @@ from teutonic.bootstrap import (
     bootstrap_genesis,
 )
 from teutonic.config import BucketNames
-from teutonic.validator import BittensorFinalizedMetagraphReader
 
 
 log = logging.getLogger("teutonic.seed-bootstrap")
@@ -74,6 +73,11 @@ def main() -> int:
     parser.add_argument("--upload-files", type=int, default=16)
     parser.add_argument("--upload-parts", type=int, default=16)
     parser.add_argument("--upload-part-size-mib", type=int, default=64)
+    parser.add_argument(
+        "--upload-only",
+        action="store_true",
+        help="stop after verified public R2 publication without changing PostgreSQL",
+    )
     args = parser.parse_args()
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -108,6 +112,11 @@ def main() -> int:
         part_concurrency=args.upload_parts,
         part_size=args.upload_part_size_mib * 1024 * 1024,
     ).publish(artifact)
+    if args.upload_only:
+        log.info("verified public genesis upload; PostgreSQL bootstrap intentionally skipped")
+        return 0
+
+    from teutonic.validator import BittensorFinalizedMetagraphReader
 
     hotkey = chain_config.SEED_HOTKEY
     chain = BittensorFinalizedMetagraphReader(
