@@ -59,7 +59,7 @@ class PromotionRepository:
                 """
                 SELECT p.*, vu.manifest_sha256, vu.manifest_size_bytes,
                        e.state AS evaluation_state, e.verdict AS evaluation_verdict,
-                       u.state AS upload_state
+                       u.state AS upload_state, u.registration_id
                   FROM control_plane.model_promotions p
                   JOIN control_plane.evaluations e ON e.evaluation_id = p.evaluation_id
                   JOIN control_plane.competitions c ON c.competition_id = e.competition_id
@@ -109,10 +109,11 @@ class PromotionRepository:
             )
             if not eligible:
                 raise PromotionInvariantError("promotion is not backed by an eligible verdict")
-            canonical_prefix = f"models/sha256/{row['model_digest']}/"
+            canonical_private_prefix = f"models/registrations/{row['registration_id']}/"
+            canonical_public_prefix = f"models/sha256/{row['model_digest']}/"
             if (
-                row["private_prefix"] != canonical_prefix
-                or row["public_prefix"] != canonical_prefix
+                row["private_prefix"] != canonical_private_prefix
+                or row["public_prefix"] != canonical_public_prefix
                 or row["private_bucket"] == row["public_bucket"]
             ):
                 raise PromotionInvariantError("promotion storage references are not canonical")

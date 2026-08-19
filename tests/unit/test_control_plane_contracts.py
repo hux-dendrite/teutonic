@@ -144,18 +144,17 @@ class ControlPlaneDecisionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             WorkflowPolicy(one_submission_per_hotkey=False)
 
-    def test_all_bucket_boundaries_are_distinct(self) -> None:
+    def test_three_bucket_boundaries_are_distinct(self) -> None:
         buckets = BucketNames()
         values = {
-            buckets.mailbox,
-            buckets.ingest,
             buckets.private_models,
             buckets.public_models,
             buckets.dashboard,
         }
-        self.assertEqual(len(values), 5)
+        self.assertEqual(len(values), 3)
+        self.assertEqual(buckets.mailbox, buckets.dashboard)
         with self.assertRaises(ValueError):
-            BucketNames(mailbox="same-bucket", ingest="same-bucket")
+            BucketNames(private_models="same-bucket", public_models="same-bucket")
 
     def test_all_contract_schema_files_are_valid_json(self) -> None:
         schema_dir = SCHEMA_DIR
@@ -176,8 +175,8 @@ class ControlPlaneDecisionTests(unittest.TestCase):
             account_id="a" * 32,
             parent_access_key_id="parent-id",
             parent_secret_access_key="parent-secret",
-            bucket="teutonic-ingest",
-            prefix=f"ingest/{'c' * 64}/",
+            bucket="teutonic-private-models",
+            prefix=f"models/registrations/{'c' * 64}/",
             ttl_seconds=900,
             issued_at_unix=1_700_000_000,
         )
@@ -187,7 +186,7 @@ class ControlPlaneDecisionTests(unittest.TestCase):
         claims_segment += "=" * (-len(claims_segment) % 4)
         claims = json.loads(base64.urlsafe_b64decode(claims_segment))
         self.assertEqual(claims["exp"] - claims["iat"], 900)
-        self.assertEqual(claims["paths"]["prefixPaths"], [f"ingest/{'c' * 64}/"])
+        self.assertEqual(claims["paths"]["prefixPaths"], [f"models/registrations/{'c' * 64}/"])
         self.assertNotIn("actions", claims)
         self.assertEqual(claims["scope"], MINER_PREFIX_SCOPE)
 
@@ -197,8 +196,8 @@ class ControlPlaneDecisionTests(unittest.TestCase):
             account_id="a" * 32,
             parent_access_key_id="parent-id",
             parent_secret_access_key="parent-secret",
-            bucket="teutonic-ingest",
-            prefix=f"ingest/{'d' * 64}/",
+            bucket="teutonic-private-models",
+            prefix=f"models/registrations/{'d' * 64}/",
             ttl_seconds=900,
             issued_at_unix=1_700_000_000,
         )

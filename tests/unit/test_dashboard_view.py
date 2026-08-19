@@ -174,7 +174,7 @@ class DashboardContractTests(unittest.TestCase):
             "access_key_id",
             "parent_token",
             "private-models",
-            "ingest/",
+            "models/registrations/",
             "immutable_bucket",
             "traceback",
             "http://validator-internal",

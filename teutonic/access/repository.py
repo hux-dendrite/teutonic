@@ -213,8 +213,8 @@ class AccessControllerRepository:
                 self._enqueue_job(
                     cursor,
                     registration_id=registration,
-                    operation="cleanup_ingest",
-                    idempotency_key=f"cleanup-ingest-after-deactivation:{registration}",
+                    operation="cleanup_upload",
+                    idempotency_key=f"cleanup-upload-after-deactivation:{registration}",
                 )
 
             deactivated_set = set(deactivated)
@@ -249,7 +249,7 @@ class AccessControllerRepository:
                         INSERT INTO control_plane.registrations (
                             registration_id, netuid, chain_generation, uid, hotkey,
                             first_seen_finalized_block, last_seen_finalized_block,
-                            deactivated_finalized_block, ingest_prefix, state,
+                            deactivated_finalized_block, model_prefix, state,
                             deactivation_reason, deactivated_at
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'inactive',
                                   'submission_consumed', clock_timestamp())
@@ -264,7 +264,7 @@ class AccessControllerRepository:
                             snapshot.finalized_block,
                             snapshot.finalized_block,
                             snapshot.finalized_block,
-                            f"ingest/{identifier}/",
+                            f"models/registrations/{identifier}/",
                         ),
                     )
                 else:
@@ -273,7 +273,7 @@ class AccessControllerRepository:
                         INSERT INTO control_plane.registrations (
                             registration_id, netuid, chain_generation, uid, hotkey,
                             first_seen_finalized_block, last_seen_finalized_block,
-                            ingest_prefix, state
+                            model_prefix, state
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending_activation')
                         ON CONFLICT (registration_id) DO NOTHING
                         """,
@@ -285,7 +285,7 @@ class AccessControllerRepository:
                             assignment.hotkey,
                             snapshot.finalized_block,
                             snapshot.finalized_block,
-                            f"ingest/{identifier}/",
+                            f"models/registrations/{identifier}/",
                         ),
                     )
                 if cursor.rowcount == 1:
@@ -492,7 +492,7 @@ class AccessControllerRepository:
         encrypted_secret: bytes,
         now: datetime,
         credential_ttl: timedelta,
-        ingest_bucket: str,
+        private_model_bucket: str,
     ) -> None:
         self._require_lock()
         expires_at = now + credential_ttl
@@ -546,7 +546,7 @@ class AccessControllerRepository:
                     "generation": 1,
                     "issued_at": now.isoformat(),
                     "expires_at": expires_at.isoformat(),
-                    "bucket": ingest_bucket,
+                    "bucket": private_model_bucket,
                 },
             )
 
@@ -556,7 +556,7 @@ class AccessControllerRepository:
         *,
         now: datetime,
         credential_ttl: timedelta,
-        ingest_bucket: str,
+        private_model_bucket: str,
     ) -> int:
         self._require_lock()
         with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
@@ -594,7 +594,7 @@ class AccessControllerRepository:
                     "generation": generation,
                     "issued_at": now.isoformat(),
                     "expires_at": (now + credential_ttl).isoformat(),
-                    "bucket": ingest_bucket,
+                    "bucket": private_model_bucket,
                 },
             )
             return generation
@@ -635,7 +635,7 @@ class AccessControllerRepository:
                     issued_at,
                     expires_at,
                     bucket,
-                    f"ingest/{registration}/",
+                    f"models/registrations/{registration}/",
                     key,
                     ciphertext_sha256,
                 ),
@@ -842,9 +842,11 @@ class AccessControllerRepository:
         with self.connection.cursor(row_factory=dict_row) as cursor:
             cursor.execute(
                 """
-                SELECT upload.*, registration.hotkey, registration.ingest_prefix
+                SELECT upload.*, registration.hotkey, registration.model_prefix,
+                       token.state AS token_state
                   FROM control_plane.uploads upload
                   JOIN control_plane.registrations registration USING (registration_id)
+                  JOIN control_plane.r2_parent_tokens token USING (registration_id)
                  WHERE upload.upload_id = %s
                 """,
                 (upload_id,),
@@ -955,6 +957,15 @@ class AccessControllerRepository:
                 SELECT * FROM control_plane.controller_jobs
                  WHERE state IN ('pending', 'retry_pending')
                    AND (state = 'pending' OR next_retry_at IS NULL OR next_retry_at <= %s)
+                   AND (
+                       operation NOT IN ('verify_upload', 'create_immutable_snapshot')
+                       OR EXISTS (
+                           SELECT 1
+                             FROM control_plane.r2_parent_tokens token
+                            WHERE token.registration_id = controller_jobs.registration_id
+                              AND token.state = 'revoked'
+                       )
+                   )
                  ORDER BY next_retry_at NULLS FIRST, created_at, controller_job_id
                  FOR UPDATE SKIP LOCKED
                  LIMIT 1

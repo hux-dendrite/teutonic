@@ -189,14 +189,14 @@ class AccessControllerIntegrationTests(unittest.TestCase):
             self.repository,
             token_gateway=self.gateway,
             upload_controller=R2UploadController(
-                self.s3, ingest_bucket="ingest", private_bucket="private"
+                self.s3, private_model_bucket="private"
             ),
             mailbox_store=MailboxStore(self.s3, bucket="mailbox"),
             secret_cipher=SecretCipher(b"p" * 32),
             mailbox_cipher=MailboxCipher(self.validator),
             account_id="account",
             r2_endpoint="https://account.r2.cloudflarestorage.com",
-            ingest_bucket="ingest",
+            private_model_bucket="private",
             instance_id="phase4-test",
             clock=lambda: NOW,
         )
@@ -257,7 +257,7 @@ class AccessControllerIntegrationTests(unittest.TestCase):
             registration,
             now=NOW + timedelta(minutes=1),
             credential_ttl=timedelta(days=7),
-            ingest_bucket="ingest",
+            private_model_bucket="private",
         )
         self.assertEqual(generation, 2)
         self.runner.run_until_idle(propagate=True)
@@ -277,11 +277,11 @@ class AccessControllerIntegrationTests(unittest.TestCase):
         self.repository.apply_finalized_snapshot(self.snapshot(101, self.hotkey))
         files = {"config.json": b"{}", "model.bin": b"immutable-phase-four"}
         manifest = signed_manifest(self.miner, registration, files)
-        prefix = f"ingest/{registration}/"
+        prefix = f"models/registrations/{registration}/"
         for path, value in files.items():
-            self.s3.put_object(Bucket="ingest", Key=f"{prefix}{path}", Body=value)
+            self.s3.put_object(Bucket="private", Key=f"{prefix}{path}", Body=value)
         self.s3.put_object(
-            Bucket="ingest", Key=f"{prefix}manifest.json", Body=manifest.as_bytes()
+            Bucket="private", Key=f"{prefix}manifest.json", Body=manifest.as_bytes()
         )
         upload_id = self.repository.accept_ready_signal(
             ReadySignal.parse(
@@ -317,7 +317,7 @@ class AccessControllerIntegrationTests(unittest.TestCase):
         self.assertEqual(token_state, "revoked")
         self.assertEqual(len(self.gateway.revoked), 1)
         self.assertIn(
-            ("private", f"models/sha256/{manifest.model_digest}/model.bin"),
+            ("private", f"{prefix}model.bin"),
             self.s3.objects,
         )
         with self.assertRaises(ControllerInvariantError):
@@ -325,7 +325,7 @@ class AccessControllerIntegrationTests(unittest.TestCase):
                 registration,
                 now=NOW + timedelta(minutes=3),
                 credential_ttl=timedelta(days=7),
-                ingest_bucket="ingest",
+                private_model_bucket="private",
             )
 
         self.repository.apply_finalized_snapshot(self.snapshot(102, None))
@@ -354,7 +354,7 @@ class AccessControllerIntegrationTests(unittest.TestCase):
                 registration_id, operation, idempotency_key, state,
                 owner_instance_id, lease_expires_at
             ) VALUES
-                (%s, 'cleanup_ingest', %s, 'running', 'dead-instance', %s),
+                (%s, 'cleanup_upload', %s, 'running', 'dead-instance', %s),
                 (%s, 'abort_multipart', %s, 'claimed', 'dead-instance', %s)
             RETURNING controller_job_id
             """,

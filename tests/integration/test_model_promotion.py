@@ -127,16 +127,16 @@ class ModelPromotionIntegrationTests(unittest.TestCase):
         registration = "1" * 64
         model_digest = "2" * 64
         manifest_digest = "3" * 64
-        prefix = f"models/sha256/{model_digest}/"
+        prefix = f"models/registrations/{registration}/"
         self.connection.execute(
             """
             INSERT INTO control_plane.registrations (
                 registration_id, netuid, chain_generation, uid, hotkey,
                 first_seen_finalized_block, last_seen_finalized_block,
-                ingest_prefix, state
+                model_prefix, state
             ) VALUES (%s, 306, 'test', 7, 'miner-hotkey', 100, 101, %s, 'active')
             """,
-            (registration, f"ingest/{registration}/"),
+            (registration, f"models/registrations/{registration}/"),
         )
         self.connection.execute(
             """
@@ -247,7 +247,7 @@ class ModelPromotionIntegrationTests(unittest.TestCase):
                 model_digest,
                 disposition,
                 prefix,
-                prefix,
+                f"models/sha256/{model_digest}/",
                 f"promote-model:{upload}",
                 NOW,
             ),
@@ -261,7 +261,8 @@ class ModelPromotionIntegrationTests(unittest.TestCase):
         self.upload_id = str(upload)
         self.promotion_id = str(promotion)
         self.king_id = str(king)
-        self.prefix = prefix
+        self.private_prefix = prefix
+        self.public_prefix = f"models/sha256/{model_digest}/"
 
     def _worker(self, *, after_stage=None, on_winner=None):
         return PromotionWorker(
@@ -296,8 +297,8 @@ class ModelPromotionIntegrationTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(promotion, ("promoted", 2, 18, True, True))
         self.assertEqual(len(callbacks), 1)
-        self.assertEqual(self.inspector.inventory("private-models", self.prefix), {})
-        self.assertEqual(len(self.inspector.inventory("public-models", self.prefix)), 3)
+        self.assertEqual(self.inspector.inventory("private-models", self.private_prefix), {})
+        self.assertEqual(len(self.inspector.inventory("public-models", self.public_prefix)), 3)
         self.assertEqual(self.inspector.body_reads, 0)
         after = self.connection.execute(
             """
@@ -367,14 +368,14 @@ class ModelPromotionIntegrationTests(unittest.TestCase):
                 ).fetchone()[0]
                 self.assertEqual(state, "promoted")
                 self.assertEqual(
-                    self.inspector.inventory("private-models", self.prefix), {}
+                    self.inspector.inventory("private-models", self.private_prefix), {}
                 )
                 self.assertEqual(
-                    len(self.inspector.inventory("public-models", self.prefix)), 3
+                    len(self.inspector.inventory("public-models", self.public_prefix)), 3
                 )
 
     def test_digest_collision_fails_without_deleting_source_or_changing_king(self):
-        self.inspector.objects[("public-models", self.prefix + "config.json")] = ObservedObject(
+        self.inspector.objects[("public-models", self.public_prefix + "config.json")] = ObservedObject(
             "config.json", 2, "f" * 64
         )
         self._worker().run_one()
@@ -382,7 +383,7 @@ class ModelPromotionIntegrationTests(unittest.TestCase):
             "SELECT state, last_error_code FROM control_plane.model_promotions"
         ).fetchone()
         self.assertEqual(state, ("failed", "PromotionCollisionError"))
-        self.assertEqual(len(self.inspector.inventory("private-models", self.prefix)), 3)
+        self.assertEqual(len(self.inspector.inventory("private-models", self.private_prefix)), 3)
         self.assertEqual(
             str(
                 self.connection.execute(
@@ -488,5 +489,5 @@ class ModelPromotionIntegrationTests(unittest.TestCase):
         self.assertEqual(self.executor.copy_calls, 0)
         self.assertEqual(self.executor.delete_calls, 0)
         self.assertEqual(
-            len(self.inspector.inventory("private-models", self.prefix)), 3
+            len(self.inspector.inventory("private-models", self.private_prefix)), 3
         )

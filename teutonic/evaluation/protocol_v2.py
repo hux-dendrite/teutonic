@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping
 PROTOCOL_VERSION = "teutonic-evaluator-v2"
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_PRIVATE_MODEL_PREFIX_RE = re.compile(r"^models/registrations/[0-9a-f]{64}/$")
 _FORBIDDEN_KEY_PARTS = (
     "access_key",
     "authorization",
@@ -91,10 +92,10 @@ class R2Artifact:
         expected_digest = _normalize_digest(
             data.get("expected_digest"), f"{field_name}.expected_digest"
         )
-        expected_suffix = f"models/sha256/{expected_digest}/"
-        if not prefix.endswith(expected_suffix):
+        public_prefix = f"models/sha256/{expected_digest}/"
+        if prefix != public_prefix and not _PRIVATE_MODEL_PREFIX_RE.fullmatch(prefix):
             raise ProtocolValidationError(
-                f"{field_name}.prefix must end with {expected_suffix!r}"
+                f"{field_name}.prefix must identify a public digest or private registration"
             )
         return cls(bucket=bucket, prefix=prefix, expected_digest=expected_digest)
 

@@ -286,13 +286,13 @@ class R2ArtifactResolverTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as cache_dir,
         ):
             files, digest = self._snapshot_files(Path(source_dir))
-            prefix = f"models/sha256/{digest}/"
+            prefix = f"models/registrations/{'a' * 64}/"
             client = FakeS3Client(
                 {("private-models", prefix + name): body for name, body in files.items()}
             )
-            artifact = EvaluationRequestV2.from_mapping(
-                request_payload(king_digest=digest, challenger_digest=digest)
-            ).king
+            payload = request_payload(king_digest=digest, challenger_digest=digest)
+            payload["king"]["prefix"] = prefix
+            artifact = EvaluationRequestV2.from_mapping(payload).king
             resolver = R2ArtifactResolver(
                 cache_dir,
                 s3_client=client,
@@ -312,13 +312,13 @@ class R2ArtifactResolverTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as cache_dir,
         ):
             files, digest = self._snapshot_files(Path(source_dir))
-            prefix = f"models/sha256/{digest}/"
+            prefix = f"models/registrations/{'b' * 64}/"
             client = FakeS3Client(
                 {("private-models", prefix + name): body for name, body in files.items()}
             )
-            artifact = EvaluationRequestV2.from_mapping(
-                request_payload(king_digest=digest, challenger_digest=digest)
-            ).king
+            payload = request_payload(king_digest=digest, challenger_digest=digest)
+            payload["king"]["prefix"] = prefix
+            artifact = EvaluationRequestV2.from_mapping(payload).king
             commands = []
 
             def run(command, environ):

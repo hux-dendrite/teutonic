@@ -79,10 +79,10 @@ class PostgresFoundationTests(unittest.TestCase):
             """
             INSERT INTO control_plane.registrations (
                 registration_id, netuid, chain_generation, uid, hotkey,
-                first_seen_finalized_block, last_seen_finalized_block, ingest_prefix, state
+                first_seen_finalized_block, last_seen_finalized_block, model_prefix, state
             ) VALUES (%s, 3, 'test-generation', 42, %s, 100, 100, %s, 'active')
             """,
-            (registration_id, "5" + "A" * 47, f"ingest/{registration_id}/"),
+            (registration_id, "5" + "A" * 47, f"models/registrations/{registration_id}/"),
         )
         connection.execute(
             """
@@ -99,7 +99,7 @@ class PostgresFoundationTests(unittest.TestCase):
                 allowed_prefix, allowed_actions, mailbox_object_key,
                 ciphertext_sha256, state, published_at
             ) VALUES (
-                %s, 1, %s, %s + interval '7 days', 'ingest-models', %s, NULL,
+                %s, 1, %s, %s + interval '7 days', 'private-models', %s, NULL,
                 %s, %s, 'published', %s
             )
             """,
@@ -107,7 +107,7 @@ class PostgresFoundationTests(unittest.TestCase):
                 registration_id,
                 NOW,
                 NOW,
-                f"ingest/{registration_id}/",
+                f"models/registrations/{registration_id}/",
                 f"mailbox/v1/{registration_id}/generations/{1:020d}.bin",
                 "9" * 64,
                 NOW,
@@ -141,7 +141,13 @@ class PostgresFoundationTests(unittest.TestCase):
                 manifest_sha256, object_count, total_size_bytes, verified_at
             ) VALUES (%s, 'private-models', %s, %s, %s, 2, 1024, %s)
             """,
-            (upload_id, f"models/sha256/{'3' * 64}/", "3" * 64, "2" * 64, NOW),
+            (
+                upload_id,
+                f"models/registrations/{registration_id}/",
+                "3" * 64,
+                "2" * 64,
+                NOW,
+            ),
         )
         competition_id = connection.execute(
             """
@@ -343,10 +349,10 @@ class PostgresFoundationTests(unittest.TestCase):
             """
             INSERT INTO control_plane.registrations (
                 registration_id, netuid, chain_generation, uid, hotkey,
-                first_seen_finalized_block, last_seen_finalized_block, ingest_prefix, state
+                first_seen_finalized_block, last_seen_finalized_block, model_prefix, state
             ) VALUES (%s, 3, 'later-generation', 42, %s, 200, 200, %s, 'active')
             """,
-            (registration_id, hotkey, f"ingest/{registration_id}/"),
+            (registration_id, hotkey, f"models/registrations/{registration_id}/"),
         )
 
         with self.assertRaises(errors.CheckViolation):
@@ -382,7 +388,7 @@ class PostgresFoundationTests(unittest.TestCase):
                     allowed_prefix, allowed_actions, mailbox_object_key,
                     ciphertext_sha256, state, published_at
                 ) VALUES (
-                    %s, 2, %s, %s + interval '7 days', 'ingest-models', %s, NULL,
+                    %s, 2, %s, %s + interval '7 days', 'private-models', %s, NULL,
                     %s, %s, 'published', %s
                 )
                 """,
@@ -390,7 +396,7 @@ class PostgresFoundationTests(unittest.TestCase):
                     registration_id,
                     NOW,
                     NOW,
-                    f"ingest/{registration_id}/",
+                    f"models/registrations/{registration_id}/",
                     f"mailbox/v1/{registration_id}/generations/{2:020d}.bin",
                     "8" * 64,
                     NOW,
@@ -413,10 +419,10 @@ class PostgresFoundationTests(unittest.TestCase):
                 """
                 INSERT INTO control_plane.registrations (
                     registration_id, netuid, chain_generation, uid, hotkey,
-                    first_seen_finalized_block, last_seen_finalized_block, ingest_prefix, state
+                    first_seen_finalized_block, last_seen_finalized_block, model_prefix, state
                 ) VALUES (%s, 3, 'test-generation', 42, %s, 100, 100, %s, 'active')
                 """,
-                (duplicate, "5" + "B" * 47, f"ingest/{duplicate}/"),
+                (duplicate, "5" + "B" * 47, f"models/registrations/{duplicate}/"),
             )
 
     def test_ready_chain_position_is_unique(self) -> None:
@@ -443,7 +449,7 @@ class PostgresFoundationTests(unittest.TestCase):
                     allowed_prefix, allowed_actions, mailbox_object_key,
                     ciphertext_sha256, state
                 ) VALUES (
-                    %s, 1, %s, %s + interval '1 hour', 'ingest-models', %s, NULL,
+                    %s, 1, %s, %s + interval '1 hour', 'private-models', %s, NULL,
                     %s, %s, 'superseded'
                 )
                 """,
@@ -451,7 +457,7 @@ class PostgresFoundationTests(unittest.TestCase):
                     registration_id,
                     NOW,
                     NOW,
-                    f"ingest/{registration_id}/",
+                    f"models/registrations/{registration_id}/",
                     f"mailbox/v1/{registration_id}/generations/{1:020d}.bin",
                     "6" * 64,
                 ),
@@ -486,7 +492,7 @@ class PostgresFoundationTests(unittest.TestCase):
                 """,
                 (
                     upload_id,
-                    f"models/sha256/{'3' * 64}/",
+                    f"models/registrations/{self.seed['registration_id']}/",
                     "3" * 64,
                     "6" * 64,
                     NOW,

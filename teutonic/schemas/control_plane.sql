@@ -291,7 +291,7 @@ CREATE TABLE control_plane.controller_jobs (
     CONSTRAINT controller_jobs_check CHECK (((registration_id IS NOT NULL) OR (upload_id IS NOT NULL))),
     CONSTRAINT controller_jobs_check1 CHECK (((state = ANY (ARRAY['claimed'::text, 'running'::text])) = (lease_expires_at IS NOT NULL))),
     CONSTRAINT controller_jobs_check2 CHECK (((state <> 'completed'::text) OR (completed_at IS NOT NULL))),
-    CONSTRAINT controller_jobs_operation_check CHECK ((operation = ANY (ARRAY['create_parent_token'::text, 'publish_credentials'::text, 'revoke_parent_token'::text, 'abort_multipart'::text, 'cleanup_ingest'::text, 'verify_upload'::text, 'create_immutable_snapshot'::text]))),
+    CONSTRAINT controller_jobs_operation_check CHECK ((operation = ANY (ARRAY['create_parent_token'::text, 'publish_credentials'::text, 'revoke_parent_token'::text, 'abort_multipart'::text, 'cleanup_upload'::text, 'verify_upload'::text, 'create_immutable_snapshot'::text]))),
     CONSTRAINT controller_jobs_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'claimed'::text, 'running'::text, 'retry_pending'::text, 'completed'::text, 'failed'::text])))
 );
 
@@ -319,7 +319,7 @@ CREATE TABLE control_plane.credential_generations (
     CONSTRAINT credential_generations_broad_prefix_scope CHECK ((allowed_actions IS NULL)),
     CONSTRAINT credential_generations_capability_scope_check CHECK ((capability_scope = 'object-read-write'::text)),
     CONSTRAINT credential_generations_check CHECK ((expires_at > issued_at)),
-    CONSTRAINT credential_generations_check1 CHECK ((allowed_prefix = (('ingest/'::text || (registration_id)::text) || '/'::text))),
+    CONSTRAINT credential_generations_check1 CHECK ((allowed_prefix = (('models/registrations/'::text || (registration_id)::text) || '/'::text))),
     CONSTRAINT credential_generations_check2 CHECK ((mailbox_object_key = (((('mailbox/v1/'::text || (registration_id)::text) || '/generations/'::text) || lpad((generation)::text, 20, '0'::text)) || '.bin'::text))),
     CONSTRAINT credential_generations_check3 CHECK (((state <> 'published'::text) OR (published_at IS NOT NULL))),
     CONSTRAINT credential_generations_ciphertext_sha256_check CHECK ((ciphertext_sha256 ~ '^[0-9a-f]{64}$'::text)),
@@ -461,14 +461,14 @@ CREATE TABLE control_plane.registrations (
     first_seen_finalized_block bigint NOT NULL,
     last_seen_finalized_block bigint NOT NULL,
     deactivated_finalized_block bigint,
-    ingest_prefix text NOT NULL,
+    model_prefix text NOT NULL,
     state text NOT NULL,
     deactivation_reason text,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     deactivated_at timestamp with time zone,
     CONSTRAINT registrations_check CHECK ((last_seen_finalized_block >= first_seen_finalized_block)),
-    CONSTRAINT registrations_check1 CHECK ((ingest_prefix = (('ingest/'::text || (registration_id)::text) || '/'::text))),
+    CONSTRAINT registrations_check1 CHECK ((model_prefix = (('models/registrations/'::text || (registration_id)::text) || '/'::text))),
     CONSTRAINT registrations_check2 CHECK ((((state = 'inactive'::text) AND (deactivated_finalized_block IS NOT NULL) AND (deactivated_at IS NOT NULL)) OR ((state <> 'inactive'::text) AND (deactivated_finalized_block IS NULL) AND (deactivated_at IS NULL)))),
     CONSTRAINT registrations_check3 CHECK (((deactivated_finalized_block IS NULL) OR (deactivated_finalized_block >= first_seen_finalized_block))),
     CONSTRAINT registrations_first_seen_finalized_block_check CHECK ((first_seen_finalized_block >= 0)),
@@ -1186,7 +1186,7 @@ CREATE TABLE control_plane.verified_uploads (
     total_size_bytes bigint NOT NULL,
     verified_at timestamp with time zone NOT NULL,
     manifest_size_bytes bigint,
-    CONSTRAINT verified_uploads_check CHECK ((immutable_prefix = (('models/sha256/'::text || (model_digest)::text) || '/'::text))),
+    CONSTRAINT verified_uploads_check CHECK ((immutable_prefix ~ '^models/registrations/[0-9a-f]{64}/$'::text)),
     CONSTRAINT verified_uploads_manifest_sha256_check CHECK ((manifest_sha256 ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT verified_uploads_manifest_size_bytes_check CHECK ((manifest_size_bytes > 0)),
     CONSTRAINT verified_uploads_model_digest_check CHECK ((model_digest ~ '^[0-9a-f]{64}$'::text)),
@@ -1438,11 +1438,11 @@ ALTER TABLE ONLY control_plane.r2_parent_tokens
 
 
 --
--- Name: registrations registrations_ingest_prefix_key; Type: CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
+-- Name: registrations registrations_model_prefix_key; Type: CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
 ALTER TABLE ONLY control_plane.registrations
-    ADD CONSTRAINT registrations_ingest_prefix_key UNIQUE (ingest_prefix);
+    ADD CONSTRAINT registrations_model_prefix_key UNIQUE (model_prefix);
 
 
 --

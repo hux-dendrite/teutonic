@@ -7,8 +7,6 @@ from datetime import timedelta
 from typing import Mapping
 
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
-DEFAULT_MAILBOX_BUCKET = "teutonic-mailbox"
-DEFAULT_INGEST_BUCKET = "teutonic-ingest"
 DEFAULT_PRIVATE_MODEL_BUCKET = "teutonic-private-models"
 DEFAULT_PUBLIC_MODEL_BUCKET = "teutonic-models"
 DEFAULT_DASHBOARD_BUCKET = "teutonic-dash"
@@ -54,22 +52,22 @@ class WorkflowPolicy:
 
 @dataclass(frozen=True, slots=True)
 class BucketNames:
-    mailbox: str = DEFAULT_MAILBOX_BUCKET
-    ingest: str = DEFAULT_INGEST_BUCKET
     private_models: str = DEFAULT_PRIVATE_MODEL_BUCKET
     public_models: str = DEFAULT_PUBLIC_MODEL_BUCKET
     dashboard: str = DEFAULT_DASHBOARD_BUCKET
 
+    @property
+    def mailbox(self) -> str:
+        return self.dashboard
+
     def __post_init__(self) -> None:
         values = (
-            self.mailbox,
-            self.ingest,
             self.private_models,
             self.public_models,
             self.dashboard,
         )
         if len(set(values)) != len(values):
-            raise ValueError("mailbox, ingest, private, public, and dashboard buckets must be distinct")
+            raise ValueError("private models, public models, and dashboard buckets must be distinct")
         invalid = [value for value in values if not _BUCKET_RE.fullmatch(value)]
         if invalid:
             raise ValueError(f"invalid R2 bucket name(s): {', '.join(invalid)}")
@@ -78,8 +76,6 @@ class BucketNames:
     def from_env(cls, env: Mapping[str, str] | None = None) -> BucketNames:
         source = os.environ if env is None else env
         return cls(
-            mailbox=source.get("TEUTONIC_MAILBOX_BUCKET", DEFAULT_MAILBOX_BUCKET),
-            ingest=source.get("TEUTONIC_INGEST_BUCKET", DEFAULT_INGEST_BUCKET),
             private_models=source.get(
                 "TEUTONIC_PRIVATE_MODEL_BUCKET", DEFAULT_PRIVATE_MODEL_BUCKET
             ),

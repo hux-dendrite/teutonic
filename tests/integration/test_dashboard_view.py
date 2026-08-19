@@ -109,10 +109,10 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             """
             INSERT INTO control_plane.registrations (
                 registration_id, netuid, chain_generation, uid, hotkey,
-                first_seen_finalized_block, last_seen_finalized_block, ingest_prefix, state
+                first_seen_finalized_block, last_seen_finalized_block, model_prefix, state
             ) VALUES (%s, 306, 'test', 7, %s, 900, 1000, %s, 'active')
             """,
-            (registration, hotkey, f"ingest/{registration}/"),
+            (registration, hotkey, f"models/registrations/{registration}/"),
         )
         self.owner.execute(
             """
@@ -143,7 +143,13 @@ class DashboardViewIntegrationTests(unittest.TestCase):
                 manifest_sha256, object_count, total_size_bytes, verified_at
             ) VALUES (%s, 'DO-NOT-LEAK-private-models', %s, %s, %s, 1, 100, %s)
             """,
-            (upload, f"models/sha256/{model_digest}/", model_digest, "4" * 64, NOW),
+            (
+                upload,
+                f"models/registrations/{registration}/",
+                model_digest,
+                "4" * 64,
+                NOW,
+            ),
         )
         competition = self.owner.execute(
             """
@@ -208,6 +214,7 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             (NOW, NOW),
         )
         self.ids = {
+            "registration": registration,
             "upload": upload,
             "evaluation": evaluation,
             "model_digest": model_digest,
@@ -310,7 +317,7 @@ class DashboardViewIntegrationTests(unittest.TestCase):
                 self.ids["upload"],
                 self.ids["evaluation"],
                 digest,
-                f"models/sha256/{digest}/",
+                f"models/registrations/{self.ids['registration']}/",
                 f"models/sha256/{digest}/",
                 NOW,
                 NOW,
@@ -344,7 +351,7 @@ class DashboardViewIntegrationTests(unittest.TestCase):
                 self.ids["upload"],
                 self.ids["evaluation"],
                 digest,
-                f"models/sha256/{digest}/",
+                f"models/registrations/{self.ids['registration']}/",
                 f"models/sha256/{digest}/",
                 NOW,
                 NOW,

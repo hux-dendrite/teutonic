@@ -236,10 +236,10 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             """
             INSERT INTO control_plane.registrations (
                 registration_id, netuid, chain_generation, uid, hotkey,
-                first_seen_finalized_block, last_seen_finalized_block, ingest_prefix, state
+                first_seen_finalized_block, last_seen_finalized_block, model_prefix, state
             ) VALUES (%s, 306, 'test', %s, %s, 100, 103, %s, 'active')
             """,
-            (registration_id, uid, f"hotkey-{uid}", f"ingest/{registration_id}/"),
+            (registration_id, uid, f"hotkey-{uid}", f"models/registrations/{registration_id}/"),
         )
         self.connection.execute(
             """
@@ -279,7 +279,13 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
                 manifest_sha256, object_count, total_size_bytes, verified_at
             ) VALUES (%s, 'private-models', %s, %s, %s, 2, 1024, %s)
             """,
-            (upload, f"models/sha256/{digest}/", digest, f"{uid + 10:064x}", NOW),
+            (
+                upload,
+                f"models/registrations/{registration_id}/",
+                digest,
+                f"{uid + 10:064x}",
+                NOW,
+            ),
         )
         return upload
 
@@ -498,8 +504,8 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
 
         async def preflight(request):
             self.assertEqual(request["challenger"]["kind"], "r2-prefix")
-            self.assertIn("/sha256/", request["challenger"]["prefix"])
-            self.assertNotIn("ingest/", str(request))
+            self.assertIn("models/registrations/", request["challenger"]["prefix"])
+            self.assertNotIn("/sha256/", request["challenger"]["prefix"])
             return None
 
         for _ in range(3):

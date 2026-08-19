@@ -133,8 +133,8 @@ class AccessControllerContractTests(unittest.TestCase):
             registration_id=self.registration,
             generation=1,
             endpoint="https://account.r2.cloudflarestorage.com",
-            ingest_bucket="ingest",
-            allowed_prefix=f"ingest/{self.registration}/",
+            private_model_bucket="private",
+            allowed_prefix=f"models/registrations/{self.registration}/",
             access_key_id="access",
             secret_access_key="secret",
             session_token="session",
@@ -146,60 +146,52 @@ class AccessControllerContractTests(unittest.TestCase):
         secret_cipher = SecretCipher(b"x" * 32)
         self.assertEqual(secret_cipher.decrypt(secret_cipher.encrypt("parent-secret")), "parent-secret")
 
-    def test_r2_upload_is_verified_copied_and_reverified(self) -> None:
+    def test_r2_upload_is_revoked_verified_in_place_and_reverified(self) -> None:
         files = {"config.json": b"{}", "weights/model.bin": b"phase-four"}
         manifest = signed_manifest(self.miner, self.registration, files)
-        prefix = f"ingest/{self.registration}/"
+        prefix = f"models/registrations/{self.registration}/"
         s3 = FakeS3()
         for path, value in files.items():
-            s3.put_object(Bucket="ingest", Key=f"{prefix}{path}", Body=value)
-        s3.put_object(Bucket="ingest", Key=f"{prefix}manifest.json", Body=manifest.as_bytes())
-        controller = R2UploadController(
-            s3, ingest_bucket="ingest", private_bucket="private"
-        )
+            s3.put_object(Bucket="private", Key=f"{prefix}{path}", Body=value)
+        s3.put_object(Bucket="private", Key=f"{prefix}manifest.json", Body=manifest.as_bytes())
+        controller = R2UploadController(s3, private_model_bucket="private")
         verified = controller.verify_manifest(
-            ingest_prefix=prefix,
+            model_prefix=prefix,
             registration_id=self.registration,
             hotkey=self.hotkey,
             expected_manifest_sha256=manifest.manifest_sha256,
         )
         immutable = controller.create_immutable_snapshot(
-            ingest_prefix=prefix, verified=verified
+            model_prefix=prefix, verified=verified
         )
-        self.assertEqual(
-            immutable.prefix, f"models/sha256/{manifest.model_digest}/"
-        )
+        self.assertEqual(immutable.prefix, prefix)
+        self.assertEqual(immutable.bucket, "private")
         self.assertEqual(set(immutable.etags), set(files))
         self.assertEqual(immutable.manifest_size, len(manifest.as_bytes()))
         for path, value in files.items():
-            self.assertEqual(
-                s3.metadata[("private", f"{immutable.prefix}{path}")]["sha256"],
-                hashlib.sha256(value).hexdigest(),
-            )
+            self.assertEqual(s3.objects[("private", f"{prefix}{path}")], value)
 
     def test_verifier_rejects_undeclared_objects_and_multipart_state(self) -> None:
         files = {"model.bin": b"phase-four"}
         manifest = signed_manifest(self.miner, self.registration, files)
-        prefix = f"ingest/{self.registration}/"
+        prefix = f"models/registrations/{self.registration}/"
         s3 = FakeS3()
-        s3.put_object(Bucket="ingest", Key=f"{prefix}model.bin", Body=files["model.bin"])
-        s3.put_object(Bucket="ingest", Key=f"{prefix}manifest.json", Body=manifest.as_bytes())
-        s3.put_object(Bucket="ingest", Key=f"{prefix}undeclared.bin", Body=b"bad")
-        controller = R2UploadController(
-            s3, ingest_bucket="ingest", private_bucket="private"
-        )
+        s3.put_object(Bucket="private", Key=f"{prefix}model.bin", Body=files["model.bin"])
+        s3.put_object(Bucket="private", Key=f"{prefix}manifest.json", Body=manifest.as_bytes())
+        s3.put_object(Bucket="private", Key=f"{prefix}undeclared.bin", Body=b"bad")
+        controller = R2UploadController(s3, private_model_bucket="private")
         with self.assertRaises(ArtifactIntegrityError):
             controller.verify_manifest(
-                ingest_prefix=prefix,
+                model_prefix=prefix,
                 registration_id=self.registration,
                 hotkey=self.hotkey,
                 expected_manifest_sha256=manifest.manifest_sha256,
             )
-        del s3.objects[("ingest", f"{prefix}undeclared.bin")]
+        del s3.objects[("private", f"{prefix}undeclared.bin")]
         s3.multipart.append({"Key": f"{prefix}unfinished.bin", "UploadId": "upload-1"})
         with self.assertRaises(ArtifactIntegrityError):
             controller.verify_manifest(
-                ingest_prefix=prefix,
+                model_prefix=prefix,
                 registration_id=self.registration,
                 hotkey=self.hotkey,
                 expected_manifest_sha256=manifest.manifest_sha256,

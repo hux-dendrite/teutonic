@@ -67,7 +67,7 @@ class AccessControllerJobRunner:
         mailbox_cipher: MailboxCipher,
         account_id: str,
         r2_endpoint: str,
-        ingest_bucket: str,
+        private_model_bucket: str,
         instance_id: str,
         clock: Callable[[], datetime] | None = None,
         lease: timedelta = timedelta(minutes=2),
@@ -81,7 +81,7 @@ class AccessControllerJobRunner:
         self.mailbox_cipher = mailbox_cipher
         self.account_id = account_id
         self.r2_endpoint = r2_endpoint.rstrip("/")
-        self.ingest_bucket = ingest_bucket
+        self.private_model_bucket = private_model_bucket
         self.instance_id = instance_id
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.lease = lease
@@ -161,14 +161,14 @@ class AccessControllerJobRunner:
             context = self.repository.registration_context(str(job["registration_id"]))
             return {
                 "aborted": self.upload_controller.abort_multipart_uploads(
-                    context["ingest_prefix"]
+                    context["model_prefix"]
                 )
             }
-        if operation == "cleanup_ingest":
+        if operation == "cleanup_upload":
             context = self.repository.registration_context(str(job["registration_id"]))
             return {
-                "deleted": self.upload_controller.cleanup_ingest_prefix(
-                    context["ingest_prefix"]
+                "deleted": self.upload_controller.cleanup_model_prefix(
+                    context["model_prefix"]
                 )
             }
         raise ControllerInvariantError(f"unknown controller job operation {operation!r}")
@@ -186,7 +186,7 @@ class AccessControllerJobRunner:
             encrypted_secret=self.secret_cipher.encrypt(parent.secret_access_key),
             now=now,
             credential_ttl=timedelta(days=7),
-            ingest_bucket=self.ingest_bucket,
+            private_model_bucket=self.private_model_bucket,
         )
         return {"cloudflare_token_id": parent.token_id}
 
@@ -207,7 +207,7 @@ class AccessControllerJobRunner:
             parent_access_key_id=context["access_key_id"],
             parent_secret_access_key=parent_secret,
             bucket=payload["bucket"],
-            prefix=context["ingest_prefix"],
+            prefix=context["model_prefix"],
             ttl_seconds=ttl,
             issued_at_unix=int(issued_at.timestamp()),
         )
@@ -224,8 +224,8 @@ class AccessControllerJobRunner:
                 registration_id=registration,
                 generation=generation,
                 endpoint=self.r2_endpoint,
-                ingest_bucket=payload["bucket"],
-                allowed_prefix=context["ingest_prefix"],
+                private_model_bucket=payload["bucket"],
+                allowed_prefix=context["model_prefix"],
                 access_key_id=credentials.access_key_id,
                 secret_access_key=credentials.secret_access_key,
                 session_token=credentials.session_token,
@@ -274,8 +274,12 @@ class AccessControllerJobRunner:
     def _verify_upload(self, job: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         upload_id = str(job["upload_id"])
         context = self.repository.upload_context(upload_id)
+        if context["token_state"] != "revoked":
+            raise ControllerInvariantError(
+                "private model upload cannot be verified before access is revoked"
+            )
         verified = self.upload_controller.verify_manifest(
-            ingest_prefix=context["ingest_prefix"],
+            model_prefix=context["model_prefix"],
             registration_id=str(context["registration_id"]),
             hotkey=context["hotkey"],
             expected_manifest_sha256=str(context["manifest_sha256"]),
@@ -291,8 +295,12 @@ class AccessControllerJobRunner:
     def _create_snapshot(self, job: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         upload_id = str(job["upload_id"])
         context = self.repository.upload_context(upload_id)
+        if context["token_state"] != "revoked":
+            raise ControllerInvariantError(
+                "private model upload cannot be finalized before access is revoked"
+            )
         verified = self.upload_controller.verify_manifest(
-            ingest_prefix=context["ingest_prefix"],
+            model_prefix=context["model_prefix"],
             registration_id=str(context["registration_id"]),
             hotkey=context["hotkey"],
             expected_manifest_sha256=str(context["manifest_sha256"]),
@@ -300,7 +308,7 @@ class AccessControllerJobRunner:
         if verified.manifest.model_digest != str(context["model_digest"]):
             raise ArtifactIntegrityError("model digest changed after initial verification")
         immutable = self.upload_controller.create_immutable_snapshot(
-            ingest_prefix=context["ingest_prefix"], verified=verified
+            model_prefix=context["model_prefix"], verified=verified
         )
         self.repository.commit_immutable_snapshot(
             upload_id,
