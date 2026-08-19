@@ -26,7 +26,7 @@
 
   function renderHeader(d) {
     var chain = d.chain || {};
-    text("network-name", chain.competition || chain.name); text("netuid", chain.netuid); text("finalized-block", number(chain.last_finalized_block));
+    text("network-name", "3"); text("netuid", chain.netuid); text("finalized-block", number(chain.last_finalized_block));
     text("chain-title", chain.name || "TEUTONIC"); text("competition", (chain.competition || "MODEL") + " COMPETITION");
     text("generation", "GENERATION " + short(chain.generation, 17, 6)); text("published-at", "PUBLISHED " + age(d.generated_at));
     text("source-watermark", "WATERMARK " + number(d.source_watermark));
