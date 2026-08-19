@@ -32,8 +32,12 @@ from teutonic.evaluation import (
 log = logging.getLogger("teutonic.mock-evaluator")
 HOST = os.environ.get("TEUTONIC_MOCK_EVAL_HOST", "127.0.0.1")
 PORT = int(os.environ.get("TEUTONIC_MOCK_EVAL_PORT", "9000"))
-STEPS = int(os.environ.get("TEUTONIC_MOCK_EVAL_STEPS", "8"))
-STEP_SECONDS = float(os.environ.get("TEUTONIC_MOCK_EVAL_STEP_SECONDS", "0.5"))
+STEPS = int(os.environ.get("TEUTONIC_MOCK_EVAL_STEPS", "12"))
+MIN_RUNTIME_SECONDS = 30.0
+CONFIGURED_STEP_SECONDS = float(
+    os.environ.get("TEUTONIC_MOCK_EVAL_STEP_SECONDS", "2.75")
+)
+STEP_SECONDS = max(CONFIGURED_STEP_SECONDS, MIN_RUNTIME_SECONDS / max(STEPS, 1))
 EVALUATOR_VERSION = "pair-evaluator-v2"
 SOFTWARE_VERSION = "mock-evaluator-v1"
 
@@ -295,7 +299,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    if STEPS < 2 or STEP_SECONDS < 0:
+    if STEPS < 2 or CONFIGURED_STEP_SECONDS < 0:
         raise ValueError("mock evaluator requires at least two steps and non-negative delay")
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -308,7 +312,13 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
-    log.info("mock evaluator listening host=%s port=%d steps=%d", HOST, PORT, STEPS)
+    log.info(
+        "mock evaluator listening host=%s port=%d steps=%d duration>=%.1fs",
+        HOST,
+        PORT,
+        STEPS,
+        STEPS * STEP_SECONDS,
+    )
     try:
         server.serve_forever()
     finally:
