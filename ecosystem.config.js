@@ -28,6 +28,13 @@ const longRunning = {
 module.exports = {
   apps: [
     {
+      ...longRunning,
+      name: "teutonic-access-controller",
+      script: "scripts/access_controller.py",
+      kill_timeout: 30000,
+      env: commonEnv,
+    },
+    {
       name: "teutonic-eval-tunnel",
       script: "scripts/evaluator_tunnel.sh",
       interpreter: "/bin/bash",

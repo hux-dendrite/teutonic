@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import atexit
 import concurrent.futures
-import hashlib
 import json
 import os
 import re
@@ -18,28 +17,23 @@ from pathlib import Path
 
 import boto3
 import bittensor as bt
-import httpx
 import psycopg
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from nacl.signing import SigningKey
 
 from teutonic.access import (
-    AccessControllerJobRunner,
     AccessControllerRepository,
     ControllerLockUnavailable,
     MailboxCipher,
-    MailboxStore,
     Manifest,
     ManifestFile,
     MetagraphSnapshot,
-    R2UploadController,
     ReadySignal,
     UidAssignment,
     ready_signal_payload,
 )
-from teutonic.access.cloudflare import CloudflareR2TokenGateway
-from teutonic.access.crypto import SecretCipher, encode_signature
+from teutonic.access.crypto import encode_signature
 from teutonic.credentials import ActivationResponse, mailbox_object_key
 from teutonic.storage.artifacts import model_digest_from_inventory, sha256_file
 
@@ -54,7 +48,6 @@ SEED = (
     / ".cache/qwen2.5-0.5b-seed/Qwen--Qwen2.5-0.5B"
     / "060db6499f32faf8b98477b0a26969ef7d8b9987"
 )
-REGISTRATION_NONCE = "qwen-15-submission-flow-v1"
 
 
 def required(name: str) -> str:
@@ -360,23 +353,13 @@ def main() -> int:
     subtensor = bt.Subtensor(network="test")
     atexit.register(subtensor.close)
     s3 = permanent_s3()
-    private_bucket = required("TEUTONIC_PRIVATE_MODEL_BUCKET")
     mailbox_bucket = required("TEUTONIC_DASHBOARD_BUCKET")
     challenger: Path | None = None
-
-    controller_key = hashlib.sha256(
-        b"teutonic-full-flow-controller-v1\0" + required("R2_SECRET_ACCESS_KEY").encode()
-    ).digest()
-    validator_key = SigningKey(
-        hashlib.sha256(
-            b"teutonic-full-flow-mailbox-v1\0" + required("R2_SECRET_ACCESS_KEY").encode()
-        ).digest()
-    )
 
     with psycopg.connect(required("TEUTONIC_DATABASE_URL"), autocommit=True) as connection:
         repository = AccessControllerRepository(
             connection,
-            registration_nonce=REGISTRATION_NONCE,
+            registration_nonce=required("TEUTONIC_REGISTRATION_NONCE"),
             finalized_start_block=0,
         )
         acquire_controller_lock(repository)
@@ -422,84 +405,83 @@ def main() -> int:
                 print("Miner activation signature verified", flush=True)
             else:
                 print("Resuming the already-activated test registration", flush=True)
+            repository.release_lock()
 
-            with httpx.Client(timeout=30.0) as http:
-                gateway = CloudflareR2TokenGateway(
-                    http,
-                    account_id=required("CLOUDFLARE_ACCOUNT_ID"),
-                    management_token=required("CLOUDFLARE_API_TOKEN"),
-                    bucket=private_bucket,
-                )
-                runner = AccessControllerJobRunner(
-                    repository,
-                    token_gateway=gateway,
-                    upload_controller=R2UploadController(
-                        s3, private_model_bucket=private_bucket, chunk_size=8 * 1024 * 1024
-                    ),
-                    mailbox_store=MailboxStore(s3, bucket=mailbox_bucket),
-                    secret_cipher=SecretCipher(controller_key),
-                    mailbox_cipher=MailboxCipher(validator_key),
-                    account_id=required("CLOUDFLARE_ACCOUNT_ID"),
-                    r2_endpoint=endpoint(),
-                    private_model_bucket=private_bucket,
-                    instance_id="testnet-load-controller",
-                )
-                jobs = runner.run_until_idle(propagate=True)
-                print(f"Issued restricted credentials and mailbox ({jobs} jobs)", flush=True)
+            deadline = time.monotonic() + 300
+            while True:
+                credential = connection.execute(
+                    """
+                    SELECT generation, state
+                      FROM control_plane.credential_generations
+                     WHERE registration_id = %s
+                     ORDER BY generation DESC LIMIT 1
+                    """,
+                    (registration,),
+                ).fetchone()
+                if credential is not None and credential[1] == "published":
+                    generation = int(credential[0])
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("timed out waiting for the PM2 access controller mailbox")
+                time.sleep(2)
 
-                key = mailbox_object_key(registration, 1)
-                response = s3.get_object(Bucket=mailbox_bucket, Key=key)
-                try:
-                    ciphertext = response["Body"].read()
-                finally:
-                    response["Body"].close()
-                envelope = MailboxCipher.decrypt_for_test(ciphertext, miner_nacl_key())
-                if envelope["hotkey"] != MINER_HOTKEY:
-                    raise RuntimeError("decrypted mailbox was not addressed to the test miner")
-                if envelope["allowed_prefix"] != f"models/registrations/{registration}/":
-                    raise RuntimeError("decrypted mailbox prefix differs from registration prefix")
-                print("Miner decrypted and validated its credential mailbox", flush=True)
-                repository.release_lock()
+            key = mailbox_object_key(registration, generation)
+            response = s3.get_object(Bucket=mailbox_bucket, Key=key)
+            try:
+                ciphertext = response["Body"].read()
+            finally:
+                response["Body"].close()
+            envelope = MailboxCipher.decrypt_for_test(ciphertext, miner_nacl_key())
+            if envelope["hotkey"] != MINER_HOTKEY:
+                raise RuntimeError("decrypted mailbox was not addressed to the test miner")
+            if envelope["allowed_prefix"] != f"models/registrations/{registration}/":
+                raise RuntimeError("decrypted mailbox prefix differs from registration prefix")
+            print(
+                f"Miner decrypted mailbox generation {generation} issued by PM2 controller",
+                flush=True,
+            )
 
-                challenger = make_challenger()
-                manifest = signed_manifest(challenger, registration, wallet)
-                upload_challenger(challenger, manifest, envelope)
+            challenger = make_challenger()
+            manifest = signed_manifest(challenger, registration, wallet)
+            upload_challenger(challenger, manifest, envelope)
 
-                payload = ready_signal_payload(registration, manifest.manifest_sha256)
-                # Hold the durable chain cursor while the ready commitment finalizes.
-                # Otherwise a concurrent miner can persist a newer registration
-                # snapshot first, making this ready block stale and unrecordable.
-                acquire_controller_lock(repository)
-                print(f"Submitting finalized ready commitment from {MINER_HOTKEY_NAME}...", flush=True)
-                commitment = subtensor.set_commitment(
-                    wallet=wallet,
-                    netuid=NETUID,
-                    data=payload,
-                    raise_error=True,
-                    wait_for_inclusion=True,
-                    wait_for_finalization=True,
-                )
-                if not commitment.success:
-                    raise RuntimeError(f"on-chain ready commitment failed: {commitment.message}")
-                ready_block, extrinsic_index, event_index = receipt_position(
-                    commitment, subtensor, payload, uid
-                )
-                repository.apply_finalized_snapshot(finalized_snapshot(subtensor, ready_block))
-                signal = ReadySignal.parse(
-                    payload,
-                    signalling_hotkey=MINER_HOTKEY,
-                    block_number=ready_block,
-                    extrinsic_index=extrinsic_index,
-                    event_index=event_index,
-                )
-                upload_id = repository.accept_ready_signal(signal, now=now())
-                print(
-                    f"Accepted finalized ready signal: block={ready_block} "
-                    f"extrinsic={extrinsic_index} upload={upload_id}",
-                    flush=True,
-                )
+            payload = ready_signal_payload(registration, manifest.manifest_sha256)
+            # Hold the durable chain cursor while the ready commitment finalizes.
+            # Otherwise a concurrent miner can persist a newer registration
+            # snapshot first, making this ready block stale and unrecordable.
+            acquire_controller_lock(repository)
+            print(f"Submitting finalized ready commitment from {MINER_HOTKEY_NAME}...", flush=True)
+            commitment = subtensor.set_commitment(
+                wallet=wallet,
+                netuid=NETUID,
+                data=payload,
+                raise_error=True,
+                wait_for_inclusion=True,
+                wait_for_finalization=True,
+            )
+            if not commitment.success:
+                raise RuntimeError(f"on-chain ready commitment failed: {commitment.message}")
+            ready_block, extrinsic_index, event_index = receipt_position(
+                commitment, subtensor, payload, uid
+            )
+            repository.apply_finalized_snapshot(finalized_snapshot(subtensor, ready_block))
+            signal = ReadySignal.parse(
+                payload,
+                signalling_hotkey=MINER_HOTKEY,
+                block_number=ready_block,
+                extrinsic_index=extrinsic_index,
+                event_index=event_index,
+            )
+            upload_id = repository.accept_ready_signal(signal, now=now())
+            repository.release_lock()
+            print(
+                f"Accepted finalized ready signal: block={ready_block} "
+                f"extrinsic={extrinsic_index} upload={upload_id}",
+                flush=True,
+            )
 
-                jobs = runner.run_until_idle(propagate=True)
+            deadline = time.monotonic() + 1800
+            while True:
                 state = connection.execute(
                     "SELECT state FROM control_plane.uploads WHERE upload_id = %s",
                     (upload_id,),
@@ -508,14 +490,18 @@ def main() -> int:
                     "SELECT state FROM control_plane.r2_parent_tokens WHERE registration_id = %s",
                     (registration,),
                 ).fetchone()[0]
-                print(
-                    f"Controller complete: jobs={jobs} upload_state={state} "
-                    f"upload_access={token_state}",
-                    flush=True,
-                )
-                if state != "ready_for_evaluation" or token_state != "revoked":
-                    raise RuntimeError("controller did not finalize upload and revoke access")
-                print(f"UPLOAD_ID={upload_id}", flush=True)
+                if state == "ready_for_evaluation" and token_state == "revoked":
+                    break
+                if state == "verification_failed":
+                    raise RuntimeError("PM2 access controller rejected the uploaded model")
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("timed out waiting for PM2 access-controller verification")
+                time.sleep(2)
+            print(
+                f"PM2 controller complete: upload_state={state} upload_access={token_state}",
+                flush=True,
+            )
+            print(f"UPLOAD_ID={upload_id}", flush=True)
         finally:
             repository.release_lock()
             if challenger is not None:
