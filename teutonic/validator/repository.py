@@ -86,6 +86,7 @@ class ValidatorRepository:
                        k.public_prefix AS king_prefix,
                        u.upload_id, u.registration_id, u.model_digest, u.model_name,
                        u.ready_finalized_block, u.ready_extrinsic_index, u.ready_event_index,
+                       ready_snapshot.finalized_block_hash AS ready_finalized_block_hash,
                        vu.immutable_bucket, vu.immutable_prefix,
                        r.hotkey, r.uid,
                        assignment.coldkey,
@@ -108,6 +109,11 @@ class ValidatorRepository:
                        FOR UPDATE OF candidate SKIP LOCKED
                        LIMIT 1
                   ) u ON true
+                  JOIN control_plane.metagraph_snapshots ready_snapshot
+                    ON ready_snapshot.netuid = c.netuid
+                   AND ready_snapshot.chain_generation = c.chain_generation
+                   AND ready_snapshot.finalized_block = u.ready_finalized_block
+                   AND ready_snapshot.is_complete
                   JOIN control_plane.verified_uploads vu ON vu.upload_id = u.upload_id
                   JOIN control_plane.registrations r ON r.registration_id = u.registration_id
                   LEFT JOIN LATERAL (
@@ -189,6 +195,7 @@ class ValidatorRepository:
                     "sampling": {
                         "seed": policy.sampling_seed,
                         "bootstrap_seed": policy.bootstrap_seed,
+                        "block_hash": row["ready_finalized_block_hash"],
                     },
                     "limits": policy.thresholds,
                     "dataset": {"source": policy.dataset_source, "label": policy.dataset_label},

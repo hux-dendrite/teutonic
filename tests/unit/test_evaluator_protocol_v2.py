@@ -57,7 +57,11 @@ def request_payload(king_digest: str = "a" * 64, challenger_digest: str = "b" * 
             "code": "git:0123456789abcdef",
             "evaluator": "pair-evaluator-v2",
         },
-        "sampling": {"seed": 3610, "bootstrap_seed": 45063},
+        "sampling": {
+            "seed": 3610,
+            "bootstrap_seed": 45063,
+            "block_hash": "0x" + "c" * 64,
+        },
         "limits": {
             "n": 25000,
             "seq_len": 2048,
@@ -158,6 +162,17 @@ class EvaluatorProtocolV2ContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ProtocolValidationError, "unknown fields"):
             EvaluationRequestV2.from_mapping({"king_repo": "legacy/model"})
+
+        invalid_hash = request_payload()
+        invalid_hash["sampling"]["block_hash"] = "0x1234"
+        with self.assertRaisesRegex(ProtocolValidationError, "32-byte"):
+            EvaluationRequestV2.from_mapping(invalid_hash)
+
+    def test_production_adapter_binds_sampling_to_block_hash(self) -> None:
+        source = (
+            Path(__file__).parents[2] / "teutonic" / "evaluator" / "engine.py"
+        ).read_text()
+        self.assertIn('block_hash=str(request.sampling["block_hash"])', source)
 
     def test_duplicate_conflicting_and_busy_attempts(self) -> None:
         registry = EvaluationAttemptRegistry()

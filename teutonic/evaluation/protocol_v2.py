@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping
 PROTOCOL_VERSION = "teutonic-evaluator-v2"
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_BLOCK_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 _PRIVATE_MODEL_PREFIX_RE = re.compile(r"^models/registrations/[0-9a-f]{64}/$")
 _FORBIDDEN_KEY_PARTS = (
     "access_key",
@@ -116,7 +117,7 @@ class EvaluationRequestV2:
     challenger: R2Artifact
     miner: Mapping[str, Any]
     versions: Mapping[str, str]
-    sampling: Mapping[str, int]
+    sampling: Mapping[str, int | str]
     limits: Mapping[str, int | float]
     dataset: Mapping[str, str]
     tokenizer: Mapping[str, str]
@@ -189,13 +190,19 @@ class EvaluationRequestV2:
         }
 
         sampling = _required_mapping(data.get("sampling"), "sampling")
-        _exact_keys(sampling, {"seed", "bootstrap_seed"}, "sampling")
-        normalized_sampling: dict[str, int] = {}
+        _exact_keys(sampling, {"seed", "bootstrap_seed", "block_hash"}, "sampling")
+        normalized_sampling: dict[str, int | str] = {}
         for key in ("seed", "bootstrap_seed"):
             number = sampling.get(key)
             if isinstance(number, bool) or not isinstance(number, int) or number < 0:
                 raise ProtocolValidationError(f"sampling.{key} must be an integer >= 0")
             normalized_sampling[key] = number
+        block_hash = _required_string(sampling.get("block_hash"), "sampling.block_hash").lower()
+        if not _BLOCK_HASH_RE.fullmatch(block_hash):
+            raise ProtocolValidationError(
+                "sampling.block_hash must be a lowercase 32-byte 0x-prefixed hash"
+            )
+        normalized_sampling["block_hash"] = block_hash
 
         limits = _required_mapping(data.get("limits"), "limits")
         _exact_keys(

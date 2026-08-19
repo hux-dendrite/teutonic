@@ -162,27 +162,28 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             RESTART IDENTITY CASCADE
             """
         )
-        snapshot = self.connection.execute(
-            """
-            INSERT INTO control_plane.metagraph_snapshots (
-                netuid, chain_generation, finalized_block, finalized_block_hash,
-                snapshot_checksum, uid_count, is_complete, observed_at
-            ) VALUES (306, 'test', 100, '0x100', %s, 4, true, %s)
-            RETURNING snapshot_id
-            """,
-            ("1" * 64, NOW),
-        ).fetchone()[0]
-        with self.connection.cursor() as cursor:
-            cursor.executemany(
+        for block in (100, 101, 103):
+            snapshot = self.connection.execute(
                 """
-                INSERT INTO control_plane.metagraph_uid_assignments
-                    (snapshot_id, uid, hotkey, coldkey) VALUES (%s, %s, %s, %s)
+                INSERT INTO control_plane.metagraph_snapshots (
+                    netuid, chain_generation, finalized_block, finalized_block_hash,
+                    snapshot_checksum, uid_count, is_complete, observed_at
+                ) VALUES (306, 'test', %s, %s, %s, 4, true, %s)
+                RETURNING snapshot_id
                 """,
-                [
-                    (snapshot, uid, f"hotkey-{uid}", f"coldkey-{uid}")
-                    for uid in (1, 2, 3, 4)
-                ],
-            )
+                (block, f"0x{block:064x}", f"{block:064x}", NOW),
+            ).fetchone()[0]
+            with self.connection.cursor() as cursor:
+                cursor.executemany(
+                    """
+                    INSERT INTO control_plane.metagraph_uid_assignments
+                        (snapshot_id, uid, hotkey, coldkey) VALUES (%s, %s, %s, %s)
+                    """,
+                    [
+                        (snapshot, uid, f"hotkey-{uid}", f"coldkey-{uid}")
+                        for uid in (1, 2, 3, 4)
+                    ],
+                )
         competition = self.connection.execute(
             """
             INSERT INTO control_plane.competitions (netuid, chain_generation, name)
@@ -317,10 +318,17 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             standby.acquire_lock()
 
         observed = []
+        sampling_identities = []
         for _ in range(3):
             claim = self.repository.claim_next(now=NOW, policy=policy())
             self.assertIsNotNone(claim)
             observed.append(claim.upload_id)
+            sampling_identities.append(
+                (
+                    claim.request["miner"]["hotkey"],
+                    claim.request["sampling"]["block_hash"],
+                )
+            )
             self.repository.fail_attempt(
                 claim.evaluation_id,
                 now=NOW,
@@ -330,6 +338,14 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(
             observed, [str(self.uploads[2]), str(self.uploads[1]), str(self.uploads[0])]
+        )
+        self.assertEqual(
+            sampling_identities,
+            [
+                ("hotkey-3", f"0x{101:064x}"),
+                ("hotkey-2", f"0x{101:064x}"),
+                ("hotkey-1", f"0x{103:064x}"),
+            ],
         )
 
     def test_dedicated_validator_role_can_claim_and_commit_its_owned_state(self) -> None:
@@ -386,6 +402,11 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             retried = standby.claim_next(now=NOW + timedelta(seconds=7), policy=policy())
             self.assertEqual(retried.upload_id, claim.upload_id)
             self.assertEqual(retried.attempt_number, 2)
+            self.assertEqual(retried.request["miner"]["hotkey"], claim.request["miner"]["hotkey"])
+            self.assertEqual(
+                retried.request["sampling"]["block_hash"],
+                claim.request["sampling"]["block_hash"],
+            )
             attempts = self.connection.execute(
                 """
                 SELECT attempt_number, state

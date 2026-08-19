@@ -207,6 +207,7 @@ def internal_request_from_v2(
         batch_size=int(request.limits["batch_size"]),
         seed=int(request.sampling["seed"]),
         bootstrap_seed=int(request.sampling["bootstrap_seed"]),
+        block_hash=str(request.sampling["block_hash"]),
     )
 
 
