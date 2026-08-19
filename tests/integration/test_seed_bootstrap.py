@@ -46,8 +46,8 @@ class SeedBootstrapIntegrationTests(unittest.TestCase):
             manifest=b"{}",
         )
 
-    def identity(self, *, uid=7, block=100, operator="validator-a"):
-        return GenesisIdentity(HOTKEY, uid, block, operator)
+    def identity(self, *, uid=7, block=100):
+        return GenesisIdentity(HOTKEY, uid, block)
 
     def bootstrap(self, identity=None, artifact=None):
         return bootstrap_genesis(

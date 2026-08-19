@@ -29,6 +29,8 @@ else:
 with open(_TOML_PATH, "rb") as _f:
     _doc = tomllib.load(_f)
 
+CONFIG_PATH: pathlib.Path = _TOML_PATH.resolve()
+
 _chain = _doc.get("chain", {})
 _arch = _doc.get("arch", {})
 _seed = _doc.get("seed", {})
@@ -73,6 +75,7 @@ def load_arch() -> ModuleType:
 
 
 __all__ = [
+    "CONFIG_PATH",
     "NAME",
     "SEED_REPO",
     "REPO_PATTERN",

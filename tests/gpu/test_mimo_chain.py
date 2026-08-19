@@ -5,6 +5,7 @@ from teutonic.archs import mimo
 
 
 def test_mimo_chain_is_pinned_to_immutable_hf_seed():
+    assert chain_config.CONFIG_PATH.name == "chain.toml"
     assert chain_config.ARCH_MODULE == "teutonic.archs.mimo"
     assert chain_config.SEED_REPO == (
         "dendriteholdings/mimo-v2.5-pro-104b-64e-w1024-top4"

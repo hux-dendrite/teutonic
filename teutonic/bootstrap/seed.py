@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping
@@ -10,6 +12,8 @@ from teutonic.storage.artifacts import model_digest_from_inventory, sha256_file
 
 
 _HF_DIGEST = re.compile(r"^hf:([0-9a-f]{40})$")
+_MIB = 1024 * 1024
+log = logging.getLogger("teutonic.seed-bootstrap")
 
 
 class SeedBootstrapError(RuntimeError):
@@ -48,11 +52,10 @@ class GenesisIdentity:
     hotkey: str
     uid: int
     finalized_block: int
-    operator: str
 
     def __post_init__(self) -> None:
-        if not self.hotkey or not self.operator:
-            raise ValueError("genesis hotkey and operator are required")
+        if not self.hotkey:
+            raise ValueError("genesis hotkey is required")
         if self.uid < 0 or self.finalized_block < 0:
             raise ValueError("genesis UID and finalized block must be non-negative")
 
@@ -111,10 +114,14 @@ class HuggingFaceSeed:
         api: Any | None = None,
         downloader: Callable[..., str] | None = None,
         token: str | None = None,
+        max_workers: int = 16,
     ) -> None:
+        if max_workers < 1:
+            raise ValueError("Hugging Face download worker count must be positive")
         self._api = api
         self._downloader = downloader
         self.token = token or None
+        self.max_workers = max_workers
 
     def _clients(self) -> tuple[Any, Callable[..., str]]:
         if self._api is None or self._downloader is None:
@@ -143,6 +150,7 @@ class HuggingFaceSeed:
                 revision=revision,
                 local_dir=str(snapshot_dir),
                 token=self.token,
+                max_workers=self.max_workers,
             )
         )
         files = _safe_file_inventory(downloaded)
@@ -168,11 +176,33 @@ class HuggingFaceSeed:
 class PublicSeedStore:
     """Publish a genesis snapshot directly to its immutable public R2 prefix."""
 
-    def __init__(self, s3_client: Any, *, bucket: str) -> None:
+    def __init__(
+        self,
+        s3_client: Any,
+        *,
+        bucket: str,
+        file_concurrency: int = 16,
+        part_concurrency: int = 16,
+        part_size: int = 64 * _MIB,
+        transfer_config: Any | None = None,
+    ) -> None:
         if not bucket:
             raise ValueError("public seed bucket is required")
+        if file_concurrency < 1 or part_concurrency < 1 or part_size < 5 * _MIB:
+            raise ValueError("public seed transfer concurrency or part size is invalid")
         self.s3 = s3_client
         self.bucket = bucket
+        self.file_concurrency = file_concurrency
+        if transfer_config is None:
+            from boto3.s3.transfer import TransferConfig
+
+            transfer_config = TransferConfig(
+                multipart_threshold=part_size,
+                multipart_chunksize=part_size,
+                max_concurrency=part_concurrency,
+                use_threads=True,
+            )
+        self.transfer_config = transfer_config
 
     def _list(self, prefix: str) -> dict[str, Mapping[str, Any]]:
         found: dict[str, Mapping[str, Any]] = {}
@@ -221,24 +251,38 @@ class PublicSeedStore:
             size, sha256, _path = expected[key]
             self._verify_object(key=key, size=size, sha256=sha256)
 
-        for key, (size, sha256, local_path) in expected.items():
-            if key in existing:
-                continue
-            if local_path is None:
-                self.s3.put_object(
-                    Bucket=self.bucket,
-                    Key=key,
-                    Body=artifact.manifest,
-                    ContentType="application/json",
-                    Metadata={"sha256": sha256},
-                )
-            else:
-                self.s3.upload_file(
-                    str(local_path),
-                    self.bucket,
-                    key,
-                    ExtraArgs={"Metadata": {"sha256": sha256}},
-                )
+        pending_files = [
+            (key, size, sha256, local_path)
+            for key, (size, sha256, local_path) in expected.items()
+            if key not in existing and local_path is not None
+        ]
+
+        def upload(item: tuple[str, int, str, Path]) -> str:
+            key, _size, sha256, local_path = item
+            self.s3.upload_file(
+                str(local_path),
+                self.bucket,
+                key,
+                ExtraArgs={"Metadata": {"sha256": sha256}},
+                Config=self.transfer_config,
+            )
+            return key
+
+        with ThreadPoolExecutor(max_workers=self.file_concurrency) as executor:
+            futures = {executor.submit(upload, item): item[0] for item in pending_files}
+            for future in as_completed(futures):
+                key = future.result()
+                log.info("uploaded public genesis object %s", key)
+
+        manifest_key = f"{artifact.prefix}manifest.json"
+        if manifest_key not in existing:
+            self.s3.put_object(
+                Bucket=self.bucket,
+                Key=manifest_key,
+                Body=artifact.manifest,
+                ContentType="application/json",
+                Metadata={"sha256": artifact.manifest_sha256},
+            )
 
         observed = self._list(artifact.prefix)
         if set(observed) != set(expected):
@@ -247,11 +291,10 @@ class PublicSeedStore:
             self._verify_object(key=key, size=size, sha256=sha256)
 
 
-def _provenance(artifact: SeedArtifact, identity: GenesisIdentity) -> str:
+def _provenance(artifact: SeedArtifact) -> str:
     return json.dumps(
         {
             "model_digest": artifact.model_digest,
-            "operator": identity.operator,
             "source": {
                 "backend": "hf",
                 "repo_id": artifact.repo_id,
@@ -275,7 +318,7 @@ def bootstrap_genesis(
 ) -> GenesisRecord:
     if netuid < 0 or not chain_generation or not competition or not public_bucket:
         raise ValueError("genesis competition identity is invalid")
-    provenance = _provenance(artifact, identity)
+    provenance = _provenance(artifact)
     with connection.transaction():
         connection.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
