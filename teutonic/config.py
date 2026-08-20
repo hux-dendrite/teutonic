@@ -7,11 +7,11 @@ from datetime import timedelta
 from typing import Mapping
 
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
-DEFAULT_PRIVATE_MODEL_BUCKET = "teutonic-private-models"
-DEFAULT_PUBLIC_MODEL_BUCKET = "teutonic-models"
-DEFAULT_DASHBOARD_BUCKET = "teutonic-dash"
+DEFAULT_PRIVATE_MODEL_BUCKET = "teutonic-private-models-enam"
+DEFAULT_PUBLIC_MODEL_BUCKET = "teutonic-models-enam"
+DEFAULT_DASHBOARD_BUCKET = "teutonic-dash-enam"
 DEFAULT_MAILBOX_PUBLIC_BASE_URL = (
-    "https://pub-7eafb4516b6c495c950a330c5ea4e1e4.r2.dev"
+    "https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev"
 )
 
 

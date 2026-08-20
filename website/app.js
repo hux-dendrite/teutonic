@@ -1,7 +1,7 @@
 (function () {
   "use strict";
   var ENDPOINT = "/dashboard.json";
-  var MODEL_STORAGE_BASE = "https://pub-a21761abbce54751b3f66bcf57651935.r2.dev/";
+  var MODEL_STORAGE_BASE = "https://pub-0821d4e196224864af220294345fd141.r2.dev/";
   var POLL_MS = 15000;
   var lastPayload = null;
   var smoothMode = localStorage.getItem("smoothMode") || "lowess";

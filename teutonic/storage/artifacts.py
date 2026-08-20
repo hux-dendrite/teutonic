@@ -21,8 +21,8 @@ class ArtifactIntegrityError(RuntimeError):
 
 EVALUATOR_MODEL_BUCKETS = frozenset(
     {
-        "teutonic-models",
-        "teutonic-private-models",
+        "teutonic-models-enam",
+        "teutonic-private-models-enam",
     }
 )
 

@@ -418,12 +418,12 @@ class R2ArtifactResolverTests(unittest.TestCase):
             prefix = f"models/sha256/{digest}/"
             client = FakeS3Client(
                 {
-                    ("teutonic-models", prefix + name): body
+                    ("teutonic-models-enam", prefix + name): body
                     for name, body in files.items()
                 }
             )
             payload = request_payload(king_digest=digest)
-            payload["king"]["bucket"] = "teutonic-models"
+            payload["king"]["bucket"] = "teutonic-models-enam"
             artifact = EvaluationRequestV2.from_mapping(payload).king
             resolver = R2ArtifactResolver(
                 cache_dir,
@@ -437,5 +437,5 @@ class R2ArtifactResolverTests(unittest.TestCase):
             self.assertEqual(materialized.name, digest)
             self.assertEqual(
                 resolver.allowed_buckets,
-                {"teutonic-models", "teutonic-private-models"},
+                {"teutonic-models-enam", "teutonic-private-models-enam"},
             )
