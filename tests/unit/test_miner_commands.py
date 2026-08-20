@@ -7,8 +7,16 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from miner.cli import (
+    eligibility_from_commitment,
+    load_settings,
+    save_settings,
+    saved_miners,
+    select_saved_miner,
+)
 from miner.common import RegistrationState, read_json, write_json
 from miner.upload_model import model_paths, validate_auth
+from teutonic.access.contracts import ready_signal_payload
 from teutonic.credentials import registration_id
 
 
@@ -38,6 +46,26 @@ def registration_state() -> RegistrationState:
 
 
 class MinerCommandTests(unittest.TestCase):
+    def test_cli_classifies_finalized_ready_as_consumed(self) -> None:
+        state = registration_state()
+        self.assertEqual(eligibility_from_commitment(state, "r2activate:v1:anything"), "available")
+        ready = ready_signal_payload(state.registration_id, "a" * 64)
+        self.assertEqual(eligibility_from_commitment(state, ready), "consumed")
+
+    def test_cli_discovers_and_selects_saved_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = registration_state()
+            state_dir = root / state.hotkey
+            state.save(state_dir / "registration.json")
+            save_settings(root, {"version": 1, "active_hotkey": state.hotkey})
+
+            self.assertEqual(saved_miners(root)[0].registration, state)
+            self.assertEqual(select_saved_miner(root).registration, state)
+            self.assertEqual(select_saved_miner(root, state.hotkey_name).registration, state)
+            self.assertEqual(load_settings(root)["active_hotkey"], state.hotkey)
+            self.assertEqual(os.stat(root / "settings.json").st_mode & 0o777, 0o600)
+
     def test_registration_state_revalidates_deterministic_identity(self) -> None:
         state = registration_state()
         self.assertEqual(RegistrationState.from_mapping(asdict(state)), state)

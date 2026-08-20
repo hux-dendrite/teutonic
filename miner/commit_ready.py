@@ -24,7 +24,7 @@ from miner.common import (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Revalidate the finalized hotkey registration and commit the uploaded manifest's "
@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
     add_wallet_arguments(parser)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def load_manifest(path, state) -> Manifest:
@@ -53,8 +53,8 @@ def remove_local_auth(state_dir) -> None:
         pass
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     wallet = wallet_from_args(args)
     state_dir = state_dir_from_args(args, wallet)
     state = load_registration(state_dir, wallet)

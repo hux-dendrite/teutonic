@@ -30,7 +30,7 @@ from miner.common import (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Register a hotkey if needed, resolve its finalized registration identity, "
@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="fail instead of spending TAO when the hotkey is not registered",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def btcli_path() -> str:
@@ -134,8 +134,8 @@ def activation_matches(payload: str, state) -> bool:
         return False
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     if not args.network or args.netuid is None or not args.chain_generation:
         raise RuntimeError("--network, --netuid, and --chain-generation are required")
     if args.netuid < 0 or args.registration_timeout < 1:
@@ -172,8 +172,9 @@ def main() -> int:
                 event_index=0,
             )
             if ready.registration_id == state.registration_id:
-                print("registration already has a finalized-ready commitment; eligibility consumed")
-                return 0
+                raise RuntimeError(
+                    "registration already has a finalized-ready commitment; eligibility consumed"
+                )
         if activation_matches(current, state):
             print("matching mailbox activation commitment already exists")
         else:

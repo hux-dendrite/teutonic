@@ -41,11 +41,7 @@ evaluator = [
 dev = ["pytest", "ruff"]
 
 [project.scripts]
-teutonic-miner-check-hotkey = "miner.check_hotkey:main"
-teutonic-miner-register = "miner.register:main"
-teutonic-miner-get-upload-auth = "miner.get_upload_auth:main"
-teutonic-miner-upload-model = "miner.upload_model:main"
-teutonic-miner-commit-ready = "miner.commit_ready:main"
+teutonic-miner = "miner.cli:main"
 
 [project.urls]
 Homepage = "https://teutonic.ai"

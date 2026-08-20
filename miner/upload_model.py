@@ -40,7 +40,7 @@ MULTIPART_THRESHOLD = 32 * 1024 * 1024
 PART_SIZE = 64 * 1024 * 1024
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Hash and sign a local model tree, upload it to the mailbox-provided R2 prefix, "
@@ -50,7 +50,7 @@ def parse_args() -> argparse.Namespace:
     add_wallet_arguments(parser)
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--model-name", required=True)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def model_paths(root: Path) -> list[Path]:
@@ -189,8 +189,8 @@ def upload(root: Path, paths: list[Path], manifest: Manifest, auth: dict) -> Non
     print(f"Upload complete in {time.monotonic() - started:.1f}s", flush=True)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     if not args.model_name.strip():
         raise RuntimeError("--model-name must not be empty")
     wallet = wallet_from_args(args)

@@ -28,7 +28,7 @@ from miner.common import (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Poll the public mailbox, verify/decrypt this hotkey's scoped R2 credential, "
@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--generation", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=600)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def fetch_mailbox(base_url: str, key: str, *, timeout: int) -> bytes:
@@ -100,8 +100,8 @@ def validate_envelope(envelope: dict, state, generation: int) -> datetime:
     return expires_at
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     if not args.mailbox_base_url:
         raise RuntimeError("--mailbox-base-url is required")
     if args.generation < 1 or args.timeout < 1:
