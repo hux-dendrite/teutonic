@@ -15,6 +15,7 @@ if __package__ in (None, ""):
 import httpx
 
 from teutonic.access.crypto import MailboxCipher
+from teutonic.config import DEFAULT_MAILBOX_PUBLIC_BASE_URL
 from teutonic.credentials import mailbox_object_key
 
 from miner.common import (
@@ -38,7 +39,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     add_wallet_arguments(parser)
     parser.add_argument(
-        "--mailbox-base-url", default=env_or_none("TEUTONIC_MAILBOX_PUBLIC_BASE_URL")
+        "--mailbox-base-url",
+        default=(
+            env_or_none("TEUTONIC_MAILBOX_PUBLIC_BASE_URL")
+            or DEFAULT_MAILBOX_PUBLIC_BASE_URL
+        ),
     )
     parser.add_argument("--generation", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=600)

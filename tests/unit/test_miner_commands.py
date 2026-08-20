@@ -16,6 +16,7 @@ from miner.cli import (
     eligibility_from_commitment,
     load_settings,
     remove_local_upload_auth,
+    resolve_mailbox_base_url,
     save_settings,
     saved_miners,
     select_saved_miner,
@@ -24,6 +25,7 @@ from miner.common import RegistrationState, read_json, write_json
 from miner.get_upload_auth import fetch_mailbox
 from miner.upload_model import model_paths, validate_auth
 from teutonic.access.contracts import ready_signal_payload
+from teutonic.config import DEFAULT_MAILBOX_PUBLIC_BASE_URL
 from teutonic.credentials import registration_id
 
 
@@ -53,6 +55,31 @@ def registration_state() -> RegistrationState:
 
 
 class MinerCommandTests(unittest.TestCase):
+    def test_mailbox_url_has_public_default_and_stable_override_precedence(self) -> None:
+        with patch.dict(os.environ, {"TEUTONIC_MAILBOX_PUBLIC_BASE_URL": ""}):
+            self.assertEqual(resolve_mailbox_base_url(None, {}), DEFAULT_MAILBOX_PUBLIC_BASE_URL)
+        with patch.dict(
+            os.environ,
+            {"TEUTONIC_MAILBOX_PUBLIC_BASE_URL": "https://environment.example"},
+        ):
+            self.assertEqual(
+                resolve_mailbox_base_url(None, {}),
+                "https://environment.example",
+            )
+            self.assertEqual(
+                resolve_mailbox_base_url(
+                    None, {"mailbox_base_url": "https://saved.example"}
+                ),
+                "https://saved.example",
+            )
+            self.assertEqual(
+                resolve_mailbox_base_url(
+                    "https://explicit.example",
+                    {"mailbox_base_url": "https://saved.example"},
+                ),
+                "https://explicit.example",
+            )
+
     def test_new_registration_defaults_generation_from_chain_toml(self) -> None:
         expected = chain_config.CHAIN_GENERATION
         self.assertTrue(expected)

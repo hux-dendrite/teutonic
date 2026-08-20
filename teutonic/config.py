@@ -10,6 +10,9 @@ _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 DEFAULT_PRIVATE_MODEL_BUCKET = "teutonic-private-models"
 DEFAULT_PUBLIC_MODEL_BUCKET = "teutonic-models"
 DEFAULT_DASHBOARD_BUCKET = "teutonic-dash"
+DEFAULT_MAILBOX_PUBLIC_BASE_URL = (
+    "https://pub-7eafb4516b6c495c950a330c5ea4e1e4.r2.dev"
+)
 
 
 @dataclass(frozen=True, slots=True)

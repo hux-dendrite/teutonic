@@ -24,6 +24,7 @@ from miner.common import (
     write_json,
 )
 from teutonic.access.contracts import ReadySignal
+from teutonic.config import DEFAULT_MAILBOX_PUBLIC_BASE_URL
 
 
 SETTINGS_FILE = "settings.json"
@@ -193,6 +194,17 @@ def default_chain_generation() -> str:
     )
 
 
+def resolve_mailbox_base_url(
+    explicit: str | None, settings: Mapping[str, Any]
+) -> str:
+    return (
+        explicit
+        or settings.get("mailbox_base_url")
+        or os.environ.get("TEUTONIC_MAILBOX_PUBLIC_BASE_URL")
+        or DEFAULT_MAILBOX_PUBLIC_BASE_URL
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="teutonic-miner",
@@ -357,15 +369,7 @@ def run_auth(
         next_chain_check = now + 10.0
         require_available_eligibility(miner, wallet_path)
 
-    mailbox_url = (
-        args.mailbox_base_url
-        or settings.get("mailbox_base_url")
-        or os.environ.get("TEUTONIC_MAILBOX_PUBLIC_BASE_URL")
-    )
-    if not mailbox_url:
-        raise RuntimeError(
-            "mailbox URL is not saved; run `teutonic-miner configure --mailbox-base-url URL`"
-        )
+    mailbox_url = resolve_mailbox_base_url(args.mailbox_base_url, settings)
     update_settings(root, mailbox_base_url=mailbox_url, wallet_path=str(wallet_path))
     return get_upload_auth.main(
         wallet_arguments(miner, wallet_path)
