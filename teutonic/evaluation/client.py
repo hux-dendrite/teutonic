@@ -7,6 +7,9 @@ from typing import Any
 import httpx
 
 
+HEALTH_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+
+
 class EvaluatorBusyError(RuntimeError):
     pass
 
@@ -50,7 +53,9 @@ class HttpEvaluatorClient:
         return self._client
 
     async def health(self) -> dict[str, Any]:
-        response = await self._require_client().get(f"{self.base_url}/health")
+        response = await self._require_client().get(
+            f"{self.base_url}/health", timeout=HEALTH_TIMEOUT
+        )
         response.raise_for_status()
         return response.json()
 

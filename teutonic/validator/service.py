@@ -39,7 +39,22 @@ class ValidatorScheduler:
         self.preflight = preflight
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
+    async def evaluator_available(self) -> bool:
+        try:
+            health = await self.evaluator.health()
+            if health.get("status") != "ok":
+                raise RuntimeError("evaluator health response is not ready")
+        except Exception as exc:
+            log.warning(
+                "evaluator unavailable; queue claiming paused error=%s",
+                type(exc).__name__,
+            )
+            return False
+        return True
+
     async def run_once(self) -> bool:
+        if not await self.evaluator_available():
+            return False
         claim = self.repository.claim_next(now=self.clock(), policy=self.policy)
         if claim is None:
             return False
@@ -71,7 +86,12 @@ class ValidatorScheduler:
                     error_code,
                 )
                 return True
-            response = await self.evaluator.start_attempt(claim.request)
+            try:
+                response = await self.evaluator.start_attempt(claim.request)
+            except Exception as exc:
+                if self._defer_dispatch_error(claim, exc):
+                    return True
+                raise
             eval_id = str(response["eval_id"])
             if eval_id != claim.eval_id:
                 raise ProtocolValidationError("evaluator returned a different attempt identity")
@@ -90,6 +110,32 @@ class ValidatorScheduler:
             self._persist_terminal(claim, terminal)
         except Exception as exc:
             self._persist_error(claim, exc)
+        return True
+
+    def _defer_dispatch_error(self, claim: ClaimedEvaluation, exc: Exception) -> bool:
+        transient, marker = classify_eval_error(exc)
+        if isinstance(exc, EvaluatorBusyError):
+            transient, marker = True, "evaluator_busy"
+        if not transient:
+            return False
+        error_code = marker or type(exc).__name__
+        self.repository.defer_dispatch(
+            claim.evaluation_id,
+            now=self.clock(),
+            public_error_code=error_code,
+            retry_delay=self.policy.retry_delay(claim.attempt_number),
+            private_diagnostic_reference=(
+                f"diagnostic:{claim.evaluation_id}:{type(exc).__name__}"
+            ),
+        )
+        log.warning(
+            "evaluation dispatch deferred evaluation=%s upload=%s attempt=%d "
+            "error=%s attempt_consumed=false",
+            claim.evaluation_id,
+            claim.upload_id,
+            claim.attempt_number,
+            error_code,
+        )
         return True
 
     async def _consume(self, claim: ClaimedEvaluation, eval_id: str) -> Mapping[str, Any]:
@@ -181,7 +227,10 @@ class ValidatorScheduler:
 
     async def reconcile(self) -> int:
         recovered = 0
-        for candidate in self.repository.recovery_candidates(now=self.clock()):
+        candidates = self.repository.recovery_candidates(now=self.clock())
+        if candidates and not await self.evaluator_available():
+            return 0
+        for candidate in candidates:
             log.info(
                 "evaluation recovery started evaluation=%s evaluator_job=%s attempt=%d",
                 candidate.evaluation_id,
@@ -196,6 +245,35 @@ class ValidatorScheduler:
                 claimed_king_reign_id=candidate.claimed_king_reign_id,
                 request=candidate.request,
             )
+            if candidate.state == "claimed":
+                self.repository.adopt(
+                    candidate.evaluation_id, now=self.clock(), lease=self.policy.lease
+                )
+                try:
+                    response = await self.evaluator.start_attempt(candidate.request)
+                except Exception as exc:
+                    if not self._defer_dispatch_error(claim, exc):
+                        self._persist_error(claim, exc)
+                    recovered += 1
+                    continue
+                try:
+                    eval_id = str(response["eval_id"])
+                    if eval_id != claim.eval_id:
+                        raise ProtocolValidationError(
+                            "evaluator returned a different attempt identity"
+                        )
+                    self.repository.start_evaluating(
+                        candidate.evaluation_id,
+                        evaluator_job_id=eval_id,
+                        now=self.clock(),
+                        lease=self.policy.lease,
+                    )
+                    result = await self._consume(claim, eval_id)
+                    self._persist_terminal(claim, result)
+                except Exception as exc:
+                    self._persist_error(claim, exc)
+                recovered += 1
+                continue
             try:
                 status = await self.evaluator.status(candidate.evaluator_job_id)
             except EvaluatorJobNotFoundError as exc:
@@ -205,6 +283,16 @@ class ValidatorScheduler:
                 self._persist_error(claim, exc)
                 recovered += 1
                 continue
+            except Exception as exc:
+                transient, marker = classify_eval_error(exc)
+                if transient:
+                    log.warning(
+                        "evaluation recovery paused evaluation=%s error=%s",
+                        candidate.evaluation_id,
+                        marker or type(exc).__name__,
+                    )
+                    break
+                raise
             self.repository.adopt(
                 candidate.evaluation_id, now=self.clock(), lease=self.policy.lease
             )

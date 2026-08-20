@@ -81,6 +81,9 @@ class FakeEvaluator:
         self.result = result
         self.started = []
 
+    async def health(self):
+        return {"status": "ok"}
+
     async def start_attempt(self, request):
         parsed = EvaluationRequestV2.from_mapping(request)
         self.started.append(parsed.request_payload)
@@ -115,6 +118,9 @@ class RecoveryEvaluator:
         self.request = request
         self.lost = lost
 
+    async def health(self):
+        return {"status": "ok"}
+
     async def status(self, eval_id):
         if self.lost:
             raise EvaluatorJobNotFoundError(eval_id)
@@ -123,6 +129,25 @@ class RecoveryEvaluator:
             "state": "completed",
             "verdict": terminal_result(self.request, accepted=False),
         }
+
+
+class UnavailableEvaluator:
+    async def health(self):
+        raise ConnectionError("GPU tunnel unavailable")
+
+
+class DispatchOutageEvaluator(FakeEvaluator):
+    def __init__(self, result):
+        super().__init__(result)
+        self.dispatches = []
+
+    async def start_attempt(self, request):
+        parsed = EvaluationRequestV2.from_mapping(request)
+        self.dispatches.append(parsed.request_payload)
+        if len(self.dispatches) == 1:
+            raise ConnectionError("connecterror: GPU tunnel unavailable")
+        self.started.append(parsed.request_payload)
+        return {"eval_id": parsed.eval_id, "duplicate": False}
 
 
 @unittest.skipUnless(DATABASE_URL and psycopg, "TEUTONIC_TEST_DATABASE_URL and psycopg required")
@@ -488,6 +513,156 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 row, ("retryable_failure", "transient_infrastructure", "evaluator_job_lost")
             )
+        finally:
+            restarted.release_lock()
+            self.repository.acquire_lock()
+
+    def test_unavailable_evaluator_does_not_claim_queued_upload(self) -> None:
+        async def preflight(_request):
+            return None
+
+        scheduler = ValidatorScheduler(
+            self.repository,
+            UnavailableEvaluator(),
+            policy=policy(),
+            preflight=preflight,
+            clock=lambda: NOW,
+        )
+        self.assertFalse(asyncio.run(scheduler.run_once()))
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT count(*) FROM control_plane.evaluations"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT count(*) FROM control_plane.uploads WHERE state = 'ready_for_evaluation'"
+            ).fetchone()[0],
+            3,
+        )
+
+    def test_dispatch_outage_reuses_attempt_without_spending_retry_budget(self) -> None:
+        current = [NOW]
+        evaluator = DispatchOutageEvaluator(
+            lambda request: terminal_result(request, accepted=False)
+        )
+
+        async def preflight(_request):
+            return None
+
+        scheduler = ValidatorScheduler(
+            self.repository,
+            evaluator,
+            policy=policy(max_attempts=1),
+            preflight=preflight,
+            clock=lambda: current[0],
+        )
+        self.assertTrue(asyncio.run(scheduler.run_once()))
+        deferred = self.connection.execute(
+            """
+            SELECT evaluation_id, attempt_number, state, started_at
+              FROM control_plane.evaluations
+            """
+        ).fetchone()
+        self.assertEqual(deferred[1:], (1, "retryable_failure", None))
+
+        current[0] += timedelta(seconds=6)
+        self.assertTrue(asyncio.run(scheduler.run_once()))
+        completed = self.connection.execute(
+            """
+            SELECT evaluation_id, attempt_number, state, started_at
+              FROM control_plane.evaluations
+            """
+        ).fetchall()
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0][0], deferred[0])
+        self.assertEqual(completed[0][1:3], (1, "completed"))
+        self.assertIsNotNone(completed[0][3])
+        self.assertEqual(
+            (
+                evaluator.dispatches[0]["evaluation_id"],
+                evaluator.dispatches[0]["attempt_number"],
+            ),
+            (
+                evaluator.dispatches[1]["evaluation_id"],
+                evaluator.dispatches[1]["attempt_number"],
+            ),
+        )
+
+    def test_restart_redispatches_unaccepted_claim_with_same_attempt(self) -> None:
+        claim = self.repository.claim_next(now=NOW, policy=policy(max_attempts=1))
+        self.repository.release_lock()
+        restarted = self._repository(self.second_connection, "validator-after-dispatch-crash")
+        restarted.acquire_lock()
+        try:
+            evaluator = FakeEvaluator(
+                lambda request: terminal_result(request, accepted=False)
+            )
+
+            async def preflight(_request):
+                return None
+
+            scheduler = ValidatorScheduler(
+                restarted,
+                evaluator,
+                policy=policy(max_attempts=1),
+                preflight=preflight,
+                clock=lambda: NOW + timedelta(minutes=3),
+            )
+            self.assertEqual(asyncio.run(scheduler.reconcile()), 1)
+            attempts = self.connection.execute(
+                """
+                SELECT evaluation_id::text, attempt_number, state
+                  FROM control_plane.evaluations
+                 WHERE upload_id = %s
+                """,
+                (claim.upload_id,),
+            ).fetchall()
+            self.assertEqual(attempts, [(claim.evaluation_id, 1, "completed")])
+            self.assertEqual(
+                (
+                    evaluator.started[0]["evaluation_id"],
+                    evaluator.started[0]["attempt_number"],
+                ),
+                (claim.evaluation_id, claim.attempt_number),
+            )
+        finally:
+            restarted.release_lock()
+            self.repository.acquire_lock()
+
+    def test_restart_waits_for_unavailable_gpu_without_consuming_accepted_attempt(self) -> None:
+        claim = self.repository.claim_next(now=NOW, policy=policy())
+        self.repository.start_evaluating(
+            claim.evaluation_id,
+            evaluator_job_id=claim.eval_id,
+            now=NOW,
+            lease=timedelta(seconds=1),
+        )
+        self.repository.release_lock()
+        restarted = self._repository(self.second_connection, "validator-with-gpu-outage")
+        restarted.acquire_lock()
+        try:
+            async def preflight(_request):
+                return None
+
+            scheduler = ValidatorScheduler(
+                restarted,
+                UnavailableEvaluator(),
+                policy=policy(),
+                preflight=preflight,
+                clock=lambda: NOW + timedelta(seconds=2),
+            )
+            self.assertEqual(asyncio.run(scheduler.reconcile()), 0)
+            attempts = self.connection.execute(
+                """
+                SELECT attempt_number, state, public_error_code
+                  FROM control_plane.evaluations
+                 WHERE upload_id = %s
+                """,
+                (claim.upload_id,),
+            ).fetchall()
+            self.assertEqual(attempts, [(1, "evaluating", None)])
         finally:
             restarted.release_lock()
             self.repository.acquire_lock()

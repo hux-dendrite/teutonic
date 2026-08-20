@@ -157,6 +157,13 @@ async def run(*, once: bool) -> int:
                     poll_seconds,
                 )
                 while not stopping:
+                    phase["value"] = "reconciling_evaluations"
+                    cycle_recovered = await scheduler.reconcile()
+                    if cycle_recovered:
+                        log.info(
+                            "validator cycle recovered_evaluations=%d",
+                            cycle_recovered,
+                        )
                     phase["value"] = "evaluating"
                     evaluated = await scheduler.run_once()
                     if evaluated:
@@ -164,8 +171,12 @@ async def run(*, once: bool) -> int:
                     phase["value"] = "refreshing_weight_plan"
                     weights_refreshed = refresh_weight_plan(coordinator)
                     if once:
-                        return 0 if recovered or evaluated or weights_refreshed else 3
-                    if not evaluated and not weights_refreshed:
+                        return (
+                            0
+                            if recovered or cycle_recovered or evaluated or weights_refreshed
+                            else 3
+                        )
+                    if not cycle_recovered and not evaluated and not weights_refreshed:
                         phase["value"] = "idle"
                         await asyncio.sleep(poll_seconds)
             finally:

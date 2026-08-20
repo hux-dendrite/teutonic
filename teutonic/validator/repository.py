@@ -78,7 +78,9 @@ class ValidatorRepository:
         self, *, now: datetime, policy: EvaluationPolicyConfig
     ) -> ClaimedEvaluation | None:
         self._require_lock()
-        with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
+        with self.connection.transaction(), self.connection.cursor(
+            row_factory=dict_row
+        ) as cursor:
             cursor.execute(
                 """
                 SELECT c.competition_id, c.current_reign_id,
@@ -90,8 +92,13 @@ class ValidatorRepository:
                        vu.immutable_bucket, vu.immutable_prefix,
                        r.hotkey, r.uid,
                        assignment.coldkey,
+                       previous.evaluation_id AS previous_evaluation_id,
                        previous.attempt_number AS previous_attempt,
-                       previous.next_retry_at
+                       previous.state AS previous_state,
+                       previous.started_at AS previous_started_at,
+                       previous.next_retry_at,
+                       previous.claimed_king_reign_id AS previous_king_reign_id,
+                       previous.request_payload AS previous_request
                   FROM control_plane.competitions c
                   JOIN control_plane.king_reigns k ON k.reign_id = c.current_reign_id
                   JOIN LATERAL (
@@ -117,7 +124,8 @@ class ValidatorRepository:
                   JOIN control_plane.verified_uploads vu ON vu.upload_id = u.upload_id
                   JOIN control_plane.registrations r ON r.registration_id = u.registration_id
                   LEFT JOIN LATERAL (
-                      SELECT e.attempt_number, e.next_retry_at
+                      SELECT e.evaluation_id, e.attempt_number, e.state, e.started_at,
+                             e.next_retry_at, e.claimed_king_reign_id, e.request_payload
                         FROM control_plane.evaluations e
                        WHERE e.upload_id = u.upload_id
                        ORDER BY e.attempt_number DESC
@@ -145,6 +153,46 @@ class ValidatorRepository:
                 raise SchedulerInvariantError("competition has no current king")
             if row["next_retry_at"] is not None and row["next_retry_at"] > now:
                 return None
+
+            # Dispatch failures happen before the evaluator accepts the job. Reclaim the
+            # same durable attempt and request identity instead of spending a miner retry.
+            # Reposting this request is safe because the evaluator binds eval_id to the
+            # original request and returns the existing job after an ambiguous response.
+            if (
+                row["previous_state"] == "retryable_failure"
+                and row["previous_started_at"] is None
+            ):
+                request = EvaluationRequestV2.from_mapping(row["previous_request"])
+                evaluation_id = str(row["previous_evaluation_id"])
+                cursor.execute(
+                    """
+                    UPDATE control_plane.evaluations
+                       SET state = 'claimed', owner_instance_id = %s,
+                           lease_expires_at = %s, heartbeat_at = %s,
+                           failure_class = NULL, public_error_code = NULL,
+                           private_diagnostic_reference = NULL, next_retry_at = NULL,
+                           updated_at = clock_timestamp()
+                     WHERE evaluation_id = %s AND state = 'retryable_failure'
+                    """,
+                    (self.instance_id, now + policy.lease, now, evaluation_id),
+                )
+                cursor.execute(
+                    """
+                    UPDATE control_plane.uploads
+                       SET state = 'evaluation_claimed', failure_code = NULL,
+                           updated_at = clock_timestamp()
+                     WHERE upload_id = %s AND state = 'retry_pending'
+                    """,
+                    (row["upload_id"],),
+                )
+                return ClaimedEvaluation(
+                    evaluation_id=evaluation_id,
+                    upload_id=str(row["upload_id"]),
+                    attempt_number=int(row["previous_attempt"]),
+                    competition_id=str(row["competition_id"]),
+                    claimed_king_reign_id=str(row["previous_king_reign_id"]),
+                    request=request.request_payload,
+                )
 
             attempt_number = int(row["previous_attempt"] or 0) + 1
             if attempt_number > policy.max_attempts:
@@ -497,13 +545,72 @@ class ValidatorRepository:
             )
         return target
 
+    def defer_dispatch(
+        self,
+        evaluation_id: str,
+        *,
+        now: datetime,
+        public_error_code: str,
+        retry_delay: timedelta,
+        private_diagnostic_reference: str | None = None,
+    ) -> None:
+        """Defer a job the evaluator has not accepted without consuming its attempt."""
+        self._require_lock()
+        with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT upload_id, state, started_at, owner_instance_id
+                  FROM control_plane.evaluations
+                 WHERE evaluation_id = %s
+                 FOR UPDATE
+                """,
+                (evaluation_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise SchedulerInvariantError("unknown evaluation")
+            if row["state"] == "retryable_failure" and row["started_at"] is None:
+                return
+            if row["owner_instance_id"] != self.instance_id or row["state"] != "claimed":
+                raise LeaseLostError("unaccepted evaluation is no longer owned")
+            if row["started_at"] is not None:
+                raise SchedulerInvariantError("accepted evaluation cannot be deferred as dispatch")
+            cursor.execute(
+                """
+                UPDATE control_plane.evaluations
+                   SET state = 'retryable_failure',
+                       failure_class = 'transient_infrastructure',
+                       public_error_code = %s, private_diagnostic_reference = %s,
+                       next_retry_at = %s, owner_instance_id = NULL,
+                       lease_expires_at = NULL, heartbeat_at = %s,
+                       updated_at = clock_timestamp()
+                 WHERE evaluation_id = %s
+                """,
+                (
+                    public_error_code,
+                    private_diagnostic_reference,
+                    now + retry_delay,
+                    now,
+                    evaluation_id,
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE control_plane.uploads
+                   SET state = 'retry_pending', failure_code = %s,
+                       updated_at = clock_timestamp()
+                 WHERE upload_id = %s
+                """,
+                (public_error_code, row["upload_id"]),
+            )
+
     def recovery_candidates(self, *, now: datetime) -> tuple[RecoveryCandidate, ...]:
         self._require_lock()
         rows = self.connection.execute(
             """
-            SELECT e.evaluation_id, e.upload_id, e.attempt_number, e.evaluator_job_id,
-                   e.owner_instance_id, e.competition_id, e.claimed_king_reign_id,
-                   e.request_payload
+            SELECT e.evaluation_id, e.upload_id, e.attempt_number, e.state,
+                   e.evaluator_job_id, e.owner_instance_id, e.competition_id,
+                   e.claimed_king_reign_id, e.request_payload
               FROM control_plane.evaluations e
               JOIN control_plane.competitions c ON c.competition_id = e.competition_id
              WHERE c.netuid = %s AND c.chain_generation = %s AND c.name = %s
@@ -518,11 +625,12 @@ class ValidatorRepository:
                 evaluation_id=str(row[0]),
                 upload_id=str(row[1]),
                 attempt_number=int(row[2]),
-                evaluator_job_id=str(row[3] or f"{row[0]}:{row[2]}"),
-                owner_instance_id=row[4],
-                competition_id=str(row[5]),
-                claimed_king_reign_id=str(row[6]),
-                request=row[7] or {},
+                state=str(row[3]),
+                evaluator_job_id=str(row[4] or f"{row[0]}:{row[2]}"),
+                owner_instance_id=row[5],
+                competition_id=str(row[6]),
+                claimed_king_reign_id=str(row[7]),
+                request=row[8] or {},
             )
             for row in rows
         )

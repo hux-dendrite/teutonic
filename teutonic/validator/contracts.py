@@ -81,6 +81,7 @@ class RecoveryCandidate:
     evaluation_id: str
     upload_id: str
     attempt_number: int
+    state: str
     evaluator_job_id: str
     owner_instance_id: str | None
     competition_id: str
