@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -19,6 +20,7 @@ from .repository import ValidatorRepository
 
 
 Preflight = Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any] | None]]
+log = logging.getLogger("teutonic.validator.scheduler")
 
 
 class ValidatorScheduler:
@@ -41,16 +43,32 @@ class ValidatorScheduler:
         claim = self.repository.claim_next(now=self.clock(), policy=self.policy)
         if claim is None:
             return False
+        miner = claim.request.get("miner", {})
+        log.info(
+            "evaluation claimed evaluation=%s upload=%s attempt=%d hotkey=%s uid=%s",
+            claim.evaluation_id,
+            claim.upload_id,
+            claim.attempt_number,
+            miner.get("hotkey", "-"),
+            miner.get("uid", "-"),
+        )
         try:
             failure = await self.preflight(claim.request)
             if failure is not None:
+                error_code = str(failure.get("error_code", "invalid_evaluation_input"))
                 self.repository.fail_attempt(
                     claim.evaluation_id,
                     now=self.clock(),
                     failure_class="deterministic_submission",
-                    public_error_code=str(failure.get("error_code", "invalid_evaluation_input")),
+                    public_error_code=error_code,
                     retry=False,
                     private_diagnostic_reference=failure.get("private_diagnostic_reference"),
+                )
+                log.warning(
+                    "evaluation preflight rejected evaluation=%s upload=%s error=%s",
+                    claim.evaluation_id,
+                    claim.upload_id,
+                    error_code,
                 )
                 return True
             response = await self.evaluator.start_attempt(claim.request)
@@ -62,6 +80,11 @@ class ValidatorScheduler:
                 evaluator_job_id=eval_id,
                 now=self.clock(),
                 lease=self.policy.lease,
+            )
+            log.info(
+                "evaluation started evaluation=%s evaluator_job=%s",
+                claim.evaluation_id,
+                eval_id,
             )
             terminal = await self._consume(claim, eval_id)
             self._persist_terminal(claim, terminal)
@@ -109,6 +132,16 @@ class ValidatorScheduler:
             publish_non_winning=self.policy.publish_non_winning_models,
             result_artifact_reference=persisted.get("result_artifact_reference"),
         )
+        log.info(
+            "evaluation completed evaluation=%s upload=%s accepted=%s "
+            "verdict=%s challenger_loss=%s delta=%s",
+            claim.evaluation_id,
+            claim.upload_id,
+            persisted.get("accepted", "-"),
+            persisted.get("verdict", "-"),
+            persisted.get("avg_challenger_loss", "-"),
+            persisted.get("delta", "-"),
+        )
 
     def _persist_error(self, claim: ClaimedEvaluation, exc: Exception) -> None:
         transient, marker = classify_eval_error(exc)
@@ -136,10 +169,25 @@ class ValidatorScheduler:
             retry_delay=self.policy.retry_delay(claim.attempt_number),
             private_diagnostic_reference=f"diagnostic:{claim.evaluation_id}:{type(exc).__name__}",
         )
+        log.warning(
+            "evaluation failed evaluation=%s upload=%s attempt=%d error=%s retry=%s",
+            claim.evaluation_id,
+            claim.upload_id,
+            claim.attempt_number,
+            marker or type(exc).__name__,
+            retry,
+            exc_info=True,
+        )
 
     async def reconcile(self) -> int:
         recovered = 0
         for candidate in self.repository.recovery_candidates(now=self.clock()):
+            log.info(
+                "evaluation recovery started evaluation=%s evaluator_job=%s attempt=%d",
+                candidate.evaluation_id,
+                candidate.evaluator_job_id,
+                candidate.attempt_number,
+            )
             claim = ClaimedEvaluation(
                 evaluation_id=candidate.evaluation_id,
                 upload_id=candidate.upload_id,
@@ -173,4 +221,5 @@ class ValidatorScheduler:
                 except Exception as exc:
                     self._persist_error(claim, exc)
             recovered += 1
+            log.info("evaluation recovery completed evaluation=%s", candidate.evaluation_id)
         return recovered

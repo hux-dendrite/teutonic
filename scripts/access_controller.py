@@ -32,6 +32,7 @@ from teutonic.config import BucketNames
 
 log = logging.getLogger("teutonic.access-controller")
 stopping = False
+STATUS_LOG_SECONDS = 60.0
 
 
 def required(name: str) -> str:
@@ -103,6 +104,12 @@ def main() -> int:
     )
     buckets = BucketNames.from_env()
     endpoint = r2_endpoint()
+    log.info(
+        "access controller initializing instance=%s network=%s netuid=%s",
+        instance,
+        required("TEUTONIC_NETWORK"),
+        required("TEUTONIC_NETUID"),
+    )
     s3 = r2_client()
 
     with (
@@ -150,8 +157,17 @@ def main() -> int:
                 seconds=int(os.environ.get("TEUTONIC_ACCESS_CONTROLLER_RETRY_SECONDS", "5"))
             ),
         )
-        log.info("access controller active instance=%s", instance)
+        log.info(
+            "access controller active instance=%s network=%s netuid=%s private_bucket=%s mailbox_bucket=%s poll_seconds=%s",
+            instance,
+            required("TEUTONIC_NETWORK"),
+            required("TEUTONIC_NETUID"),
+            buckets.private_models,
+            buckets.dashboard,
+            poll_seconds,
+        )
         next_chain_scan = 0.0
+        next_status_log = 0.0
         mailboxes_reconciled = False
         while not stopping:
             acquired = False
@@ -182,6 +198,10 @@ def main() -> int:
                         recovered,
                         processed,
                     )
+                elif time.monotonic() >= next_status_log:
+                    log.info("controller heartbeat status=idle instance=%s", instance)
+                if time.monotonic() >= next_status_log:
+                    next_status_log = time.monotonic() + STATUS_LOG_SECONDS
             except ControllerLockUnavailable:
                 log.info("controller lock busy; retrying")
             except Exception:

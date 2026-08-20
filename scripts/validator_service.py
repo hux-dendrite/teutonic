@@ -26,6 +26,7 @@ from teutonic.validator import (
 SOFTWARE_VERSION = "postgres-validator-v2"
 log = logging.getLogger("teutonic.validator")
 stopping = False
+STATUS_LOG_SECONDS = 60.0
 
 
 def required(name: str) -> str:
@@ -45,13 +46,24 @@ async def contract_preflight(request):
     return None
 
 
-async def heartbeat_loop(repository, phase: dict[str, str], interval: float) -> None:
+async def heartbeat_loop(
+    repository, phase: dict[str, str], interval: float, instance: str
+) -> None:
+    next_status_log = 0.0
     while not stopping:
         repository.heartbeat_service(
             now=datetime.now(timezone.utc),
             phase=phase["value"],
             software_version=SOFTWARE_VERSION,
         )
+        now = asyncio.get_running_loop().time()
+        if now >= next_status_log:
+            log.info(
+                "validator heartbeat status=%s instance=%s",
+                phase["value"],
+                instance,
+            )
+            next_status_log = now + STATUS_LOG_SECONDS
         await asyncio.sleep(interval)
 
 
@@ -92,6 +104,13 @@ async def run(*, once: bool) -> int:
     )
     if poll_seconds <= 0 or heartbeat_seconds <= 0 or weight_refresh_seconds <= 0:
         raise ValueError("validator poll, heartbeat, and weight refresh intervals must be positive")
+    log.info(
+        "validator initializing instance=%s network=%s netuid=%d competition=%s",
+        instance,
+        network,
+        netuid,
+        competition,
+    )
     with psycopg.connect(database_url, autocommit=True) as connection:
         repository = ValidatorRepository(
             connection,
@@ -120,7 +139,7 @@ async def run(*, once: bool) -> int:
                 preflight=contract_preflight,
             )
             heartbeat_task = asyncio.create_task(
-                heartbeat_loop(repository, phase, heartbeat_seconds)
+                heartbeat_loop(repository, phase, heartbeat_seconds, instance)
             )
             weight_refresh_task = asyncio.create_task(
                 weight_plan_refresh_loop(coordinator, weight_refresh_seconds)
@@ -129,15 +148,19 @@ async def run(*, once: bool) -> int:
                 phase["value"] = "reconciling_evaluations"
                 recovered = await scheduler.reconcile()
                 log.info(
-                    "validator active network=%s netuid=%d competition=%s recovered=%d",
+                    "validator active instance=%s network=%s netuid=%d competition=%s recovered=%d poll_seconds=%s",
+                    instance,
                     network,
                     netuid,
                     competition,
                     recovered,
+                    poll_seconds,
                 )
                 while not stopping:
                     phase["value"] = "evaluating"
                     evaluated = await scheduler.run_once()
+                    if evaluated:
+                        log.info("validator cycle completed evaluation_work=true")
                     phase["value"] = "refreshing_weight_plan"
                     weights_refreshed = refresh_weight_plan(coordinator)
                     if once:

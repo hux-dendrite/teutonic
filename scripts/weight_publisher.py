@@ -19,6 +19,7 @@ from teutonic.weights.service import WeightPublisher
 SOFTWARE_VERSION = "phase7-v1"
 log = logging.getLogger("teutonic.weight-publisher")
 stopping = False
+STATUS_LOG_SECONDS = 60.0
 
 
 def required(name: str) -> str:
@@ -67,6 +68,14 @@ def main() -> int:
     mode = os.environ.get("TEUTONIC_WEIGHT_PUBLISHER_MODE", "dry_run").strip()
     instance = os.environ.get("TEUTONIC_INSTANCE_ID", f"{socket.gethostname()}-{os.getpid()}")
     poll_seconds = float(os.environ.get("TEUTONIC_WEIGHT_POLL_SECONDS", "12"))
+    log.info(
+        "weight publisher initializing instance=%s mode=%s network=%s netuid=%d competition=%s",
+        instance,
+        mode,
+        required("TEUTONIC_NETWORK"),
+        netuid,
+        competition,
+    )
     gateway = build_gateway(mode, netuid)
 
     with psycopg.connect(database_url, autocommit=True) as connection:
@@ -78,15 +87,34 @@ def main() -> int:
             instance_id=instance,
         )
         repository.acquire_lock()
-        worker = WeightPublisher(repository, gateway, publisher_mode=mode)
+        def log_stage(stage, plan, receipt) -> None:
+            log.info(
+                "weight stage=%s publication=%s reign=%d extrinsic=%s included_block=%s finalized_block=%s",
+                stage,
+                plan.publication_id,
+                plan.reign_number,
+                receipt.extrinsic_id if receipt and receipt.extrinsic_id else "-",
+                receipt.included_block if receipt and receipt.included_block is not None else "-",
+                receipt.finalized_block if receipt and receipt.finalized_block is not None else "-",
+            )
+
+        worker = WeightPublisher(
+            repository,
+            gateway,
+            publisher_mode=mode,
+            after_stage=log_stage,
+        )
         log.info(
-            "weight publisher active mode=%s network=%s netuid=%d competition=%s signer=%s",
+            "weight publisher active instance=%s mode=%s network=%s netuid=%d competition=%s signer=%s poll_seconds=%s",
+            instance,
             mode,
             gateway.network,
             netuid,
             competition,
             gateway.signer_hotkey,
+            poll_seconds,
         )
+        next_status_log = 0.0
         try:
             while not stopping:
                 now = datetime.now(timezone.utc)
@@ -97,6 +125,13 @@ def main() -> int:
                 if args.once:
                     return 0 if worked else 3
                 if not worked:
+                    if time.monotonic() >= next_status_log:
+                        log.info(
+                            "weight publisher heartbeat status=idle current_block=%s instance=%s",
+                            gateway.current_block(),
+                            instance,
+                        )
+                        next_status_log = time.monotonic() + STATUS_LOG_SECONDS
                     time.sleep(poll_seconds)
         finally:
             repository.release_lock()

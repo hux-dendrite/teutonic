@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
@@ -15,6 +16,9 @@ from teutonic.storage.r2_credentials import create_local_temporary_credentials
 from .crypto import MailboxCipher, SecretCipher
 from .repository import AccessControllerRepository, ControllerInvariantError
 from .storage import R2UploadController
+
+
+log = logging.getLogger("teutonic.access-controller.jobs")
 
 
 class MailboxStore:
@@ -124,6 +128,14 @@ class AccessControllerJobRunner:
         if job is None:
             return False
         job_id = str(job["controller_job_id"])
+        operation = str(job["operation"])
+        log.info(
+            "controller job claimed operation=%s job=%s registration=%s upload=%s",
+            operation,
+            job_id,
+            job.get("registration_id") or "-",
+            job.get("upload_id") or "-",
+        )
         self.repository.set_job_running(job_id, instance_id=self.instance_id, now=now)
         try:
             result = self._dispatch(job, now=now)
@@ -133,6 +145,7 @@ class AccessControllerJobRunner:
                 now=self.clock(),
                 result=result,
             )
+            log.info("controller job completed operation=%s job=%s", operation, job_id)
         except ArtifactIntegrityError as exc:
             error_code = type(exc).__name__
             if job.get("upload_id"):
@@ -145,15 +158,29 @@ class AccessControllerJobRunner:
                 now=self.clock(),
                 error_code=error_code,
             )
+            log.error(
+                "controller job failed operation=%s job=%s error=%s retry=false",
+                operation,
+                job_id,
+                error_code,
+            )
             if propagate:
                 raise
         except Exception as exc:
+            error_code = type(exc).__name__
             self.repository.retry_job(
                 job_id,
                 instance_id=self.instance_id,
                 now=self.clock(),
                 delay=self.retry_delay,
-                error_code=type(exc).__name__,
+                error_code=error_code,
+            )
+            log.warning(
+                "controller job retry scheduled operation=%s job=%s error=%s",
+                operation,
+                job_id,
+                error_code,
+                exc_info=True,
             )
             if propagate:
                 raise

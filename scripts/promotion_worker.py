@@ -30,6 +30,7 @@ from teutonic.validator import (
 SOFTWARE_VERSION = "promotion-worker-v1"
 log = logging.getLogger("teutonic.promotion-worker")
 stopping = False
+STATUS_LOG_SECONDS = 60.0
 
 
 def required(name: str) -> str:
@@ -117,6 +118,13 @@ def main() -> int:
     remote = os.environ.get("TEUTONIC_RCLONE_REMOTE", "teutonicr2").strip()
     configure_rclone(remote)
     buckets = BucketNames.from_env()
+    log.info(
+        "promotion worker initializing instance=%s network=%s netuid=%d competition=%s",
+        instance,
+        network,
+        netuid,
+        competition,
+    )
 
     with psycopg.connect(required("TEUTONIC_DATABASE_URL"), autocommit=True) as connection:
         promotions = PromotionRepository(
@@ -176,13 +184,24 @@ def main() -> int:
             max_attempts=attempts,
             on_winner_promoted=crown,
             on_heartbeat=heartbeat,
+            after_stage=lambda stage, claim: log.info(
+                "promotion stage=%s promotion=%s upload=%s",
+                stage,
+                claim.promotion_id,
+                claim.upload_id,
+            ),
         )
         log.info(
-            "promotion worker active network=%s netuid=%d competition=%s",
+            "promotion worker active instance=%s network=%s netuid=%d competition=%s private_bucket=%s public_bucket=%s poll_seconds=%s",
+            instance,
             network,
             netuid,
             competition,
+            buckets.private_models,
+            buckets.public_models,
+            poll_seconds,
         )
+        next_status_log = 0.0
         try:
             while not stopping:
                 phase["value"] = "promoting"
@@ -193,6 +212,12 @@ def main() -> int:
                 if not worked:
                     phase["value"] = "idle"
                     heartbeat()
+                    if time.monotonic() >= next_status_log:
+                        log.info(
+                            "promotion worker heartbeat status=idle instance=%s",
+                            instance,
+                        )
+                        next_status_log = time.monotonic() + STATUS_LOG_SECONDS
                     time.sleep(poll_seconds)
         finally:
             promotions.heartbeat_service(

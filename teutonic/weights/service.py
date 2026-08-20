@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from .chain import WeightChainGateway
 from .contracts import SubmissionReceipt, WeightPlan, WeightPlanError
 from .repository import WeightPublicationRepository
+
+
+log = logging.getLogger("teutonic.weight-publisher.jobs")
 
 
 class WeightPublisher:
@@ -50,6 +54,15 @@ class WeightPublisher:
         )
         if plan is None:
             return False
+        log.info(
+            "weight plan claimed publication=%s reign=%d revision=%d attempt=%d scheduled_block=%s recovery=%s",
+            plan.publication_id,
+            plan.reign_number,
+            plan.payload_revision,
+            plan.attempt_count,
+            plan.scheduled_block if plan.scheduled_block is not None else "-",
+            plan.is_recovery,
+        )
         try:
             plan.validate()
             observation = self.chain.observe(plan)
@@ -67,6 +80,11 @@ class WeightPublisher:
                 max_attempts=self.max_attempts,
                 terminal=True,
             )
+            log.error(
+                "weight plan failed publication=%s error=%s retry=false",
+                plan.publication_id,
+                type(exc).__name__,
+            )
             if propagate:
                 raise
         except Exception as exc:
@@ -77,6 +95,13 @@ class WeightPublisher:
                 error_code=type(exc).__name__,
                 retry_delay=self.retry_base_delay * (2**exponent),
                 max_attempts=self.max_attempts,
+            )
+            log.warning(
+                "weight plan retry scheduled publication=%s attempt=%d error=%s",
+                plan.publication_id,
+                plan.attempt_count,
+                type(exc).__name__,
+                exc_info=True,
             )
             if propagate:
                 raise

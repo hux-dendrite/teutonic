@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -13,6 +14,9 @@ from .rclone import (
     verify_inventory,
 )
 from .repository import PromotionRepository
+
+
+log = logging.getLogger("teutonic.promotion-worker.jobs")
 
 
 class PromotionWorker:
@@ -51,6 +55,15 @@ class PromotionWorker:
         claim = self.repository.claim_next(now=self.clock(), lease=self.lease)
         if claim is None:
             return self.reconcile_one_crown(propagate=propagate)
+        log.info(
+            "promotion claimed promotion=%s upload=%s disposition=%s state=%s attempt=%d objects=%d",
+            claim.promotion_id,
+            claim.upload_id,
+            claim.disposition,
+            claim.state,
+            claim.attempt_count,
+            len(claim.expected),
+        )
         try:
             self._run_claim(claim)
         except PromotionCollisionError as exc:
@@ -61,6 +74,11 @@ class PromotionWorker:
                 retry_delay=timedelta(0),
                 max_attempts=self.max_attempts,
                 terminal=True,
+            )
+            log.error(
+                "promotion failed promotion=%s error=%s retry=false",
+                claim.promotion_id,
+                type(exc).__name__,
             )
             if propagate:
                 raise
@@ -75,6 +93,13 @@ class PromotionWorker:
                 max_attempts=self.max_attempts,
                 terminal=False,
             )
+            log.warning(
+                "promotion retry scheduled promotion=%s attempt=%d error=%s",
+                claim.promotion_id,
+                claim.attempt_count,
+                type(exc).__name__,
+                exc_info=True,
+            )
             if propagate:
                 raise
             return True
@@ -82,8 +107,17 @@ class PromotionWorker:
             try:
                 self.on_winner_promoted(claim.promotion_id)
             except Exception:
+                log.exception(
+                    "winner crown callback failed promotion=%s",
+                    claim.promotion_id,
+                )
                 if propagate:
                     raise
+        log.info(
+            "promotion completed promotion=%s disposition=%s",
+            claim.promotion_id,
+            claim.disposition,
+        )
         return True
 
     def reconcile_one_crown(self, *, propagate: bool = False) -> bool:
@@ -93,8 +127,10 @@ class PromotionWorker:
         if not pending:
             return False
         try:
+            log.info("winner crown reconciliation started promotion=%s", pending[0])
             self.on_winner_promoted(pending[0])
         except Exception:
+            log.exception("winner crown reconciliation failed promotion=%s", pending[0])
             if propagate:
                 raise
         return True
