@@ -18,7 +18,7 @@ import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 
-from teutonic.access import Manifest, ManifestFile
+from teutonic.access.contracts import Manifest, ManifestFile
 from teutonic.access.crypto import encode_signature
 from teutonic.storage.artifacts import model_digest_from_inventory, sha256_file
 

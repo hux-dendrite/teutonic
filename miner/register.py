@@ -11,7 +11,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from teutonic.access import ReadySignal
+from teutonic.access.contracts import ReadySignal
 from teutonic.access.crypto import verify_hotkey_signature
 from teutonic.credentials import (
     ActivationSignal,

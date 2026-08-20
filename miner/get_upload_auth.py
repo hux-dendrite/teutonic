@@ -13,7 +13,7 @@ if __package__ in (None, ""):
 
 import httpx
 
-from teutonic.access import MailboxCipher
+from teutonic.access.crypto import MailboxCipher
 from teutonic.credentials import mailbox_object_key
 
 from miner.common import (

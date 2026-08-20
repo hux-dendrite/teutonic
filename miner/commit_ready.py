@@ -8,7 +8,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from teutonic.access import Manifest, ReadySignal, ready_signal_payload
+from teutonic.access.contracts import Manifest, ReadySignal, ready_signal_payload
 from teutonic.access.crypto import verify_hotkey_signature
 
 from miner.common import (
