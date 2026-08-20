@@ -183,7 +183,7 @@ class MailboxCipher:
         return self.encrypt_for_hotkey(envelope, hotkey), envelope
 
     @staticmethod
-    def decrypt_for_test(ciphertext: bytes, miner_signing_key: SigningKey) -> dict[str, Any]:
+    def decrypt_for_miner(ciphertext: bytes, miner_signing_key: SigningKey) -> dict[str, Any]:
         curve_secret = bindings.crypto_sign_ed25519_sk_to_curve25519(
             bytes(miner_signing_key._signing_key)
         )
@@ -194,3 +194,6 @@ class MailboxCipher:
             envelope["validator_identity"], _canonical_json(envelope), signature
         )
         return {**envelope, "validator_signature": signature}
+
+    # Compatibility for the existing protocol tests and load harness.
+    decrypt_for_test = decrypt_for_miner

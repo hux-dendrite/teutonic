@@ -54,3 +54,4 @@ runs/
 models/
 /completed_safetensors_sha256.txt
 .local/
+.teutonic-miner/
