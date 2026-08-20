@@ -47,9 +47,9 @@ Create these three buckets before starting a competition:
 
 | Bucket | Visibility | Use |
 | --- | --- | --- |
-| `teutonic-private-models` | Private | One isolated upload prefix per miner registration |
-| `teutonic-models` | Public | Genesis and promoted immutable models |
-| `teutonic-dash` | Public read | Dashboard state and encrypted credential mailboxes |
+| `teutonic-private-models-enam` | Private | One isolated upload prefix per miner registration |
+| `teutonic-models-enam` | Public | Genesis and promoted immutable models |
+| `teutonic-dash-enam` | Public read | Dashboard state and encrypted credential mailboxes |
 
 The validator-host R2 key needs the object permissions used by seed upload,
 verification, promotion, cleanup, and dashboard publication. The Cloudflare API
