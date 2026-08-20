@@ -5,6 +5,7 @@ FROM python:3.11-slim
 COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
 
 RUN pip install --no-cache-dir \
+    "bittensor>=10.3,<11" \
     "psycopg[binary]>=3.2,<3.3" \
     "httpx>=0.27,<0.29" \
     "numpy>=1.26,<3" \

@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from nacl.signing import SigningKey
 
 from teutonic.access import (
+    AccessControllerJobRunner,
     MailboxCipher,
+    MailboxStore,
     Manifest,
     ManifestFile,
     MetagraphSnapshot,
@@ -67,9 +69,51 @@ class FakeS3:
         self.metadata[(Bucket, Key)] = dict(kwargs.get("Metadata") or {})
         return {"CopyObjectResult": {"ETag": self._etag(self.objects[(Bucket, Key)])}}
 
+    def delete_objects(self, *, Bucket, Delete):
+        for item in Delete["Objects"]:
+            self.objects.pop((Bucket, item["Key"]), None)
+            self.metadata.pop((Bucket, item["Key"]), None)
+        return {"Deleted": Delete["Objects"]}
+
     @staticmethod
     def _etag(value: bytes) -> str:
         return f'"{hashlib.md5(value, usedforsecurity=False).hexdigest()}"'
+
+
+class FakeRevocationRepository:
+    def __init__(self, registration: str, keys: tuple[str, ...]) -> None:
+        self.registration = registration
+        self.keys = keys
+        self.state = "active"
+
+    def registration_context(self, registration: str):
+        if registration != self.registration:
+            raise AssertionError("unexpected registration")
+        return {
+            "token_state": self.state,
+            "cloudflare_token_id": "parent-token",
+        }
+
+    def record_parent_token_revoked(self, registration: str, *, now) -> None:
+        if registration != self.registration:
+            raise AssertionError("unexpected registration")
+        self.state = "revoked"
+
+    def mailbox_object_keys(self, registration: str) -> tuple[str, ...]:
+        if registration != self.registration:
+            raise AssertionError("unexpected registration")
+        return self.keys
+
+    def revoked_mailbox_object_keys(self) -> tuple[str, ...]:
+        return self.keys if self.state == "revoked" else ()
+
+
+class FakeTokenGateway:
+    def __init__(self) -> None:
+        self.revoked: list[str] = []
+
+    def revoke_parent_token(self, token_id: str) -> None:
+        self.revoked.append(token_id)
 
 
 def signed_manifest(key: SigningKey, registration: str, files: dict[str, bytes]) -> Manifest:
@@ -159,6 +203,60 @@ class AccessControllerContractTests(unittest.TestCase):
         self.assertEqual(decrypted, envelope)
         secret_cipher = SecretCipher(b"x" * 32)
         self.assertEqual(secret_cipher.decrypt(secret_cipher.encrypt("parent-secret")), "parent-secret")
+
+    def test_mailbox_deletion_is_exact_and_idempotent(self) -> None:
+        s3 = FakeS3()
+        store = MailboxStore(s3, bucket="dashboard")
+        first = f"mailbox/v1/{self.registration}/generations/{1:020d}.bin"
+        second = f"mailbox/v1/{self.registration}/generations/{2:020d}.bin"
+        s3.put_object(Bucket="dashboard", Key=first, Body=b"first")
+        s3.put_object(Bucket="dashboard", Key=second, Body=b"second")
+        s3.put_object(Bucket="dashboard", Key="dashboard.json", Body=b"public")
+
+        self.assertEqual(store.delete((first, second)), 2)
+        self.assertEqual(store.delete((first, second)), 2)
+        self.assertNotIn(("dashboard", first), s3.objects)
+        self.assertNotIn(("dashboard", second), s3.objects)
+        self.assertEqual(s3.objects[("dashboard", "dashboard.json")], b"public")
+        with self.assertRaisesRegex(Exception, "non-mailbox"):
+            store.delete(("dashboard.json",))
+
+    def test_revocation_removes_mailbox_and_replay_repairs_it(self) -> None:
+        key = f"mailbox/v1/{self.registration}/generations/{1:020d}.bin"
+        s3 = FakeS3()
+        s3.put_object(Bucket="dashboard", Key=key, Body=b"credential")
+        repository = FakeRevocationRepository(self.registration, (key,))
+        gateway = FakeTokenGateway()
+        runner = AccessControllerJobRunner(
+            repository,
+            token_gateway=gateway,
+            upload_controller=None,
+            mailbox_store=MailboxStore(s3, bucket="dashboard"),
+            secret_cipher=None,
+            mailbox_cipher=None,
+            account_id="account",
+            r2_endpoint="https://account.r2.cloudflarestorage.com",
+            private_model_bucket="private",
+            instance_id="test",
+        )
+
+        first = runner._revoke_parent(
+            {"registration_id": self.registration},
+            now=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        )
+        self.assertTrue(first["revoked"])
+        self.assertEqual(first["mailbox_credentials_removed"], 1)
+        self.assertEqual(gateway.revoked, ["parent-token"])
+        self.assertNotIn(("dashboard", key), s3.objects)
+
+        s3.put_object(Bucket="dashboard", Key=key, Body=b"stale")
+        replay = runner._revoke_parent(
+            {"registration_id": self.registration},
+            now=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        )
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(gateway.revoked, ["parent-token"])
+        self.assertNotIn(("dashboard", key), s3.objects)
 
     def test_r2_upload_is_revoked_verified_in_place_and_reverified(self) -> None:
         files = {"config.json": b"{}", "weights/model.bin": b"phase-four"}

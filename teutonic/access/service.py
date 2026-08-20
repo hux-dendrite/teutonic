@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from botocore.exceptions import ClientError
 
@@ -17,7 +18,11 @@ from .storage import R2UploadController
 
 
 class MailboxStore:
-    """Publish immutable encrypted generations, accepting only identical replay."""
+    """Publish encrypted generations and remove them after authority revocation."""
+
+    _KEY = re.compile(
+        r"^mailbox/v1/[0-9a-f]{64}/generations/[0-9]{20}\.bin$"
+    )
 
     def __init__(self, s3_client: Any, *, bucket: str) -> None:
         if not bucket:
@@ -53,6 +58,23 @@ class MailboxStore:
             ContentType="application/octet-stream",
             Metadata={"sha256": self._digest(ciphertext)},
         )
+
+    def delete(self, keys: Iterable[str]) -> int:
+        selected = sorted(set(keys))
+        if any(not self._KEY.fullmatch(key) for key in selected):
+            raise ControllerInvariantError("refusing to delete a non-mailbox object")
+        for offset in range(0, len(selected), 1000):
+            batch = selected[offset : offset + 1000]
+            response = self.s3.delete_objects(
+                Bucket=self.bucket,
+                Delete={
+                    "Objects": [{"Key": key} for key in batch],
+                    "Quiet": True,
+                },
+            )
+            if response.get("Errors"):
+                raise RuntimeError("R2 failed to delete one or more mailbox credentials")
+        return len(selected)
 
 
 class AccessControllerJobRunner:
@@ -144,6 +166,12 @@ class AccessControllerJobRunner:
         if count == maximum_jobs:
             raise RuntimeError("controller job drain exceeded its safety limit")
         return count
+
+    def reconcile_revoked_mailboxes(self) -> int:
+        """Remove mailbox credentials left by revocations completed before deletion existed."""
+        return self.mailbox_store.delete(
+            self.repository.revoked_mailbox_object_keys()
+        )
 
     def _dispatch(self, job: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         operation = job["operation"]
@@ -265,12 +293,19 @@ class AccessControllerJobRunner:
     def _revoke_parent(self, job: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         registration = str(job["registration_id"])
         context = self.repository.registration_context(registration)
-        if context["token_state"] == "revoked":
-            return {"replayed": True}
-        if context["cloudflare_token_id"]:
-            self.token_gateway.revoke_parent_token(context["cloudflare_token_id"])
-        self.repository.record_parent_token_revoked(registration, now=now)
-        return {"revoked": True}
+        replayed = context["token_state"] == "revoked"
+        if not replayed:
+            if context["cloudflare_token_id"]:
+                self.token_gateway.revoke_parent_token(context["cloudflare_token_id"])
+            self.repository.record_parent_token_revoked(registration, now=now)
+        deleted = self.mailbox_store.delete(
+            self.repository.mailbox_object_keys(registration)
+        )
+        return {
+            "revoked": not replayed,
+            "replayed": replayed,
+            "mailbox_credentials_removed": deleted,
+        }
 
     def _verify_upload(self, job: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         upload_id = str(job["upload_id"])

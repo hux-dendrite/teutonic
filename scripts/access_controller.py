@@ -152,11 +152,20 @@ def main() -> int:
         )
         log.info("access controller active instance=%s", instance)
         next_chain_scan = 0.0
+        mailboxes_reconciled = False
         while not stopping:
             acquired = False
             try:
                 repository.acquire_lock()
                 acquired = True
+                if not mailboxes_reconciled:
+                    removed = runner.reconcile_revoked_mailboxes()
+                    mailboxes_reconciled = True
+                    if removed:
+                        log.info(
+                            "removed %d revoked mailbox credential objects",
+                            removed,
+                        )
                 scanned = accepted = 0
                 if time.monotonic() >= next_chain_scan:
                     next_chain_scan = time.monotonic() + 6.0

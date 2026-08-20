@@ -340,6 +340,14 @@ class AccessControllerIntegrationTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(token_state, "revoked")
         self.assertEqual(len(self.gateway.revoked), 1)
+        self.assertNotIn(
+            ("mailbox", mailbox_object_key(registration, 1)),
+            self.s3.objects,
+        )
+        self.assertNotIn(
+            ("mailbox", mailbox_object_key(registration, 2)),
+            self.s3.objects,
+        )
         self.assertIn(
             ("private", f"{prefix}model.bin"),
             self.s3.objects,

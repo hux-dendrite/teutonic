@@ -672,6 +672,32 @@ class AccessControllerRepository:
         if updated.rowcount not in {0, 1}:
             raise ControllerInvariantError("parent token revocation updated multiple rows")
 
+    def mailbox_object_keys(self, registration: str) -> tuple[str, ...]:
+        self._require_lock()
+        rows = self.connection.execute(
+            """
+            SELECT mailbox_object_key
+              FROM control_plane.credential_generations
+             WHERE registration_id = %s
+             ORDER BY generation
+            """,
+            (registration,),
+        ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    def revoked_mailbox_object_keys(self) -> tuple[str, ...]:
+        self._require_lock()
+        rows = self.connection.execute(
+            """
+            SELECT generation.mailbox_object_key
+              FROM control_plane.credential_generations generation
+              JOIN control_plane.r2_parent_tokens token USING (registration_id)
+             WHERE token.state = 'revoked'
+             ORDER BY generation.registration_id, generation.generation
+            """
+        ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
     def accept_ready_signal(self, signal: ReadySignal, *, now: datetime) -> str:
         self._require_lock()
         with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
