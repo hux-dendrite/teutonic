@@ -48,6 +48,9 @@ SEED_TOKENIZER_REPO: str = _seed.get("tokenizer_repo", "")
 SEED_DIGEST: str = _seed.get("seed_digest", "")
 SEED_REPO_BACKEND: str = (_seed.get("repo_backend") or "hf").strip().lower()
 SEED_HOTKEY: str = _seed.get("genesis_hotkey", "").strip()
+CHAIN_GENERATION: str = str(_chain.get("generation") or "").strip() or (
+    f"{NAME}-{SEED_DIGEST.replace(':', '-')}"
+)
 if SEED_REPO_BACKEND not in _VALID_SEED_REPO_BACKENDS:
     raise RuntimeError(
         f"chain.toml [seed].repo_backend must be one of "
@@ -55,6 +58,8 @@ if SEED_REPO_BACKEND not in _VALID_SEED_REPO_BACKENDS:
     )
 if not SEED_HOTKEY:
     raise RuntimeError("chain.toml [seed].genesis_hotkey is required")
+if not CHAIN_GENERATION or "|" in CHAIN_GENERATION or len(CHAIN_GENERATION) > 128:
+    raise RuntimeError("chain.toml produces an invalid chain generation")
 
 # HF namespace inferred from the seed repo. Miners default their challenger
 # repo to "<namespace>/<NAME>-<suffix>" though they can override to publish
@@ -85,6 +90,7 @@ __all__ = [
     "SEED_DIGEST",
     "SEED_REPO_BACKEND",
     "SEED_HOTKEY",
+    "CHAIN_GENERATION",
     "SEED_NAMESPACE",
     "load_arch",
 ]

@@ -8,7 +8,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import chain_config
+
 from miner.cli import (
+    build_parser,
+    default_chain_generation,
     eligibility_from_commitment,
     load_settings,
     remove_local_upload_auth,
@@ -49,6 +53,30 @@ def registration_state() -> RegistrationState:
 
 
 class MinerCommandTests(unittest.TestCase):
+    def test_new_registration_defaults_generation_from_chain_toml(self) -> None:
+        expected = chain_config.CHAIN_GENERATION
+        self.assertTrue(expected)
+        with patch.dict(os.environ, {"TEUTONIC_CHAIN_GENERATION": ""}):
+            self.assertEqual(default_chain_generation(), expected)
+            args = build_parser().parse_args(
+                [
+                    "register",
+                    "--wallet-name",
+                    "cold",
+                    "--hotkey-name",
+                    "hot",
+                    "--network",
+                    "test",
+                    "--netuid",
+                    "306",
+                ]
+            )
+        self.assertEqual(args.chain_generation, expected)
+
+    def test_environment_can_override_chain_toml_generation(self) -> None:
+        with patch.dict(os.environ, {"TEUTONIC_CHAIN_GENERATION": "manual-reset-2"}):
+            self.assertEqual(default_chain_generation(), "manual-reset-2")
+
     def test_mailbox_poll_stops_when_finalized_eligibility_is_consumed(self) -> None:
         class MissingResponse:
             status_code = 404

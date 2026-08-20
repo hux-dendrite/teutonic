@@ -11,6 +11,8 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import chain_config
+
 from teutonic.access.contracts import ReadySignal
 from teutonic.access.crypto import verify_hotkey_signature
 from teutonic.credentials import (
@@ -45,7 +47,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=int(value) if (value := env_or_none("TEUTONIC_NETUID")) else None,
     )
     parser.add_argument(
-        "--chain-generation", default=env_or_none("TEUTONIC_CHAIN_GENERATION")
+        "--chain-generation",
+        default=env_or_none("TEUTONIC_CHAIN_GENERATION") or chain_config.CHAIN_GENERATION,
     )
     parser.add_argument("--registration-timeout", type=int, default=600)
     parser.add_argument("--registration-tolerance", default="0.50")

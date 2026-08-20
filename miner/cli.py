@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+import chain_config
+
 from miner import check_hotkey, commit_ready, get_upload_auth, register, upload_model
 from miner.common import (
     AUTH_FILE,
@@ -185,6 +187,12 @@ def add_selection_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--hotkey", help="saved hotkey name or SS58 address")
 
 
+def default_chain_generation() -> str:
+    return os.environ.get("TEUTONIC_CHAIN_GENERATION", "").strip() or (
+        chain_config.CHAIN_GENERATION
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="teutonic-miner",
@@ -229,7 +237,11 @@ def build_parser() -> argparse.ArgumentParser:
     registration.add_argument("--hotkey-name")
     registration.add_argument("--network")
     registration.add_argument("--netuid", type=int)
-    registration.add_argument("--chain-generation")
+    registration.add_argument(
+        "--chain-generation",
+        default=default_chain_generation(),
+        help="defaults to TEUTONIC_CHAIN_GENERATION or the active chain.toml",
+    )
     registration.add_argument("--registration-timeout", type=int, default=600)
     registration.add_argument("--registration-tolerance", default="0.50")
     registration.add_argument("--check-only", action="store_true")
