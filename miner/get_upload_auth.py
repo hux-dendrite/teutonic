@@ -7,6 +7,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -44,7 +45,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def fetch_mailbox(base_url: str, key: str, *, timeout: int) -> bytes:
+def fetch_mailbox(
+    base_url: str,
+    key: str,
+    *,
+    timeout: int,
+    on_not_found: Callable[[], None] | None = None,
+) -> bytes:
     deadline = time.monotonic() + timeout
     with httpx.Client(timeout=30, follow_redirects=True) as client:
         attempt = 0
@@ -57,6 +64,8 @@ def fetch_mailbox(base_url: str, key: str, *, timeout: int) -> bytes:
                 return response.content
             if response.status_code != 404:
                 response.raise_for_status()
+            if on_not_found is not None:
+                on_not_found()
             if time.monotonic() >= deadline:
                 raise RuntimeError("timed out waiting for the encrypted mailbox credential")
             attempt += 1
@@ -100,7 +109,11 @@ def validate_envelope(envelope: dict, state, generation: int) -> datetime:
     return expires_at
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    on_mailbox_not_found: Callable[[], None] | None = None,
+) -> int:
     args = parse_args(argv)
     if not args.mailbox_base_url:
         raise RuntimeError("--mailbox-base-url is required")
@@ -110,7 +123,12 @@ def main(argv: list[str] | None = None) -> int:
     state_dir = state_dir_from_args(args, wallet)
     state = load_registration(state_dir, wallet)
     key = mailbox_object_key(state.registration_id, args.generation)
-    ciphertext = fetch_mailbox(args.mailbox_base_url, key, timeout=args.timeout)
+    ciphertext = fetch_mailbox(
+        args.mailbox_base_url,
+        key,
+        timeout=args.timeout,
+        on_not_found=on_mailbox_not_found,
+    )
     envelope = MailboxCipher.decrypt_for_miner(ciphertext, signing_key(wallet))
     expires_at = validate_envelope(envelope, state, args.generation)
     auth_path = state_dir / AUTH_FILE

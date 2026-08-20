@@ -6,15 +6,18 @@ import unittest
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from miner.cli import (
     eligibility_from_commitment,
     load_settings,
+    remove_local_upload_auth,
     save_settings,
     saved_miners,
     select_saved_miner,
 )
 from miner.common import RegistrationState, read_json, write_json
+from miner.get_upload_auth import fetch_mailbox
 from miner.upload_model import model_paths, validate_auth
 from teutonic.access.contracts import ready_signal_payload
 from teutonic.credentials import registration_id
@@ -46,11 +49,49 @@ def registration_state() -> RegistrationState:
 
 
 class MinerCommandTests(unittest.TestCase):
+    def test_mailbox_poll_stops_when_finalized_eligibility_is_consumed(self) -> None:
+        class MissingResponse:
+            status_code = 404
+
+        class Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def get(self, *_args, **_kwargs):
+                return MissingResponse()
+
+        def consumed() -> None:
+            raise RuntimeError("consumed")
+
+        with patch("miner.get_upload_auth.httpx.Client", return_value=Client()):
+            with self.assertRaisesRegex(RuntimeError, "consumed"):
+                fetch_mailbox(
+                    "https://mailbox.example",
+                    "mailbox/v1/key",
+                    timeout=60,
+                    on_not_found=consumed,
+                )
+
     def test_cli_classifies_finalized_ready_as_consumed(self) -> None:
         state = registration_state()
         self.assertEqual(eligibility_from_commitment(state, "r2activate:v1:anything"), "available")
         ready = ready_signal_payload(state.registration_id, "a" * 64)
         self.assertEqual(eligibility_from_commitment(state, ready), "consumed")
+
+    def test_cli_removes_stale_local_auth_after_revocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            state = registration_state()
+            state_dir = Path(temporary) / state.hotkey
+            state.save(state_dir / "registration.json")
+            write_json(state_dir / "upload-auth.json", {"secret": "stale"}, secret=True)
+            miner = select_saved_miner(Path(temporary), state.hotkey)
+
+            self.assertTrue(remove_local_upload_auth(miner))
+            self.assertFalse((state_dir / "upload-auth.json").exists())
+            self.assertFalse(remove_local_upload_auth(miner))
 
     def test_cli_discovers_and_selects_saved_registration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

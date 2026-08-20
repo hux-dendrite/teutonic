@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -151,9 +152,19 @@ def finalized_eligibility(miner: SavedMiner, wallet_path: Path) -> str:
 
 def require_available_eligibility(miner: SavedMiner, wallet_path: Path) -> None:
     if finalized_eligibility(miner, wallet_path) == "consumed":
+        remove_local_upload_auth(miner)
         raise RuntimeError(
-            "hotkey eligibility is permanently consumed by its finalized ready commitment"
+            "hotkey eligibility is permanently consumed; its mailbox credential is revoked "
+            "and removed by the access controller"
         )
+
+
+def remove_local_upload_auth(miner: SavedMiner) -> bool:
+    try:
+        (miner.state_dir / AUTH_FILE).unlink()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def configured_wallet_path(args: argparse.Namespace, settings: Mapping[str, Any]) -> Path:
@@ -324,6 +335,16 @@ def run_auth(
     wallet_path: Path,
 ) -> int:
     require_available_eligibility(miner, wallet_path)
+    next_chain_check = 0.0
+
+    def stop_if_revoked() -> None:
+        nonlocal next_chain_check
+        now = time.monotonic()
+        if now < next_chain_check:
+            return
+        next_chain_check = now + 10.0
+        require_available_eligibility(miner, wallet_path)
+
     mailbox_url = (
         args.mailbox_base_url
         or settings.get("mailbox_base_url")
@@ -343,7 +364,8 @@ def run_auth(
             str(args.generation),
             "--timeout",
             str(args.timeout),
-        ]
+        ],
+        on_mailbox_not_found=stop_if_revoked,
     )
 
 
@@ -406,8 +428,18 @@ def dispatch(args: argparse.Namespace) -> int:
         print(f"state_dir={miner.state_dir}")
         print(f"registration=saved")
         eligibility = "not_checked" if args.local else finalized_eligibility(miner, wallet_path)
+        removed = remove_local_upload_auth(miner) if eligibility == "consumed" else False
         print(f"eligibility={eligibility}")
-        print(f"upload_auth={'present' if (miner.state_dir / AUTH_FILE).is_file() else 'absent'}")
+        if eligibility == "consumed":
+            print("mailbox_credential=revoked_and_removed_by_controller")
+        elif eligibility == "available":
+            print("mailbox_credential=awaiting_or_available")
+        else:
+            print("mailbox_credential=not_checked")
+        auth_state = "removed" if removed else (
+            "present" if (miner.state_dir / AUTH_FILE).is_file() else "absent"
+        )
+        print(f"local_upload_auth={auth_state}")
         print(f"manifest={'present' if (miner.state_dir / MANIFEST_FILE).is_file() else 'absent'}")
         return 0
     if args.command == "check":
