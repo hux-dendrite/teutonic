@@ -53,7 +53,6 @@ def request_payload(king_digest: str = "a" * 64, challenger_digest: str = "b" * 
         "versions": {
             "evaluation_policy": "paired-bootstrap-v1",
             "dataset": "fineweb-edu-10bt-v1",
-            "tokenizer": "quasar-tokenizer-v1",
             "code": "git:0123456789abcdef",
             "evaluator": "pair-evaluator-v2",
         },
@@ -70,8 +69,25 @@ def request_payload(king_digest: str = "a" * 64, challenger_digest: str = "b" * 
             "delta_threshold": 0.0015,
             "batch_size": 1,
         },
-        "dataset": {"source": "s3", "label": "fineweb-edu-10bt"},
-        "tokenizer": {"backend": "huggingface", "label": "king-snapshot"},
+        "dataset": {
+            "source": "pretokenized_npy",
+            "label": "fineweb-edu-10bt",
+            "sources": [
+                {
+                    "name": "fineweb-edu",
+                    "proportion": 1.0,
+                    "target_sequences": 25000,
+                    "shards": [
+                        {
+                            "url": "https://datasets.example/fineweb/shard-00000.npy",
+                            "sha256": "d" * 64,
+                            "size_bytes": 4096,
+                            "n_tokens": 51_200_000,
+                        }
+                    ],
+                }
+            ],
+        },
     }
 
 
@@ -123,7 +139,7 @@ class EvaluatorProtocolV2ContractTests(unittest.TestCase):
             "s3_doppler_config",
         )
         self.assertTrue(all(value not in source for value in forbidden))
-        self.assertIn("signature_version=UNSIGNED", source)
+        self.assertNotIn("AutoTokenizer", source)
 
     def test_evaluator_app_exports_the_protocol_v2_app(self) -> None:
         app = object()
@@ -185,6 +201,7 @@ class EvaluatorProtocolV2ContractTests(unittest.TestCase):
 
         conflicting_payload = request_payload()
         conflicting_payload["limits"]["n"] = 100
+        conflicting_payload["dataset"]["sources"][0]["target_sequences"] = 100
         with self.assertRaises(AttemptConflictError):
             registry.start(EvaluationRequestV2.from_mapping(conflicting_payload))
 

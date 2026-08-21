@@ -13,6 +13,7 @@ from botocore.exceptions import ClientError
 from teutonic.dashboard.contracts import (
     DashboardContractError,
     canonical_dashboard_json,
+    canonical_dataset_manifest_json,
     validate_dashboard,
 )
 from teutonic.dashboard.market import MarketClient, MarketDataError, select_market
@@ -88,6 +89,34 @@ def market(*, fetched_at: str = "2026-08-18T12:00:00Z", stale: bool = False) -> 
     }
 
 
+def dataset_manifest() -> dict:
+    return {
+        "schema_version": 1,
+        "generated_at": "2026-08-18T12:00:00Z",
+        "chain": {
+            "name": "Teutonic",
+            "netuid": 306,
+            "generation": "test",
+            "competition": "quasar",
+        },
+        "config_version": "a" * 64,
+        "dataset_label": "fixture",
+        "eval_n": 2000,
+        "delta_threshold": 0.5,
+        "sampling": {
+            "algorithm": "blake2b-64-block-hash-hotkey-v1",
+            "inputs": ["block_hash", "hotkey"],
+        },
+        "sources": [{
+            "name": "fixture",
+            "proportion": 1.0,
+            "manifest_url": "https://datasets.example/fixture/manifest.json",
+            "manifest_sha256": "b" * 64,
+            "manifest": {"shards": []},
+        }],
+    }
+
+
 class FakeS3:
     def __init__(self) -> None:
         self.objects = {}
@@ -123,6 +152,14 @@ class DashboardContractTests(unittest.TestCase):
         body = canonical_dashboard_json(payload())
         self.assertNotIn(b"NaN", body)
         self.assertEqual(json.loads(body)["schema_version"], 1)
+
+    def test_global_dataset_manifest_is_canonical_and_strict(self):
+        body = canonical_dataset_manifest_json(dataset_manifest())
+        self.assertEqual(json.loads(body)["eval_n"], 2000)
+        invalid = dataset_manifest()
+        invalid["private_credentials"] = "never"
+        with self.assertRaises(DashboardContractError):
+            canonical_dataset_manifest_json(invalid)
 
     def test_non_finite_and_unknown_fields_are_rejected(self):
         invalid = payload()
@@ -241,6 +278,17 @@ class DashboardStorageTests(unittest.TestCase):
         self.assertEqual(result.state, "stale_skipped")
         self.assertEqual(s3.put_calls, 1)
 
+    def test_global_dataset_manifest_is_published_to_stable_public_key(self):
+        s3 = FakeS3()
+        store = DashboardObjectStore(s3, bucket="teutonic-dash")
+        body = canonical_dataset_manifest_json(dataset_manifest())
+        first = store.publish_dataset_manifest(body, config_version="a" * 64)
+        second = store.publish_dataset_manifest(body, config_version="a" * 64)
+        self.assertEqual(first.state, "published")
+        self.assertEqual(second.state, "unchanged")
+        stored = s3.objects[("teutonic-dash", "datasets/manifest.json")]
+        self.assertEqual(stored["Metadata"]["config-version"], "a" * 64)
+
 
 class DashboardServiceTests(unittest.TestCase):
     def test_market_failure_does_not_block_new_database_publication(self):
@@ -253,6 +301,9 @@ class DashboardServiceTests(unittest.TestCase):
                 candidate["source_watermark"] = 8
                 return candidate
 
+            def project_dataset_manifest(self, *, now):
+                return dataset_manifest()
+
         class Store:
             def __init__(self):
                 self.published = None
@@ -264,16 +315,22 @@ class DashboardServiceTests(unittest.TestCase):
                 self.published = json.loads(body)
                 return source_watermark
 
+            def publish_dataset_manifest(self, body, *, config_version):
+                self.dataset = json.loads(body)
+                return config_version
+
         class FailedMarket:
             def fetch(self, *, now):
                 raise RuntimeError("private endpoint details must not escape")
 
         store = Store()
-        result = DashboardViewService(
+        dashboard_result, dataset_result = DashboardViewService(
             Repository(), store, market_client=FailedMarket()
         ).publish_once(now=NOW)
-        self.assertEqual(result, 8)
+        self.assertEqual(dashboard_result, 8)
+        self.assertEqual(dataset_result, "a" * 64)
         self.assertEqual(store.published["source_watermark"], 8)
+        self.assertEqual(store.dataset["eval_n"], 2000)
         self.assertTrue(store.published["market"]["stale"])
         self.assertNotIn("private endpoint", json.dumps(store.published))
 

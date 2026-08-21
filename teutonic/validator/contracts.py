@@ -4,13 +4,18 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Mapping
 
+from teutonic.evaluation.configuration import (
+    DatasetManifestSnapshot,
+    EvaluationSettings,
+    pretokenized_dataset_request,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class EvaluationPolicyConfig:
     policy_version: str
     code_version: str
     dataset_version: str
-    tokenizer_version: str
     evaluator_version: str
     sampling_seed: int
     bootstrap_seed: int
@@ -21,8 +26,7 @@ class EvaluationPolicyConfig:
     delta_threshold: float
     dataset_source: str
     dataset_label: str
-    tokenizer_backend: str
-    tokenizer_label: str
+    dataset_manifests: tuple[DatasetManifestSnapshot, ...] = ()
     lease: timedelta = timedelta(minutes=2)
     retry_base_delay: timedelta = timedelta(seconds=30)
     max_attempts: int = 3
@@ -34,7 +38,6 @@ class EvaluationPolicyConfig:
                 self.policy_version,
                 self.code_version,
                 self.dataset_version,
-                self.tokenizer_version,
                 self.evaluator_version,
             )
         ):
@@ -43,8 +46,8 @@ class EvaluationPolicyConfig:
             raise ValueError("lease must be positive and retry delay cannot be negative")
         if self.max_attempts < 1:
             raise ValueError("max_attempts must be positive")
-        if self.tokenizer_backend not in {"huggingface", "gigatoken"}:
-            raise ValueError("unsupported tokenizer backend")
+        if self.dataset_source != "pretokenized_npy" or not self.dataset_manifests:
+            raise ValueError("evaluation needs database-backed pre-tokenized manifests")
 
     @property
     def thresholds(self) -> dict[str, int | float]:
@@ -56,6 +59,21 @@ class EvaluationPolicyConfig:
             "delta_threshold": self.delta_threshold,
             "batch_size": 1,
         }
+
+    def dataset_request(self, *, block_hash: str, hotkey: str) -> dict[str, Any]:
+        settings = EvaluationSettings(
+            config_version=self.dataset_version,
+            dataset_label=self.dataset_label,
+            n=self.n,
+            delta_threshold=self.delta_threshold,
+            manifests=self.dataset_manifests,
+        )
+        return pretokenized_dataset_request(
+            settings,
+            block_hash=block_hash,
+            hotkey=hotkey,
+            seq_len=self.seq_len,
+        )
 
     def retry_delay(self, attempt_number: int) -> timedelta:
         exponent = max(0, min(attempt_number - 1, 8))

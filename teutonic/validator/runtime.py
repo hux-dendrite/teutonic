@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from teutonic.evaluation.configuration import EvaluationSettings
+
 from .contracts import EvaluationPolicyConfig
 
 
@@ -31,25 +33,27 @@ def _as_int(value: Any) -> int:
 
 def evaluation_policy_from_env(
     source: Mapping[str, str] | None = None,
+    *,
+    settings: EvaluationSettings | None = None,
 ) -> EvaluationPolicyConfig:
     env = os.environ if source is None else source
+    if settings is None:
+        raise RuntimeError("active PostgreSQL evaluation configuration is required")
     return EvaluationPolicyConfig(
         policy_version=_required(env, "TEUTONIC_EVALUATION_POLICY_VERSION"),
         code_version=_required(env, "TEUTONIC_EVALUATOR_CODE_VERSION"),
-        dataset_version=_required(env, "TEUTONIC_DATASET_VERSION"),
-        tokenizer_version=_required(env, "TEUTONIC_TOKENIZER_VERSION"),
+        dataset_version=settings.config_version,
         evaluator_version=_required(env, "TEUTONIC_EVALUATOR_VERSION"),
-        sampling_seed=int(env.get("TEUTONIC_EVAL_SAMPLING_SEED", "0")),
+        sampling_seed=0,
         bootstrap_seed=int(env.get("TEUTONIC_EVAL_BOOTSTRAP_SEED", "0")),
-        n=int(env.get("TEUTONIC_EVAL_N", "25000")),
+        n=settings.n,
         seq_len=int(env.get("TEUTONIC_EVAL_SEQ_LEN", "8192")),
         n_bootstrap=int(env.get("TEUTONIC_EVAL_BOOTSTRAP_B", "10000")),
         alpha=float(env.get("TEUTONIC_EVAL_ALPHA", "0.001")),
-        delta_threshold=float(env.get("TEUTONIC_EVAL_DELTA", "0.0015")),
-        dataset_source=_required(env, "TEUTONIC_DATASET_SOURCE"),
-        dataset_label=_required(env, "TEUTONIC_DATASET_LABEL"),
-        tokenizer_backend=env.get("TEUTONIC_TOKENIZER_BACKEND", "gigatoken").strip(),
-        tokenizer_label=_required(env, "TEUTONIC_TOKENIZER_LABEL"),
+        delta_threshold=settings.delta_threshold,
+        dataset_source="pretokenized_npy",
+        dataset_label=settings.dataset_label,
+        dataset_manifests=settings.manifests,
         lease=timedelta(seconds=int(env.get("TEUTONIC_EVALUATION_LEASE_SECONDS", "120"))),
         retry_base_delay=timedelta(
             seconds=int(env.get("TEUTONIC_EVALUATION_RETRY_SECONDS", "30"))

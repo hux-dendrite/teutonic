@@ -1,19 +1,35 @@
 from __future__ import annotations
 
 import unittest
+import hashlib
 from datetime import timedelta
 
+from teutonic.evaluation.configuration import DatasetManifestSnapshot, canonical_manifest_bytes
 from teutonic.promotion import promotion_worker_lock_key
 from teutonic.validator import EvaluationPolicyConfig, scheduler_lock_key
 
 
 class ValidatorSchedulerPolicyTests(unittest.TestCase):
     def _policy(self, **overrides):
+        manifest = {
+            "shards": [{
+                "key": "shards/part-000.npy",
+                "sha256": "a" * 64,
+                "size_bytes": 16384,
+                "n_tokens": 16384,
+            }]
+        }
+        snapshot = DatasetManifestSnapshot(
+            name="fixture",
+            manifest_url="https://datasets.example/fixture/manifest.json",
+            manifest_sha256=hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest(),
+            proportion=1.0,
+            manifest=manifest,
+        )
         values = {
             "policy_version": "policy-v1",
             "code_version": "code-v1",
-            "dataset_version": "dataset-v1",
-            "tokenizer_version": "tokenizer-v1",
+            "dataset_version": "b" * 64,
             "evaluator_version": "evaluator-v2",
             "sampling_seed": 1,
             "bootstrap_seed": 2,
@@ -22,10 +38,9 @@ class ValidatorSchedulerPolicyTests(unittest.TestCase):
             "n_bootstrap": 100,
             "alpha": 0.05,
             "delta_threshold": 0.0015,
-            "dataset_source": "fixture",
+            "dataset_source": "pretokenized_npy",
             "dataset_label": "fixture-v1",
-            "tokenizer_backend": "huggingface",
-            "tokenizer_label": "tokenizer-fixture",
+            "dataset_manifests": (snapshot,),
             "retry_base_delay": timedelta(seconds=5),
         }
         values.update(overrides)
@@ -56,4 +71,4 @@ class ValidatorSchedulerPolicyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._policy(max_attempts=0)
         with self.assertRaises(ValueError):
-            self._policy(tokenizer_backend="unknown")
+            self._policy(dataset_source="unknown")

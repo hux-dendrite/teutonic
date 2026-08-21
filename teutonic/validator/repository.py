@@ -9,6 +9,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from teutonic.evaluation import EvaluationRequestV2
+from teutonic.evaluation.configuration import DatasetManifestSnapshot, EvaluationSettings
 
 from .contracts import ClaimedEvaluation, EvaluationPolicyConfig, RecoveryCandidate
 
@@ -73,6 +74,45 @@ class ValidatorRepository:
     def _require_lock(self) -> None:
         if not self._lock_held:
             raise SchedulerLockUnavailable("competition scheduler lock is not held")
+
+    def load_evaluation_settings(self) -> EvaluationSettings:
+        with self.connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT ec.config_version, ec.dataset_label, ec.eval_n,
+                       ec.delta_threshold, dm.position, dm.name, dm.manifest_url,
+                       dm.manifest_sha256, dm.manifest_json, dm.sample_proportion
+                  FROM control_plane.competitions c
+                  JOIN control_plane.evaluation_configs ec
+                    ON ec.competition_id = c.competition_id AND ec.active
+                  JOIN control_plane.dataset_manifests dm
+                    ON dm.evaluation_config_id = ec.evaluation_config_id
+                 WHERE c.netuid = %s AND c.chain_generation = %s AND c.name = %s
+                 ORDER BY dm.position
+                """,
+                (self.netuid, self.chain_generation, self.competition),
+            )
+            rows = cursor.fetchall()
+        if not rows:
+            raise SchedulerInvariantError("competition has no active evaluation configuration")
+        first = rows[0]
+        manifests = tuple(
+            DatasetManifestSnapshot(
+                name=str(row["name"]),
+                manifest_url=str(row["manifest_url"]),
+                manifest_sha256=str(row["manifest_sha256"]),
+                proportion=float(row["sample_proportion"]),
+                manifest=row["manifest_json"],
+            )
+            for row in rows
+        )
+        return EvaluationSettings(
+            config_version=str(first["config_version"]),
+            dataset_label=str(first["dataset_label"]),
+            n=int(first["eval_n"]),
+            delta_threshold=float(first["delta_threshold"]),
+            manifests=manifests,
+        )
 
     def claim_next(
         self, *, now: datetime, policy: EvaluationPolicyConfig
@@ -236,7 +276,6 @@ class ValidatorRepository:
                     "versions": {
                         "evaluation_policy": policy.policy_version,
                         "dataset": policy.dataset_version,
-                        "tokenizer": policy.tokenizer_version,
                         "code": policy.code_version,
                         "evaluator": policy.evaluator_version,
                     },
@@ -246,11 +285,10 @@ class ValidatorRepository:
                         "block_hash": row["ready_finalized_block_hash"],
                     },
                     "limits": policy.thresholds,
-                    "dataset": {"source": policy.dataset_source, "label": policy.dataset_label},
-                    "tokenizer": {
-                        "backend": policy.tokenizer_backend,
-                        "label": policy.tokenizer_label,
-                    },
+                    "dataset": policy.dataset_request(
+                        block_hash=str(row["ready_finalized_block_hash"]),
+                        hotkey=str(row["hotkey"]),
+                    ),
                 }
             )
             cursor.execute(
@@ -259,11 +297,11 @@ class ValidatorRepository:
                     evaluation_id, upload_id, competition_id, attempt_number,
                     claimed_king_reign_id, state, owner_instance_id, lease_expires_at,
                     heartbeat_at, policy_version, code_version, dataset_version,
-                    tokenizer_version, evaluator_version, sampling_seed, bootstrap_seed,
+                    evaluator_version, sampling_seed, bootstrap_seed,
                     thresholds, request_sha256, request_payload
                 ) VALUES (
                     %s, %s, %s, %s, %s, 'claimed', %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb
+                    %s, %s, %s, %s::jsonb, %s, %s::jsonb
                 )
                 """,
                 (
@@ -278,7 +316,6 @@ class ValidatorRepository:
                     policy.policy_version,
                     policy.code_version,
                     policy.dataset_version,
-                    policy.tokenizer_version,
                     policy.evaluator_version,
                     policy.sampling_seed,
                     policy.bootstrap_seed,

@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from botocore.exceptions import ClientError
 
 DASHBOARD_KEY = "dashboard.json"
+DATASET_MANIFEST_KEY = "datasets/manifest.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,9 +93,41 @@ class DashboardObjectStore:
             raise RuntimeError("dashboard content hash metadata verification failed")
         return PublicationResult("published", digest, len(body))
 
-    def _head(self) -> Mapping[str, Any] | None:
+    def publish_dataset_manifest(
+        self, body: bytes, *, config_version: str
+    ) -> PublicationResult:
+        if len(body) > self.maximum_bytes:
+            raise ValueError(
+                f"global dataset manifest is {len(body)} bytes; limit is {self.maximum_bytes}"
+            )
+        digest = hashlib.sha256(body).hexdigest()
+        existing = self._head(DATASET_MANIFEST_KEY)
+        if existing is not None and existing.get("Metadata", {}).get(
+            "content-sha256"
+        ) == digest:
+            return PublicationResult("unchanged", digest, len(body))
+        self.client.put_object(
+            Bucket=self.bucket,
+            Key=DATASET_MANIFEST_KEY,
+            Body=body,
+            ContentType="application/json; charset=utf-8",
+            CacheControl=self.cache_control,
+            Metadata={
+                "schema-version": "1",
+                "config-version": config_version,
+                "content-sha256": digest,
+            },
+        )
+        confirmed = self._head(DATASET_MANIFEST_KEY)
+        if confirmed is None or int(confirmed.get("ContentLength", -1)) != len(body):
+            raise RuntimeError("global dataset manifest verification failed")
+        if confirmed.get("Metadata", {}).get("content-sha256") != digest:
+            raise RuntimeError("global dataset manifest hash metadata verification failed")
+        return PublicationResult("published", digest, len(body))
+
+    def _head(self, key: str = DASHBOARD_KEY) -> Mapping[str, Any] | None:
         try:
-            return self.client.head_object(Bucket=self.bucket, Key=DASHBOARD_KEY)
+            return self.client.head_object(Bucket=self.bucket, Key=key)
         except ClientError as exc:
             code = str(exc.response.get("Error", {}).get("Code", ""))
             if code in {"NoSuchKey", "404", "NotFound"}:

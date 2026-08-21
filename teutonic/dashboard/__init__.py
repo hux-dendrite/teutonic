@@ -1,4 +1,9 @@
-from .contracts import DashboardContractError, canonical_dashboard_json, validate_dashboard
+from .contracts import (
+    DashboardContractError,
+    canonical_dashboard_json,
+    canonical_dataset_manifest_json,
+    validate_dashboard,
+)
 from .market import MarketClient, select_market
 from .projection import DashboardProjectionRepository
 from .service import DashboardViewService
@@ -12,6 +17,7 @@ __all__ = [
     "MarketClient",
     "PublicationResult",
     "canonical_dashboard_json",
+    "canonical_dataset_manifest_json",
     "select_market",
     "validate_dashboard",
 ]

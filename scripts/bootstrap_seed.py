@@ -19,6 +19,10 @@ from teutonic.bootstrap import (
     bootstrap_genesis,
 )
 from teutonic.config import BucketNames
+from teutonic.evaluation.configuration import (
+    fetch_dataset_manifest,
+    store_evaluation_configuration,
+)
 
 
 log = logging.getLogger("teutonic.seed-bootstrap")
@@ -131,6 +135,14 @@ def main() -> int:
         uid=uid,
         finalized_block=chain.block,
     )
+    dataset_manifests = tuple(
+        fetch_dataset_manifest(
+            name=str(item["name"]),
+            manifest_url=str(item["manifest_url"]),
+            proportion=float(item["proportion"]),
+        )
+        for item in chain_config.EVALUATION_DATASETS
+    )
     with psycopg.connect(required("TEUTONIC_DATABASE_URL"), row_factory=dict_row) as connection:
         record = bootstrap_genesis(
             connection,
@@ -141,6 +153,16 @@ def main() -> int:
             artifact=artifact,
             identity=identity,
         )
+        evaluation = store_evaluation_configuration(
+            connection,
+            netuid=int(required("TEUTONIC_NETUID")),
+            chain_generation=required("TEUTONIC_CHAIN_GENERATION"),
+            competition=required("TEUTONIC_COMPETITION"),
+            dataset_label=chain_config.EVALUATION_DATASET_LABEL,
+            n=chain_config.EVALUATION_N,
+            delta_threshold=chain_config.EVALUATION_DELTA_THRESHOLD,
+            manifests=dataset_manifests,
+        )
     action = "created" if record.created else "verified existing"
     log.info(
         "%s genesis competition=%s reign=%s finalized_block=%s uid=%s",
@@ -149,6 +171,14 @@ def main() -> int:
         record.reign_id,
         chain.block,
         uid,
+    )
+    log.info(
+        "%s evaluation config=%s n=%s delta=%s datasets=%s",
+        "created" if evaluation.created else "verified existing",
+        evaluation.config_version,
+        chain_config.EVALUATION_N,
+        chain_config.EVALUATION_DELTA_THRESHOLD,
+        ",".join(item.name for item in dataset_manifests),
     )
     return 0
 

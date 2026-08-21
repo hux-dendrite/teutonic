@@ -94,13 +94,19 @@ def main() -> int:
         try:
             while not stopping:
                 try:
-                    result = service.publish_once()
+                    result, dataset_result = service.publish_once()
                     failures = 0
                     log.info(
                         "dashboard %s bytes=%d sha256=%s",
                         result.state,
                         result.size_bytes,
                         result.sha256,
+                    )
+                    log.info(
+                        "dataset manifest %s bytes=%d sha256=%s",
+                        dataset_result.state,
+                        dataset_result.size_bytes,
+                        dataset_result.sha256,
                     )
                     if args.once:
                         return 0

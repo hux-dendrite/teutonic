@@ -212,12 +212,12 @@ class ModelPromotionIntegrationTests(unittest.TestCase):
             """
             INSERT INTO control_plane.evaluations (
                 upload_id, competition_id, attempt_number, claimed_king_reign_id,
-                state, policy_version, code_version, dataset_version, tokenizer_version,
+                state, policy_version, code_version, dataset_version,
                 sampling_seed, bootstrap_seed, thresholds, verdict, verdict_summary,
                 completed_at
             ) VALUES (
                 %s, %s, 1, %s, 'completed', 'policy-v1', 'code-v1', 'data-v1',
-                'tokenizer-v1', 1, 2, '{}'::jsonb, %s, '{}'::jsonb, %s
+                1, 2, '{}'::jsonb, %s, '{}'::jsonb, %s
             ) RETURNING evaluation_id
             """,
             (

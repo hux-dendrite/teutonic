@@ -15,7 +15,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import gc
-import glob
 import hashlib
 import importlib.util
 import inspect
@@ -24,7 +23,6 @@ import json
 import logging
 import multiprocessing as mp
 import os
-import random
 import shutil
 import sys
 import threading
@@ -37,7 +35,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -52,11 +50,6 @@ if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 import chain_config
-from teutonic.evaluator.tokenization import (
-    DEFAULT_TOKENIZER_BACKEND,
-    encode_batch,
-    prepare_tokenizer,
-)
 from teutonic.evaluation import (
     PROTOCOL_VERSION,
     AttemptBusyError,
@@ -88,13 +81,6 @@ SHARD_CACHE_DIR = Path(
         os.environ.get("TEUTONIC_PARQUET_CACHE_DIR", "/tmp/teutonic/finewebedu_shards"),
     )
 )
-DEFAULT_PARQUET_GLOB = os.environ.get("TEUTONIC_PARQUET_GLOB", "/root/data/fineweb-edu-10BT/sample/10BT/**/*.parquet")
-DEFAULT_DATASET_SOURCE = os.environ.get("TEUTONIC_DATASET_SOURCE", "s3")
-DEFAULT_S3_ENDPOINT = os.environ.get("TEUTONIC_DS_ENDPOINT", "")
-DEFAULT_S3_BUCKET = os.environ.get("TEUTONIC_DS_BUCKET", "")
-DEFAULT_S3_PREFIX = os.environ.get("TEUTONIC_DS_PREFIX", "")
-DEFAULT_S3_SHARD_CONTAINS = os.environ.get("TEUTONIC_DS_SHARD_CONTAINS", "/shards/")
-DEFAULT_S3_SHARD_SUFFIX = os.environ.get("TEUTONIC_DS_SHARD_SUFFIX", ".npy")
 DEFAULT_BATCH_SIZE = 1
 DEFAULT_PARALLEL_BATCH_SIZE = 1
 DEFAULT_ALPHA = float(os.environ.get("EVAL_ALPHA", "0.001"))
@@ -127,12 +113,6 @@ KERNEL_CACHE_DIR = Path(
     os.environ.get("TEUTONIC_KERNEL_CACHE_DIR", "/tmp/teutonic/kernel_cache")
 )
 MODEL_LOADER_VERSION = "direct-gpu-v1"
-DEFAULT_S3_DOWNLOAD_RETRIES = int(os.environ.get("TEUTONIC_S3_DOWNLOAD_RETRIES", "5"))
-DEFAULT_S3_DOWNLOAD_RETRY_BACKOFF_S = float(os.environ.get("TEUTONIC_S3_DOWNLOAD_RETRY_BACKOFF_S", "20"))
-DEFAULT_S3_CLIENT_MAX_ATTEMPTS = int(os.environ.get("TEUTONIC_S3_CLIENT_MAX_ATTEMPTS", "10"))
-DEFAULT_S3_TRANSFER_ATTEMPTS = int(os.environ.get("TEUTONIC_S3_TRANSFER_ATTEMPTS", "10"))
-DEFAULT_S3_TRANSFER_CONCURRENCY = int(os.environ.get("TEUTONIC_S3_TRANSFER_CONCURRENCY", "1"))
-DEFAULT_S3_TRANSFER_CHUNK_MB = int(os.environ.get("TEUTONIC_S3_TRANSFER_CHUNK_MB", "64"))
 CACHE_HIGH_WATERMARK_GB = float(os.environ.get("MODEL_CACHE_HIGH_WATERMARK_GB", "500"))
 
 _eval_lock = threading.Lock()
@@ -155,17 +135,10 @@ class EvalRequest(BaseModel):
     block_hash: str = ""
     hotkey: str = ""
     coldkey: str = ""
-    shard_key: str = ""
-    dataset_source: str = DEFAULT_DATASET_SOURCE
-    parquet_glob: list[str] = Field(default_factory=lambda: [DEFAULT_PARQUET_GLOB])
-    s3_endpoint: str = DEFAULT_S3_ENDPOINT
-    s3_bucket: str = DEFAULT_S3_BUCKET
-    s3_prefix: str = DEFAULT_S3_PREFIX
-    s3_shard_contains: str = DEFAULT_S3_SHARD_CONTAINS
-    s3_shard_suffix: str = DEFAULT_S3_SHARD_SUFFIX
-    s3_max_shards: int = 0
+    dataset_source: Literal["pretokenized_npy"] = "pretokenized_npy"
+    dataset_sources: list[dict[str, Any]] = Field(default_factory=list)
     seq_len: int = Field(default=DEFAULT_SEQ_LEN, ge=2)
-    tokenizer_backend: Literal["huggingface", "gigatoken"] = DEFAULT_TOKENIZER_BACKEND
+    vocab_size: int = 0
     attn_implementation: Literal["eager"] = DEFAULT_ATTN_IMPLEMENTATION
     n: int = DEFAULT_N
     batch_size: Literal[1] = DEFAULT_BATCH_SIZE
@@ -174,10 +147,6 @@ class EvalRequest(BaseModel):
     n_bootstrap: int = DEFAULT_BOOTSTRAP_B
     seed: int = 0xE1A
     bootstrap_seed: int = 0xB007
-    text_field: str = "text"
-    min_chars: int = 128
-    max_chars: int = 0
-    parquet_batch_size: int = 1024
     lm_head_chunk: int = DEFAULT_LM_HEAD_CHUNK
     log_every_batches: int = DEFAULT_LOG_EVERY_BATCHES
     model_device_map: str = DEFAULT_MODEL_DEVICE_MAP
@@ -198,7 +167,7 @@ def internal_request_from_v2(
         hotkey=str(request.miner["hotkey"]),
         coldkey=str(request.miner["coldkey"]),
         dataset_source=str(request.dataset["source"]),
-        tokenizer_backend=request.tokenizer["backend"],
+        dataset_sources=list(request.dataset["sources"]),
         n=int(request.limits["n"]),
         seq_len=int(request.limits["seq_len"]),
         n_bootstrap=int(request.limits["n_bootstrap"]),
@@ -276,8 +245,8 @@ def dataset_seed_material(req: EvalRequest) -> str:
     block_hash = (req.block_hash or "").strip()
     hotkey = (req.hotkey or "").strip()
     if block_hash and block_hash != "default":
-        return f"block_hash={block_hash}|hotkey={hotkey}|base_seed={req.seed}"
-    return f"base_seed={req.seed}"
+        return f"block_hash={block_hash}|hotkey={hotkey}"
+    raise ValueError("pretokenized evaluation requires a finalized block hash")
 
 
 def dataset_seed(req: EvalRequest) -> int:
@@ -644,7 +613,6 @@ def snapshot_meta(snapshot_dir: str) -> dict:
     return {
         "path": str(path),
         "has_config": (path / "config.json").exists(),
-        "has_tokenizer": any(path.glob("tokenizer*")) or any(path.glob("*.model")) or any(path.glob("vocab.*")),
         "python_files": sorted(p.name for p in path.glob("*.py")),
         "safetensors": snapshot_safetensor_names(snapshot_dir),
     }
@@ -749,44 +717,6 @@ def load_model_config(snapshot_dir: str, req: EvalRequest, label: str, on_phase=
             "attn_implementation": req.attn_implementation,
         })
     return config, {"source": source, **meta}
-
-
-def load_eval_tokenizer(king_snapshot: str, req: EvalRequest, on_phase=None):
-    from transformers import AutoTokenizer
-
-    source = (req.dataset_source or "s3").lower()
-    tokenizer_required = source == "local"
-    if source == "s3":
-        return None, {"source": "not_needed_for_s3_npy"}
-
-    ensure_snapshot_on_path(king_snapshot)
-    if on_phase:
-        on_phase({"phase": "tokenizer_load_start", "snapshot": king_snapshot})
-    try:
-        hf_tokenizer = AutoTokenizer.from_pretrained(
-            king_snapshot,
-            revision=req.revision,
-            trust_remote_code=True,
-            use_fast=True,
-        )
-        tokenizer_source = "king_snapshot"
-    except Exception as exc:
-        if tokenizer_required:
-            raise RuntimeError(
-                f"king snapshot tokenizer could not be loaded: {exc}. "
-                "Local parquet evaluations require tokenizer files in the immutable snapshot."
-            ) from exc
-        return None, {"source": "missing_but_not_needed"}
-    if hf_tokenizer.pad_token is None:
-        hf_tokenizer.pad_token = hf_tokenizer.eos_token
-    tokenizer, tokenizer_backend = prepare_tokenizer(hf_tokenizer, req.tokenizer_backend)
-    if on_phase:
-        on_phase({
-            "phase": "tokenizer_load_done",
-            "source": tokenizer_source,
-            "backend": tokenizer_backend,
-        })
-    return tokenizer, {"source": tokenizer_source, "backend": tokenizer_backend}
 
 
 def config_value(config, key: str):
@@ -1104,182 +1034,6 @@ def load_model_replicas(
     return replicas
 
 
-def expand_globs(patterns: list[str]) -> list[str]:
-    files = []
-    for pattern in patterns:
-        matches = glob.glob(pattern, recursive=True)
-        if not matches and Path(pattern).is_file():
-            matches = [pattern]
-        files.extend(matches)
-    files = sorted({str(Path(path)) for path in files if path.endswith(".parquet")})
-    if not files:
-        raise FileNotFoundError(f"no parquet files matched: {patterns}")
-    return files
-
-
-def make_s3_client(req: EvalRequest):
-    import boto3
-    from botocore import UNSIGNED
-    from botocore.config import Config as BotoConfig
-
-    return boto3.client(
-        "s3",
-        endpoint_url=req.s3_endpoint or None,
-        config=BotoConfig(
-            signature_version=UNSIGNED,
-            s3={"addressing_style": "path"},
-            retries={"max_attempts": DEFAULT_S3_CLIENT_MAX_ATTEMPTS, "mode": "adaptive"},
-            connect_timeout=30,
-            read_timeout=300,
-        ),
-    )
-
-
-def list_s3_shard_keys(client, req: EvalRequest) -> list[str]:
-    prefix = req.s3_prefix
-    keys: list[str] = []
-    all_keys: list[str] = []
-    counts = {
-        "total": 0,
-        "shards": 0,
-        "npy_suffix": 0,
-        "parquet_suffix": 0,
-        "part_manifests": 0,
-        "final_manifest": 0,
-    }
-    kw = {"Bucket": req.s3_bucket, "Prefix": prefix}
-    while True:
-        resp = client.list_objects_v2(**kw)
-        for obj in resp.get("Contents", []):
-            key = obj["Key"]
-            all_keys.append(key)
-            counts["total"] += 1
-            counts["shards"] += int(req.s3_shard_contains in key)
-            counts["npy_suffix"] += int(key.endswith(".npy"))
-            counts["parquet_suffix"] += int(key.endswith(".parquet"))
-            counts["part_manifests"] += int(key.endswith("/manifest.json") and "/parts/" in key)
-            counts["final_manifest"] += int(key == prefix + "manifest.json")
-            if key.endswith("/") or key.endswith("/manifest.json") or key.endswith("_SUCCESS"):
-                continue
-            if req.s3_shard_contains and req.s3_shard_contains not in key:
-                continue
-            if req.s3_shard_suffix and not key.endswith(req.s3_shard_suffix):
-                continue
-            if key.endswith(".json"):
-                continue
-            if key.endswith(".crc"):
-                continue
-            if key.endswith(".tmp"):
-                continue
-            keys.append(key)
-        if not resp.get("IsTruncated"):
-            break
-        kw["ContinuationToken"] = resp["NextContinuationToken"]
-    keys = sorted(set(keys))
-    if not keys:
-        sample = all_keys[:20]
-        raise FileNotFoundError(
-            "no shard keys matched at "
-            f"s3://{req.s3_bucket}/{prefix}; counts={counts}; "
-            f"filter_contains={req.s3_shard_contains!r}; "
-            f"filter_suffix={req.s3_shard_suffix!r}; sample_keys={sample}"
-        )
-    log.info(
-        "s3 dataset listed: bucket=%s prefix=%s counts=%s matched=%d sample=%s",
-        req.s3_bucket,
-        prefix,
-        counts,
-        len(keys),
-        keys[:3],
-    )
-    return keys
-
-
-def s3_cache_path(req: EvalRequest, key: str) -> Path:
-    return SHARD_CACHE_DIR / req.s3_bucket / key
-
-
-def s3_transfer_config():
-    from boto3.s3.transfer import TransferConfig
-
-    chunk_bytes = max(1, DEFAULT_S3_TRANSFER_CHUNK_MB) * 1024 * 1024
-    return TransferConfig(
-        multipart_threshold=chunk_bytes,
-        multipart_chunksize=chunk_bytes,
-        max_concurrency=max(1, DEFAULT_S3_TRANSFER_CONCURRENCY),
-        num_download_attempts=max(1, DEFAULT_S3_TRANSFER_ATTEMPTS),
-        use_threads=DEFAULT_S3_TRANSFER_CONCURRENCY > 1,
-    )
-
-
-def download_s3_shard(client, req: EvalRequest, key: str, on_phase=None) -> str:
-    target = s3_cache_path(req, key)
-    if target.exists() and target.stat().st_size > 0:
-        return str(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    transfer_config = s3_transfer_config()
-    if on_phase:
-        on_phase({"phase": "shard_download_start", "key": key})
-
-    attempts = max(1, DEFAULT_S3_DOWNLOAD_RETRIES)
-    last_exc: Exception | None = None
-    for attempt in range(1, attempts + 1):
-        try:
-            if tmp.exists():
-                tmp.unlink()
-            if on_phase:
-                on_phase({
-                    "phase": "shard_download_attempt",
-                    "key": key,
-                    "attempt": attempt,
-                    "attempts": attempts,
-                    "transfer_attempts": DEFAULT_S3_TRANSFER_ATTEMPTS,
-                    "transfer_concurrency": DEFAULT_S3_TRANSFER_CONCURRENCY,
-                    "chunk_mb": DEFAULT_S3_TRANSFER_CHUNK_MB,
-                })
-            client.download_file(req.s3_bucket, key, str(tmp), Config=transfer_config)
-            break
-        except Exception as exc:
-            last_exc = exc
-            if tmp.exists():
-                tmp.unlink(missing_ok=True)
-            log.warning(
-                "s3 shard download failed for s3://%s/%s attempt %d/%d: %s",
-                req.s3_bucket,
-                key,
-                attempt,
-                attempts,
-                exc,
-                exc_info=True,
-            )
-            if attempt >= attempts:
-                raise RuntimeError(
-                    f"failed to download shard s3://{req.s3_bucket}/{key} "
-                    f"after {attempts} attempts: {exc}"
-                ) from exc
-            delay = DEFAULT_S3_DOWNLOAD_RETRY_BACKOFF_S * attempt
-            if on_phase:
-                on_phase({
-                    "phase": "shard_download_retry_wait",
-                    "key": key,
-                    "attempt": attempt,
-                    "attempts": attempts,
-                    "sleep_s": round(delay, 1),
-                    "error": str(exc),
-                })
-            time.sleep(delay)
-    else:
-        raise RuntimeError(f"failed to download shard s3://{req.s3_bucket}/{key}: {last_exc}")
-
-    if not tmp.exists() or tmp.stat().st_size <= 0:
-        raise RuntimeError(f"downloaded shard is empty: s3://{req.s3_bucket}/{key}")
-    tmp.replace(target)
-    if on_phase:
-        on_phase({"phase": "shard_download_done", "key": key, "path": str(target)})
-    return str(target)
-
-
 def is_truncated_npy_error(exc: BaseException) -> bool:
     return isinstance(exc, ValueError) and "mmap length is greater than file size" in str(exc)
 
@@ -1344,152 +1098,6 @@ def load_sequences_from_npy_shard(
         out.append(arr[start : start + req.seq_len].astype(np.int64, copy=False).tolist())
     _ = data_offset
     return out
-
-
-def load_s3_npy_shard_with_retry(client, req: EvalRequest, key: str, rng: np.random.Generator,
-                                 limit: int | None = None, on_phase=None) -> tuple[str, list[list[int]]]:
-    local_path = download_s3_shard(client, req, key, on_phase=on_phase)
-    try:
-        return local_path, load_sequences_from_npy_shard(local_path, req, rng, limit)
-    except Exception as exc:
-        if not is_truncated_npy_error(exc):
-            raise
-        log.warning("cached npy shard is truncated; deleting and redownloading: %s", local_path)
-        Path(local_path).unlink(missing_ok=True)
-        local_path = download_s3_shard(client, req, key, on_phase=on_phase)
-        return local_path, load_sequences_from_npy_shard(local_path, req, rng, limit)
-
-
-def sample_packed_sequences(files: list[str], tokenizer, req: EvalRequest, *, shuffle_files: bool = True) -> tuple[list[list[int]], dict]:
-    import pyarrow.parquet as pq
-
-    seed_value = dataset_seed(req)
-    rng = random.Random(seed_value)
-    ordered = list(files)
-    if shuffle_files:
-        rng.shuffle(ordered)
-    eos_id = tokenizer.eos_token_id
-    if eos_id is None:
-        raise ValueError("tokenizer must define eos_token_id")
-
-    sequences: list[list[int]] = []
-    buffer: list[int] = []
-    docs_seen = 0
-    used_files: list[str] = []
-    for path in ordered:
-        used_files.append(path)
-        pf = pq.ParquetFile(path)
-        if req.text_field not in set(pf.schema_arrow.names):
-            raise KeyError(f"{path} does not contain text field {req.text_field!r}")
-        for batch in pf.iter_batches(batch_size=req.parquet_batch_size, columns=[req.text_field]):
-            texts: list[str] = []
-            for text in batch.column(req.text_field).to_pylist():
-                if not isinstance(text, str) or len(text) < req.min_chars:
-                    continue
-                docs_seen += 1
-                if req.max_chars > 0 and len(text) > req.max_chars:
-                    text = text[: req.max_chars]
-                    cut = text.rfind(" ")
-                    if cut > req.max_chars // 2:
-                        text = text[:cut]
-                texts.append(text)
-            for ids in encode_batch(tokenizer, texts):
-                if not ids:
-                    continue
-                buffer.extend(ids)
-                buffer.append(eos_id)
-                while len(buffer) >= req.seq_len:
-                    sequences.append(buffer[: req.seq_len])
-                    del buffer[: req.seq_len]
-                    if len(sequences) >= req.n:
-                        digest = hashlib.sha256(np.asarray(sequences, dtype=np.int64).tobytes()).hexdigest()
-                        return sequences, {
-                            "n": len(sequences),
-                            "seq_len": req.seq_len,
-                            "seed": req.seed,
-                            "dataset_seed": seed_value,
-                            "seed_material": dataset_seed_material(req),
-                            "block_hash": req.block_hash,
-                            "hotkey": req.hotkey,
-                            "digest": digest,
-                            "source": req.dataset_source,
-                            "tokenizer_backend": req.tokenizer_backend,
-                            "used_files": used_files,
-                            "docs_seen": docs_seen,
-                        }
-    raise RuntimeError(f"only produced {len(sequences)}/{req.n} sequences from {len(used_files)} files")
-
-
-def sample_packed_sequences_from_s3(tokenizer, req: EvalRequest, on_phase=None) -> tuple[list[list[int]], dict]:
-    client = make_s3_client(req)
-    keys = list_s3_shard_keys(client, req)
-    seed_value = dataset_seed(req)
-    requested_shard = (req.shard_key or "").strip()
-    if requested_shard and requested_shard in keys:
-        keys = [requested_shard]
-    elif requested_shard and requested_shard.startswith(req.s3_prefix) and requested_shard.endswith(req.s3_shard_suffix):
-        keys = [requested_shard]
-    rng = random.Random(seed_value)
-    rng.shuffle(keys)
-    if req.s3_max_shards > 0:
-        keys = keys[: req.s3_max_shards]
-    if on_phase:
-        on_phase({
-            "phase": "s3_manifest_listed",
-            "bucket": req.s3_bucket,
-            "prefix": req.s3_prefix,
-            "shards": len(keys),
-            "dataset_seed": seed_value,
-            "block_hash": req.block_hash,
-        })
-
-    sequences: list[list[int]] = []
-    used_keys: list[str] = []
-    used_files: list[str] = []
-    np_rng = np.random.default_rng(seed_value)
-
-    for key in keys:
-        remaining = req.n - len(sequences)
-        local_path, loaded = load_s3_npy_shard_with_retry(
-            client, req, key, np_rng, remaining, on_phase=on_phase
-        )
-        used_keys.append(key)
-        used_files.append(local_path)
-        for seq in loaded:
-            sequences.append(seq)
-            if len(sequences) >= req.n:
-                digest = hashlib.sha256(np.asarray(sequences, dtype=np.int64).tobytes()).hexdigest()
-                return sequences, {
-                    "n": len(sequences),
-                    "seq_len": req.seq_len,
-                    "seed": req.seed,
-                    "dataset_seed": seed_value,
-                    "seed_material": dataset_seed_material(req),
-                    "block_hash": req.block_hash,
-                    "hotkey": req.hotkey,
-                    "requested_shard_key": req.shard_key,
-                    "digest": digest,
-                    "source": "s3_npy",
-                    "bucket": req.s3_bucket,
-                    "prefix": req.s3_prefix,
-                    "used_keys": used_keys,
-                    "used_files": used_files,
-                }
-    raise RuntimeError(f"only produced {len(sequences)}/{req.n} sequences from {len(used_keys)} S3 npy shards")
-
-
-def sample_eval_sequences(tokenizer, req: EvalRequest, on_phase=None) -> tuple[list[list[int]], dict]:
-    source = (req.dataset_source or "s3").lower()
-    if source == "s3":
-        return sample_packed_sequences_from_s3(tokenizer, req, on_phase=on_phase)
-    if source == "local":
-        if tokenizer is None:
-            raise RuntimeError("local parquet eval requires a tokenizer")
-        files = expand_globs(req.parquet_glob)
-        if on_phase:
-            on_phase({"phase": "local_parquets_listed", "parquet_files": len(files)})
-        return sample_packed_sequences(files, tokenizer, req)
-    raise ValueError(f"unsupported dataset_source={req.dataset_source!r}; expected 's3' or 'local'")
 
 
 def lm_head_device(model) -> torch.device:
@@ -2262,6 +1870,9 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
         config_mismatches = compare_model_configs(king_config, challenger_config)
         if config_mismatches:
             raise RuntimeError(f"king/challenger config mismatch: {config_mismatches[:8]}")
+        req.vocab_size = int(config_value(king_config, "vocab_size") or 0)
+        if req.vocab_size <= 0:
+            raise RuntimeError("model config must define a positive vocab_size")
         attention_meta = {
             "king": validate_and_report_attention_config(
                 king_config,
@@ -2275,17 +1886,15 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
             ),
         }
 
-        tokenizer, tokenizer_meta = load_eval_tokenizer(king_snapshot, req, on_phase=on_phase)
-
         on_phase({
             "phase": "dataset_sample_start",
             "source": req.dataset_source,
             "n": req.n,
             "seq_len": req.seq_len,
         })
-        sequences, dataset_meta = sample_eval_sequences(tokenizer, req, on_phase=on_phase)
+        sequences, dataset_meta = sample_eval_sequences(req, on_phase=on_phase)
         if not sequences:
-            raise RuntimeError("tokenized evaluation corpus is empty")
+            raise RuntimeError("pretokenized evaluation corpus is empty")
         corpus_lengths = [len(sequence) for sequence in sequences]
         corpus_max_seq_len = max(corpus_lengths)
         corpus_min_seq_len = min(corpus_lengths)
@@ -2353,7 +1962,6 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
             "model_artifacts": {
                 "king": king_artifacts,
                 "challenger": challenger_artifacts,
-                "tokenizer": tokenizer_meta,
                 "attention": attention_meta,
                 "duplicate_check": duplicate_meta,
                 "workers": worker_meta,
@@ -2475,7 +2083,6 @@ async def health():
             "batch_size": DEFAULT_BATCH_SIZE,
             "alpha": DEFAULT_ALPHA,
             "seq_len": DEFAULT_SEQ_LEN,
-            "tokenizer_backend": DEFAULT_TOKENIZER_BACKEND,
             "attn_implementation": DEFAULT_ATTN_IMPLEMENTATION,
             "gpus_per_model_instance": GPUS_PER_MODEL_INSTANCE,
             "model_instances_per_side": MODEL_INSTANCES_PER_SIDE,

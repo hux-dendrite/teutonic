@@ -248,6 +248,53 @@ CREATE TABLE control_plane.competitions (
 ALTER TABLE control_plane.competitions OWNER TO teutonic_schema_owner;
 
 --
+-- Name: evaluation_configs; Type: TABLE; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+CREATE TABLE control_plane.evaluation_configs (
+    evaluation_config_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    competition_id uuid NOT NULL,
+    config_version character(64) NOT NULL,
+    dataset_label text NOT NULL,
+    eval_n integer NOT NULL,
+    delta_threshold double precision NOT NULL,
+    active boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT evaluation_configs_config_version_check CHECK ((config_version ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT evaluation_configs_dataset_label_check CHECK ((dataset_label <> ''::text)),
+    CONSTRAINT evaluation_configs_delta_threshold_check CHECK (((delta_threshold >= (0)::double precision) AND (delta_threshold <= (100)::double precision))),
+    CONSTRAINT evaluation_configs_eval_n_check CHECK ((eval_n > 0))
+);
+
+
+ALTER TABLE control_plane.evaluation_configs OWNER TO teutonic_schema_owner;
+
+--
+-- Name: dataset_manifests; Type: TABLE; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+CREATE TABLE control_plane.dataset_manifests (
+    dataset_manifest_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    evaluation_config_id uuid NOT NULL,
+    "position" integer NOT NULL,
+    name text NOT NULL,
+    manifest_url text NOT NULL,
+    manifest_sha256 character(64) NOT NULL,
+    manifest_json jsonb NOT NULL,
+    sample_proportion double precision NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT dataset_manifests_manifest_json_check CHECK ((jsonb_typeof(manifest_json) = 'object'::text)),
+    CONSTRAINT dataset_manifests_manifest_sha256_check CHECK ((manifest_sha256 ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT dataset_manifests_manifest_url_check CHECK ((manifest_url ~ '^https://'::text)),
+    CONSTRAINT dataset_manifests_name_check CHECK ((name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'::text)),
+    CONSTRAINT dataset_manifests_position_check CHECK (("position" >= 0)),
+    CONSTRAINT dataset_manifests_sample_proportion_check CHECK (((sample_proportion > (0)::double precision) AND (sample_proportion <= (1)::double precision)))
+);
+
+
+ALTER TABLE control_plane.dataset_manifests OWNER TO teutonic_schema_owner;
+
+--
 -- Name: controller_jobs; Type: TABLE; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -339,6 +386,32 @@ CREATE VIEW control_plane.dashboard_contract WITH (security_barrier='true') AS
 ALTER VIEW control_plane.dashboard_contract OWNER TO teutonic_schema_owner;
 
 --
+-- Name: dashboard_dataset_manifests; Type: VIEW; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+CREATE VIEW control_plane.dashboard_dataset_manifests WITH (security_barrier='true') AS
+ SELECT competition.netuid,
+    competition.chain_generation,
+    competition.name AS competition,
+    config.config_version,
+    config.dataset_label,
+    config.eval_n,
+    config.delta_threshold,
+    config.created_at AS config_created_at,
+    manifest."position",
+    manifest.name,
+    manifest.manifest_url,
+    manifest.manifest_sha256,
+    manifest.sample_proportion,
+    manifest.manifest_json
+   FROM ((control_plane.competitions competition
+     JOIN control_plane.evaluation_configs config ON (((config.competition_id = competition.competition_id) AND config.active)))
+     JOIN control_plane.dataset_manifests manifest ON ((manifest.evaluation_config_id = config.evaluation_config_id)));
+
+
+ALTER VIEW control_plane.dashboard_dataset_manifests OWNER TO teutonic_schema_owner;
+
+--
 -- Name: evaluations; Type: TABLE; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -355,7 +428,6 @@ CREATE TABLE control_plane.evaluations (
     policy_version text NOT NULL,
     code_version text NOT NULL,
     dataset_version text NOT NULL,
-    tokenizer_version text NOT NULL,
     evaluator_version text,
     sampling_seed bigint NOT NULL,
     bootstrap_seed bigint NOT NULL,
@@ -1211,6 +1283,46 @@ ALTER TABLE ONLY control_plane.competitions
 
 
 --
+-- Name: evaluation_configs evaluation_configs_competition_id_config_version_key; Type: CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+ALTER TABLE ONLY control_plane.evaluation_configs
+    ADD CONSTRAINT evaluation_configs_competition_id_config_version_key UNIQUE (competition_id, config_version);
+
+
+--
+-- Name: evaluation_configs evaluation_configs_pkey; Type: CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+ALTER TABLE ONLY control_plane.evaluation_configs
+    ADD CONSTRAINT evaluation_configs_pkey PRIMARY KEY (evaluation_config_id);
+
+
+--
+-- Name: dataset_manifests dataset_manifests_evaluation_config_id_name_key; Type: CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+ALTER TABLE ONLY control_plane.dataset_manifests
+    ADD CONSTRAINT dataset_manifests_evaluation_config_id_name_key UNIQUE (evaluation_config_id, name);
+
+
+--
+-- Name: dataset_manifests dataset_manifests_evaluation_config_id_position_key; Type: CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+ALTER TABLE ONLY control_plane.dataset_manifests
+    ADD CONSTRAINT dataset_manifests_evaluation_config_id_position_key UNIQUE (evaluation_config_id, "position");
+
+
+--
+-- Name: dataset_manifests dataset_manifests_pkey; Type: CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+ALTER TABLE ONLY control_plane.dataset_manifests
+    ADD CONSTRAINT dataset_manifests_pkey PRIMARY KEY (dataset_manifest_id);
+
+
+--
 -- Name: controller_jobs controller_jobs_idempotency_key_key; Type: CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -1559,6 +1671,13 @@ CREATE INDEX evaluations_retry_due ON control_plane.evaluations USING btree (nex
 
 
 --
+-- Name: evaluation_configs_one_active; Type: INDEX; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+CREATE UNIQUE INDEX evaluation_configs_one_active ON control_plane.evaluation_configs USING btree (competition_id) WHERE active;
+
+
+--
 -- Name: king_reigns_one_current; Type: INDEX; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -1732,6 +1851,22 @@ CREATE TRIGGER weight_submission_attempts_revision AFTER INSERT OR DELETE OR UPD
 
 ALTER TABLE ONLY control_plane.competitions
     ADD CONSTRAINT competitions_current_reign_fk FOREIGN KEY (current_reign_id) REFERENCES control_plane.king_reigns(reign_id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: evaluation_configs evaluation_configs_competition_id_fkey; Type: FK CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+ALTER TABLE ONLY control_plane.evaluation_configs
+    ADD CONSTRAINT evaluation_configs_competition_id_fkey FOREIGN KEY (competition_id) REFERENCES control_plane.competitions(competition_id) ON DELETE RESTRICT;
+
+
+--
+-- Name: dataset_manifests dataset_manifests_evaluation_config_id_fkey; Type: FK CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+ALTER TABLE ONLY control_plane.dataset_manifests
+    ADD CONSTRAINT dataset_manifests_evaluation_config_id_fkey FOREIGN KEY (evaluation_config_id) REFERENCES control_plane.evaluation_configs(evaluation_config_id) ON DELETE CASCADE;
 
 
 --
@@ -1939,6 +2074,22 @@ GRANT SELECT ON TABLE control_plane.competitions TO teutonic_weight_publisher;
 
 
 --
+-- Name: TABLE evaluation_configs; Type: ACL; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+GRANT SELECT ON TABLE control_plane.evaluation_configs TO teutonic_validator;
+GRANT SELECT ON TABLE control_plane.evaluation_configs TO teutonic_auditor;
+
+
+--
+-- Name: TABLE dataset_manifests; Type: ACL; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+GRANT SELECT ON TABLE control_plane.dataset_manifests TO teutonic_validator;
+GRANT SELECT ON TABLE control_plane.dataset_manifests TO teutonic_auditor;
+
+
+--
 -- Name: TABLE controller_jobs; Type: ACL; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -1966,6 +2117,13 @@ GRANT SELECT ON TABLE control_plane.dashboard_chain TO teutonic_dashboard_view;
 --
 
 GRANT SELECT ON TABLE control_plane.dashboard_contract TO teutonic_dashboard_view;
+
+
+--
+-- Name: TABLE dashboard_dataset_manifests; Type: ACL; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+GRANT SELECT ON TABLE control_plane.dashboard_dataset_manifests TO teutonic_dashboard_view;
 
 
 --

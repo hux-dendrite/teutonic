@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import threading
 from dataclasses import dataclass, field
 from queue import Queue
 from typing import Any, Callable, Mapping
+from urllib.parse import urlparse
 
 
 PROTOCOL_VERSION = "teutonic-evaluator-v2"
@@ -119,8 +121,7 @@ class EvaluationRequestV2:
     versions: Mapping[str, str]
     sampling: Mapping[str, int | str]
     limits: Mapping[str, int | float]
-    dataset: Mapping[str, str]
-    tokenizer: Mapping[str, str]
+    dataset: Mapping[str, Any]
     request_payload: Mapping[str, Any]
 
     @property
@@ -151,7 +152,6 @@ class EvaluationRequestV2:
                 "sampling",
                 "limits",
                 "dataset",
-                "tokenizer",
             },
             "request",
         )
@@ -181,12 +181,12 @@ class EvaluationRequestV2:
         versions = _required_mapping(data.get("versions"), "versions")
         _exact_keys(
             versions,
-            {"evaluation_policy", "dataset", "tokenizer", "code", "evaluator"},
+            {"evaluation_policy", "dataset", "code", "evaluator"},
             "versions",
         )
         normalized_versions = {
             key: _required_string(versions.get(key), f"versions.{key}")
-            for key in ("evaluation_policy", "dataset", "tokenizer", "code", "evaluator")
+            for key in ("evaluation_policy", "dataset", "code", "evaluator")
         }
 
         sampling = _required_mapping(data.get("sampling"), "sampling")
@@ -227,19 +227,78 @@ class EvaluationRequestV2:
             raise ProtocolValidationError("limits.alpha must be between 0 and 1")
 
         dataset = _required_mapping(data.get("dataset"), "dataset")
-        _exact_keys(dataset, {"source", "label"}, "dataset")
+        _exact_keys(dataset, {"source", "label", "sources"}, "dataset")
+        if dataset.get("source") != "pretokenized_npy":
+            raise ProtocolValidationError("dataset.source must be 'pretokenized_npy'")
+        dataset_label = _required_string(dataset.get("label"), "dataset.label")
+        raw_sources = dataset.get("sources")
+        if not isinstance(raw_sources, list) or not raw_sources:
+            raise ProtocolValidationError("dataset.sources must be a non-empty array")
+        normalized_sources: list[dict[str, Any]] = []
+        names: set[str] = set()
+        for source_index, source_value in enumerate(raw_sources):
+            path = f"dataset.sources[{source_index}]"
+            source = _required_mapping(source_value, path)
+            _exact_keys(source, {"name", "proportion", "target_sequences", "shards"}, path)
+            name = _required_string(source.get("name"), f"{path}.name")
+            if name in names:
+                raise ProtocolValidationError("dataset source names must be unique")
+            names.add(name)
+            proportion = source.get("proportion")
+            if (
+                isinstance(proportion, bool)
+                or not isinstance(proportion, (int, float))
+                or not math.isfinite(float(proportion))
+                or not 0 < float(proportion) <= 1
+            ):
+                raise ProtocolValidationError(f"{path}.proportion must be in (0, 1]")
+            target = source.get("target_sequences")
+            if isinstance(target, bool) or not isinstance(target, int) or target < 0:
+                raise ProtocolValidationError(f"{path}.target_sequences must be non-negative")
+            raw_shards = source.get("shards")
+            if not isinstance(raw_shards, list) or not raw_shards:
+                raise ProtocolValidationError(f"{path}.shards must be a non-empty array")
+            normalized_shards: list[dict[str, Any]] = []
+            for shard_index, shard_value in enumerate(raw_shards):
+                shard_path = f"{path}.shards[{shard_index}]"
+                shard = _required_mapping(shard_value, shard_path)
+                _exact_keys(shard, {"url", "sha256", "size_bytes", "n_tokens"}, shard_path)
+                url = _required_string(shard.get("url"), f"{shard_path}.url")
+                parsed_url = urlparse(url)
+                if parsed_url.scheme != "https" or not parsed_url.netloc:
+                    raise ProtocolValidationError(f"{shard_path}.url must be public HTTPS")
+                digest = _normalize_digest(shard.get("sha256"), f"{shard_path}.sha256")
+                numeric: dict[str, int] = {}
+                for field in ("size_bytes", "n_tokens"):
+                    number = shard.get(field)
+                    if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+                        raise ProtocolValidationError(f"{shard_path}.{field} must be positive")
+                    numeric[field] = number
+                normalized_shards.append(
+                    {"url": url, "sha256": digest, **numeric}
+                )
+            normalized_sources.append(
+                {
+                    "name": name,
+                    "proportion": float(proportion),
+                    "target_sequences": target,
+                    "shards": normalized_shards,
+                }
+            )
+        if not math.isclose(
+            sum(item["proportion"] for item in normalized_sources),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            raise ProtocolValidationError("dataset source proportions must sum to 1")
+        if sum(item["target_sequences"] for item in normalized_sources) != normalized_limits["n"]:
+            raise ProtocolValidationError("dataset source targets must sum to limits.n")
         normalized_dataset = {
-            key: _required_string(dataset.get(key), f"dataset.{key}")
-            for key in ("source", "label")
+            "source": "pretokenized_npy",
+            "label": dataset_label,
+            "sources": normalized_sources,
         }
-        tokenizer = _required_mapping(data.get("tokenizer"), "tokenizer")
-        _exact_keys(tokenizer, {"backend", "label"}, "tokenizer")
-        normalized_tokenizer = {
-            key: _required_string(tokenizer.get(key), f"tokenizer.{key}")
-            for key in ("backend", "label")
-        }
-        if normalized_tokenizer["backend"] not in {"huggingface", "gigatoken"}:
-            raise ProtocolValidationError("tokenizer.backend is unsupported")
 
         normalized_payload = {
             "protocol_version": PROTOCOL_VERSION,
@@ -254,7 +313,6 @@ class EvaluationRequestV2:
             "sampling": normalized_sampling,
             "limits": normalized_limits,
             "dataset": normalized_dataset,
-            "tokenizer": normalized_tokenizer,
         }
         return cls(
             evaluation_id=evaluation_id,
@@ -266,7 +324,6 @@ class EvaluationRequestV2:
             sampling=normalized_sampling,
             limits=normalized_limits,
             dataset=normalized_dataset,
-            tokenizer=normalized_tokenizer,
             request_payload=normalized_payload,
         )
 
@@ -374,7 +431,6 @@ def result_provenance(
         "miner": dict(request.miner),
         "versions": dict(request.versions),
         "dataset_identity": dict(request.dataset),
-        "tokenizer_identity": dict(request.tokenizer),
         "sampling": {
             **dict(request.sampling),
             "requested_sequences": requested_sequences,
@@ -400,7 +456,6 @@ def validate_result_v2(result: Mapping[str, Any], request: EvaluationRequestV2) 
         "miner",
         "versions",
         "dataset_identity",
-        "tokenizer_identity",
         "sampling",
         "configured_limits",
         "started_at",

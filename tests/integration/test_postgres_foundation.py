@@ -196,10 +196,10 @@ class PostgresFoundationTests(unittest.TestCase):
             INSERT INTO control_plane.evaluations (
                 upload_id, competition_id, attempt_number, claimed_king_reign_id,
                 state, owner_instance_id, lease_expires_at, heartbeat_at,
-                policy_version, code_version, dataset_version, tokenizer_version,
+                policy_version, code_version, dataset_version,
                 sampling_seed, bootstrap_seed, thresholds
             ) VALUES (%s, %s, %s, %s, 'claimed', 'validator-test', %s + interval '2 minutes',
-                      %s, 'policy-v1', 'code-v1', 'dataset-v1', 'tokenizer-v1', 7, 8, %s::jsonb)
+                      %s, 'policy-v1', 'code-v1', 'dataset-v1', 7, 8, %s::jsonb)
             """,
             (
                 upload_id,
@@ -236,6 +236,8 @@ class PostgresFoundationTests(unittest.TestCase):
                 "competitions",
                 "controller_jobs",
                 "credential_generations",
+                "dataset_manifests",
+                "evaluation_configs",
                 "evaluations",
                 "king_reigns",
                 "metagraph_snapshots",
@@ -672,10 +674,10 @@ class PostgresFoundationTests(unittest.TestCase):
                 """
                 INSERT INTO control_plane.evaluations (
                     upload_id, competition_id, attempt_number, claimed_king_reign_id,
-                    state, policy_version, code_version, dataset_version, tokenizer_version,
+                    state, policy_version, code_version, dataset_version,
                     sampling_seed, bootstrap_seed, thresholds
                 ) VALUES (%s, %s, 500, %s, 'terminal_failure', 'role-policy', 'role-code',
-                          'role-data', 'role-tokenizer', 1, 2, '{}'::jsonb)
+                          'role-data', 1, 2, '{}'::jsonb)
                 RETURNING evaluation_id
                 """,
                 (

@@ -2,6 +2,13 @@ from __future__ import annotations
 
 import unittest
 
+from teutonic.evaluation.configuration import (
+    DatasetManifestSnapshot,
+    EvaluationSettings,
+    canonical_manifest_bytes,
+)
+import hashlib
+
 from teutonic.validator.runtime import (
     CrownCoordinator,
     FinalizedMetagraph,
@@ -41,6 +48,30 @@ class FakeChain:
 
 
 class ValidatorRuntimeTests(unittest.TestCase):
+    @staticmethod
+    def _settings() -> EvaluationSettings:
+        manifest = {
+            "shards": [{
+                "key": "shards/part-000.npy",
+                "sha256": "a" * 64,
+                "size_bytes": 4096,
+                "n_tokens": 4096,
+            }]
+        }
+        snapshot = DatasetManifestSnapshot(
+            name="fixture",
+            manifest_url="https://datasets.example/fixture/manifest.json",
+            manifest_sha256=hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest(),
+            proportion=1.0,
+            manifest=manifest,
+        )
+        return EvaluationSettings(
+            config_version="b" * 64,
+            dataset_label="fixture",
+            n=2000,
+            delta_threshold=0.5,
+            manifests=(snapshot,),
+        )
     def test_equal_weight_plan_preserves_order_and_deduplicates_uids(self):
         hotkeys, uids, weights = equal_weight_plan(
             ("new", "old", "same-uid", "gone"),
@@ -83,25 +114,22 @@ class ValidatorRuntimeTests(unittest.TestCase):
 
     def test_policy_requires_durable_version_identities(self):
         with self.assertRaisesRegex(RuntimeError, "TEUTONIC_EVALUATION_POLICY_VERSION"):
-            evaluation_policy_from_env({})
+            evaluation_policy_from_env({}, settings=self._settings())
 
     def test_policy_matches_evaluator_defaults(self):
         policy = evaluation_policy_from_env(
             {
                 "TEUTONIC_EVALUATION_POLICY_VERSION": "paired-bootstrap-v1",
                 "TEUTONIC_EVALUATOR_CODE_VERSION": "release-1",
-                "TEUTONIC_DATASET_VERSION": "data-1",
-                "TEUTONIC_TOKENIZER_VERSION": "tokenizer-1",
                 "TEUTONIC_EVALUATOR_VERSION": "pair-evaluator-v2",
-                "TEUTONIC_DATASET_SOURCE": "s3",
-                "TEUTONIC_DATASET_LABEL": "bundle-1",
-                "TEUTONIC_TOKENIZER_LABEL": "gigatoken-1",
-            }
+            },
+            settings=self._settings(),
         )
-        self.assertEqual(policy.n, 25000)
+        self.assertEqual(policy.n, 2000)
         self.assertEqual(policy.seq_len, 8192)
         self.assertEqual(policy.n_bootstrap, 10000)
-        self.assertEqual(policy.tokenizer_backend, "gigatoken")
+        self.assertEqual(policy.delta_threshold, 0.5)
+        self.assertEqual(policy.dataset_source, "pretokenized_npy")
         self.assertFalse(policy.publish_non_winning_models)
 
 

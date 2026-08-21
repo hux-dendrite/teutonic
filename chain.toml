@@ -48,3 +48,13 @@ tokenizer_repo = "dendriteholdings/teutonic-II-110B-genesis"
 repo_backend = "hf"
 seed_digest = "hf:dbacb5e544b03345ca7b8cc322e74ac08bb0cc36"
 genesis_hotkey = "5E6yHkmZmSpBT5aa2rNZcmeYa1y3N9jw1h7g53oNPzMUpnqG"
+
+[evaluation]
+dataset_label = "cosmopedia-wikihow-stories"
+n = 2000
+delta_threshold = 0.5
+
+[[evaluation.datasets]]
+name = "cosmopedia-wikihow-stories"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/cosmopedia-wikihow-stories/manifest.json"
+proportion = 1.0

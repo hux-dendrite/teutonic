@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from .contracts import canonical_dashboard_json
+from .contracts import canonical_dashboard_json, canonical_dataset_manifest_json
 from .market import select_market
 
 log = logging.getLogger(__name__)
@@ -26,6 +26,7 @@ class DashboardViewService:
     def publish_once(self, *, now: datetime | None = None):
         current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         payload = self.repository.project(now=current)
+        dataset_manifest = self.repository.project_dataset_manifest(now=current)
         previous = self.store.previous_payload()
         prior_market = previous.get("market") if previous else None
         market = None
@@ -40,5 +41,12 @@ class DashboardViewService:
             now=current,
             maximum_stale=self.maximum_market_stale,
         )
+        dataset_result = self.store.publish_dataset_manifest(
+            canonical_dataset_manifest_json(dataset_manifest),
+            config_version=dataset_manifest["config_version"],
+        )
         body = canonical_dashboard_json(payload)
-        return self.store.publish(body, source_watermark=payload["source_watermark"])
+        dashboard_result = self.store.publish(
+            body, source_watermark=payload["source_watermark"]
+        )
+        return dashboard_result, dataset_result

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,7 @@ except ImportError:
     psycopg = None
 
 from teutonic.evaluation import EvaluatorJobNotFoundError, EvaluationRequestV2, result_provenance
+from teutonic.evaluation.configuration import DatasetManifestSnapshot, canonical_manifest_bytes
 from teutonic.validator import (
     EvaluationPolicyConfig,
     SchedulerLockUnavailable,
@@ -24,11 +26,25 @@ NOW = datetime(2026, 8, 18, 12, 0, tzinfo=timezone.utc)
 
 
 def policy(**overrides) -> EvaluationPolicyConfig:
+    manifest = {
+        "shards": [{
+            "key": "shards/part-000.npy",
+            "sha256": "a" * 64,
+            "size_bytes": 16384,
+            "n_tokens": 16384,
+        }]
+    }
+    snapshot = DatasetManifestSnapshot(
+        name="fixture",
+        manifest_url="https://datasets.example/fixture/manifest.json",
+        manifest_sha256=hashlib.sha256(canonical_manifest_bytes(manifest)).hexdigest(),
+        proportion=1.0,
+        manifest=manifest,
+    )
     values = {
         "policy_version": "quasar-paired-v1",
         "code_version": "phase5-test",
-        "dataset_version": "dataset-v1",
-        "tokenizer_version": "tokenizer-v1",
+        "dataset_version": "b" * 64,
         "evaluator_version": "teutonic-evaluator-v2",
         "sampling_seed": 7,
         "bootstrap_seed": 11,
@@ -37,10 +53,9 @@ def policy(**overrides) -> EvaluationPolicyConfig:
         "n_bootstrap": 128,
         "alpha": 0.05,
         "delta_threshold": 0.0015,
-        "dataset_source": "fixture",
+        "dataset_source": "pretokenized_npy",
         "dataset_label": "fixture-v1",
-        "tokenizer_backend": "huggingface",
-        "tokenizer_label": "fixture-tokenizer",
+        "dataset_manifests": (snapshot,),
         "lease": timedelta(minutes=2),
         "retry_base_delay": timedelta(seconds=5),
         "max_attempts": 3,

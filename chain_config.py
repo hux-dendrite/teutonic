@@ -12,6 +12,7 @@ can stay pointed at the live chain.
 from __future__ import annotations
 
 import importlib
+import math
 import os
 import pathlib
 import re
@@ -34,6 +35,7 @@ CONFIG_PATH: pathlib.Path = _TOML_PATH.resolve()
 _chain = _doc.get("chain", {})
 _arch = _doc.get("arch", {})
 _seed = _doc.get("seed", {})
+_evaluation = _doc.get("evaluation", {})
 
 _VALID_SEED_REPO_BACKENDS = {"hf"}
 
@@ -48,6 +50,22 @@ SEED_TOKENIZER_REPO: str = _seed.get("tokenizer_repo", "")
 SEED_DIGEST: str = _seed.get("seed_digest", "")
 SEED_REPO_BACKEND: str = (_seed.get("repo_backend") or "hf").strip().lower()
 SEED_HOTKEY: str = _seed.get("genesis_hotkey", "").strip()
+EVALUATION_DATASET_LABEL: str = str(_evaluation.get("dataset_label") or "").strip()
+EVALUATION_N: int = int(_evaluation.get("n") or 0)
+try:
+    EVALUATION_DELTA_THRESHOLD: float = float(_evaluation.get("delta_threshold"))
+except (TypeError, ValueError) as exc:
+    raise RuntimeError(
+        "chain.toml [evaluation].delta_threshold must be numeric"
+    ) from exc
+EVALUATION_DATASETS: tuple[dict[str, object], ...] = tuple(
+    {
+        "name": str(item.get("name") or "").strip(),
+        "manifest_url": str(item.get("manifest_url") or "").strip(),
+        "proportion": float(item.get("proportion") or 0),
+    }
+    for item in _evaluation.get("datasets", ())
+)
 CHAIN_GENERATION: str = str(_chain.get("generation") or "").strip() or (
     f"{NAME}-{SEED_DIGEST.replace(':', '-')}"
 )
@@ -58,6 +76,28 @@ if SEED_REPO_BACKEND not in _VALID_SEED_REPO_BACKENDS:
     )
 if not SEED_HOTKEY:
     raise RuntimeError("chain.toml [seed].genesis_hotkey is required")
+if not EVALUATION_DATASET_LABEL:
+    raise RuntimeError("chain.toml [evaluation].dataset_label is required")
+if EVALUATION_N < 1:
+    raise RuntimeError("chain.toml [evaluation].n must be positive")
+if not math.isfinite(EVALUATION_DELTA_THRESHOLD) or EVALUATION_DELTA_THRESHOLD < 0:
+    raise RuntimeError("chain.toml [evaluation].delta_threshold must be finite and non-negative")
+if not EVALUATION_DATASETS:
+    raise RuntimeError("chain.toml [[evaluation.datasets]] requires at least one dataset")
+if any(
+    not item["name"]
+    or not str(item["manifest_url"]).startswith("https://")
+    or not 0 < float(item["proportion"]) <= 1
+    for item in EVALUATION_DATASETS
+):
+    raise RuntimeError("chain.toml contains an invalid evaluation dataset")
+if not math.isclose(
+    sum(float(item["proportion"]) for item in EVALUATION_DATASETS),
+    1.0,
+    rel_tol=0.0,
+    abs_tol=1e-9,
+):
+    raise RuntimeError("chain.toml evaluation dataset proportions must sum to 1")
 if not CHAIN_GENERATION or "|" in CHAIN_GENERATION or len(CHAIN_GENERATION) > 128:
     raise RuntimeError("chain.toml produces an invalid chain generation")
 
@@ -88,6 +128,10 @@ __all__ = [
     "EXTRA_LOCK_KEYS",
     "SEED_TOKENIZER_REPO",
     "SEED_DIGEST",
+    "EVALUATION_DATASET_LABEL",
+    "EVALUATION_N",
+    "EVALUATION_DELTA_THRESHOLD",
+    "EVALUATION_DATASETS",
     "SEED_REPO_BACKEND",
     "SEED_HOTKEY",
     "CHAIN_GENERATION",

@@ -160,6 +160,31 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             VALUES (306, 'test', 'quasar') RETURNING competition_id
             """
         ).fetchone()[0]
+        evaluation_config = self.owner.execute(
+            """
+            INSERT INTO control_plane.evaluation_configs (
+                competition_id, config_version, dataset_label, eval_n,
+                delta_threshold, active
+            ) VALUES (%s, %s, 'fixture-datasets', 2000, 0.5, true)
+            RETURNING evaluation_config_id
+            """,
+            (competition, "7" * 64),
+        ).fetchone()[0]
+        self.owner.execute(
+            """
+            INSERT INTO control_plane.dataset_manifests (
+                evaluation_config_id, "position", name, manifest_url,
+                manifest_sha256, manifest_json, sample_proportion
+            ) VALUES (%s, 0, 'fixture', 'https://datasets.example/fixture/manifest.json',
+                      %s, %s::jsonb, 1.0)
+            """,
+            (
+                evaluation_config,
+                "8" * 64,
+                '{"shards":[{"key":"shards/part-000.npy","sha256":"' + "9" * 64
+                + '","size_bytes":4096,"n_tokens":4096}]}',
+            ),
+        )
         reign = self.owner.execute(
             """
             INSERT INTO control_plane.king_reigns (
@@ -178,11 +203,11 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             """
             INSERT INTO control_plane.evaluations (
                 upload_id, competition_id, attempt_number, claimed_king_reign_id,
-                state, policy_version, code_version, dataset_version, tokenizer_version,
+                state, policy_version, code_version, dataset_version,
                 sampling_seed, bootstrap_seed, thresholds, verdict, verdict_summary,
                 private_diagnostic_reference, result_artifact_reference, completed_at
             ) VALUES (%s, %s, 1, %s, 'completed', 'policy-v1', 'code-v1', 'dataset-v1',
-                      'tokenizer-v1', 1, 2, '{}'::jsonb, 'rejected',
+                      1, 2, '{}'::jsonb, 'rejected',
                       %s::jsonb, 'traceback:http://validator-internal:9000 secret_access_key',
                       's3://DO-NOT-LEAK/results.json', %s)
             RETURNING evaluation_id
@@ -490,6 +515,7 @@ class DashboardViewIntegrationTests(unittest.TestCase):
                 "dashboard_contract",
                 "dashboard_current_evaluation",
                 "dashboard_current_king",
+                "dashboard_dataset_manifests",
                 "dashboard_evaluation_history",
                 "dashboard_king_reigns",
                 "dashboard_queue",
@@ -502,6 +528,14 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             self.dashboard.execute("SELECT * FROM control_plane.evaluations").fetchall()
         with self.assertRaises(errors.InsufficientPrivilege):
             self.dashboard.execute("SELECT * FROM control_plane.r2_parent_tokens").fetchall()
+
+    def test_global_dataset_manifest_is_projected_from_active_postgres_config(self):
+        manifest = self.repository.project_dataset_manifest(now=NOW)
+        self.assertEqual(manifest["config_version"], "7" * 64)
+        self.assertEqual(manifest["eval_n"], 2000)
+        self.assertEqual(manifest["delta_threshold"], 0.5)
+        self.assertEqual(manifest["sources"][0]["name"], "fixture")
+        self.assertIn("shards", manifest["sources"][0]["manifest"])
 
 
 if __name__ == "__main__":

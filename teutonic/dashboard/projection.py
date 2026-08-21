@@ -184,6 +184,50 @@ class DashboardProjectionRepository:
         }
         return payload
 
+    def project_dataset_manifest(self, *, now: datetime | None = None) -> dict[str, Any]:
+        if not self._lock_held:
+            raise DashboardProjectionError("dashboard publisher lock is not held")
+        del now
+        with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            rows = cursor.execute(
+                _scope_sql("dashboard_dataset_manifests") + ' ORDER BY "position"',
+                self._scope,
+            ).fetchall()
+        if not rows:
+            raise DashboardProjectionError("competition has no active dataset manifest")
+        first = rows[0]
+        if any(row["config_version"] != first["config_version"] for row in rows):
+            raise DashboardProjectionError("multiple evaluation configs in dataset snapshot")
+        return {
+            "schema_version": 1,
+            "generated_at": _iso(first["config_created_at"]),
+            "chain": {
+                "name": self.chain_name,
+                "netuid": self.netuid,
+                "generation": self.chain_generation,
+                "competition": self.competition,
+            },
+            "config_version": str(first["config_version"]),
+            "dataset_label": str(first["dataset_label"]),
+            "eval_n": int(first["eval_n"]),
+            "delta_threshold": float(first["delta_threshold"]),
+            "sampling": {
+                "algorithm": "blake2b-64-block-hash-hotkey-v1",
+                "inputs": ["block_hash", "hotkey"],
+            },
+            "sources": [
+                {
+                    "name": str(row["name"]),
+                    "proportion": float(row["sample_proportion"]),
+                    "manifest_url": str(row["manifest_url"]),
+                    "manifest_sha256": str(row["manifest_sha256"]),
+                    "manifest": row["manifest_json"],
+                }
+                for row in rows
+            ],
+        }
+
     @staticmethod
     def _identity(row) -> dict[str, Any]:
         return {"hotkey": row["hotkey"], "coldkey": row["coldkey"], "uid": int(row["uid"])}

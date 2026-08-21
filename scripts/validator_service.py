@@ -95,7 +95,6 @@ async def run(*, once: bool) -> int:
         "TEUTONIC_VALIDATOR_INSTANCE_ID",
         os.environ.get("TEUTONIC_INSTANCE_ID", f"{socket.gethostname()}-{os.getpid()}"),
     )
-    policy = evaluation_policy_from_env()
     buckets = BucketNames.from_env()
     poll_seconds = float(os.environ.get("TEUTONIC_VALIDATOR_POLL_SECONDS", "12"))
     heartbeat_seconds = float(os.environ.get("TEUTONIC_HEARTBEAT_SECONDS", "30"))
@@ -121,6 +120,14 @@ async def run(*, once: bool) -> int:
             public_model_bucket=buckets.public_models,
         )
         repository.acquire_lock()
+        policy = evaluation_policy_from_env(settings=repository.load_evaluation_settings())
+        log.info(
+            "loaded evaluation config dataset=%s n=%d delta=%s manifests=%d",
+            policy.dataset_version,
+            policy.n,
+            policy.delta_threshold,
+            len(policy.dataset_manifests),
+        )
         chain = BittensorFinalizedMetagraphReader(network=network, netuid=netuid)
         coordinator = CrownCoordinator(
             repository,

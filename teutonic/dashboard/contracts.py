@@ -58,3 +58,37 @@ def canonical_dashboard_json(payload: Mapping[str, Any]) -> bytes:
         return text.encode("utf-8", errors="strict")
     except (UnicodeError, ValueError) as exc:
         raise DashboardContractError("dashboard cannot be serialized as strict UTF-8 JSON") from exc
+
+
+def canonical_dataset_manifest_json(payload: Mapping[str, Any]) -> bytes:
+    _reject_non_finite(payload)
+    required = {
+        "schema_version",
+        "generated_at",
+        "chain",
+        "config_version",
+        "dataset_label",
+        "eval_n",
+        "delta_threshold",
+        "sampling",
+        "sources",
+    }
+    if set(payload) != required:
+        raise DashboardContractError("global dataset manifest has invalid top-level fields")
+    if payload.get("schema_version") != 1:
+        raise DashboardContractError("global dataset manifest schema_version must be 1")
+    sources = payload.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise DashboardContractError("global dataset manifest needs at least one source")
+    try:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8", errors="strict")
+    except (UnicodeError, ValueError) as exc:
+        raise DashboardContractError(
+            "global dataset manifest cannot be serialized as strict UTF-8 JSON"
+        ) from exc
