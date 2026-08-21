@@ -60,7 +60,7 @@ def model_digest_from_inventory(files: list[tuple[str, int, str]]) -> str:
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
+        while chunk := source.read(8 * 1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -80,11 +80,15 @@ def snapshot_digest(snapshot: str | Path) -> str:
     )
     if not files:
         raise ArtifactIntegrityError("immutable model snapshot contains no model files")
-    inventory: list[tuple[str, int, str]] = []
-    for path in files:
+    def inventory_entry(path: Path) -> tuple[str, int, str]:
         relative = path.relative_to(root).as_posix()
-        file_digest = sha256_file(path)
-        inventory.append((relative, path.stat().st_size, file_digest))
+        return relative, path.stat().st_size, sha256_file(path)
+
+    # hashlib releases the GIL. Hash independent model shards concurrently,
+    # then restore path ordering in model_digest_from_inventory so the final
+    # artifact identity remains byte-for-byte deterministic.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(files))) as executor:
+        inventory = list(executor.map(inventory_entry, files))
     return model_digest_from_inventory(inventory)
 
 

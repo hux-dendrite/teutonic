@@ -53,6 +53,17 @@ def test_eager_mimo_schedule_is_resolved_in_layer_order():
     ]
 
 
+def test_mimo_schedule_is_derived_before_model_sets_layer_types():
+    config = mimo_config()
+    del config.layer_types
+    assert resolved_attention_types(config) == [
+        "full_attention",
+        "sliding_window_attention",
+        "sliding_window_attention",
+        "full_attention",
+    ]
+
+
 def test_non_eager_or_malformed_hybrid_config_is_rejected():
     with pytest.raises(RuntimeError, match="requires eager"):
         resolved_attention_types(mimo_config(_attn_implementation="sdpa"))

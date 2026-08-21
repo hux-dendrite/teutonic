@@ -435,19 +435,24 @@ def resolved_attention_types(config) -> list[str]:
         "sliding_window_attention" if value == 1 else "full_attention"
         for value in pattern
     ]
-    if len(declared) != n_layers:
-        raise RuntimeError(f"layer_types has {len(declared)} entries for {n_layers} surviving layers")
-    normalized_declared = [
-        "sliding_window_attention" if value == "sliding_attention" else value
-        for value in declared
-    ]
-    if normalized_declared != resolved:
-        mismatches = [
-            {"layer": idx, "declared": got, "resolved": want}
-            for idx, (got, want) in enumerate(zip(normalized_declared, resolved))
-            if got != want
+    if declared:
+        if len(declared) != n_layers:
+            raise RuntimeError(
+                f"layer_types has {len(declared)} entries for {n_layers} surviving layers"
+            )
+        normalized_declared = [
+            "sliding_window_attention" if value == "sliding_attention" else value
+            for value in declared
         ]
-        raise RuntimeError(f"layer_types do not match hybrid_layer_pattern: {mismatches[:8]}")
+        if normalized_declared != resolved:
+            mismatches = [
+                {"layer": idx, "declared": got, "resolved": want}
+                for idx, (got, want) in enumerate(zip(normalized_declared, resolved))
+                if got != want
+            ]
+            raise RuntimeError(
+                f"layer_types do not match hybrid_layer_pattern: {mismatches[:8]}"
+            )
     if int(getattr(config, "sliding_window", 0) or 0) != 128:
         raise RuntimeError(f"MiMo sliding_window must be 128, got {config.sliding_window!r}")
     if int(getattr(config, "sliding_window_size", 0) or 0) != 128:
@@ -469,7 +474,7 @@ def validate_and_report_attention_config(config, label: str, on_phase=None) -> d
             "model_type": config.model_type,
             "num_hidden_layers": config.num_hidden_layers,
             "hybrid_layer_pattern": config.hybrid_layer_pattern,
-            "layer_types": config.layer_types,
+            "layer_types": resolved_attention_types(config),
             "sliding_window": config.sliding_window,
             "sliding_window_size": config.sliding_window_size,
             "add_swa_attention_sink_bias": config.add_swa_attention_sink_bias,
