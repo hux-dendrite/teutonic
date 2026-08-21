@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from collections.abc import Callable, Mapping
@@ -90,8 +91,19 @@ class RclonePromotionExecutor:
         return f"{self.remote}:{bucket}/{normalized}/"
 
     def _run(self, command: list[str], *, heartbeat: Callable[[], None] | None) -> None:
+        environment = os.environ.copy()
+        # boto3 needs the validator host's private CA bundle, but rclone's S3
+        # backend cannot combine AWS_CA_BUNDLE with its wrapped HTTP transport.
+        # Keep the override scoped to rclone instead of changing the worker.
+        environment.pop("AWS_CA_BUNDLE", None)
         if self.runner is not None:
-            result = self.runner(command, check=False, text=True, capture_output=True)
+            result = self.runner(
+                command,
+                check=False,
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
             if heartbeat is not None:
                 heartbeat()
             return_code = result.returncode
@@ -101,6 +113,7 @@ class RclonePromotionExecutor:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                env=environment,
             )
             while True:
                 try:

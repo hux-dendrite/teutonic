@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import unittest
+from unittest.mock import patch
 
 from teutonic.promotion import (
     ObservedObject,
@@ -84,6 +86,23 @@ class PromotionStorageTests(unittest.TestCase):
         self.assertIn("--metadata", copy)
         self.assertNotIn("move", copy)
         self.assertEqual(commands[1][0][0:2], ["rclone", "delete"])
+
+    def test_rclone_does_not_inherit_boto_custom_ca_bundle(self) -> None:
+        calls = []
+
+        def runner(command, **kwargs):
+            calls.append((command, kwargs))
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch.dict(os.environ, {"AWS_CA_BUNDLE": "/validator/private-ca.pem"}):
+            RclonePromotionExecutor("r2", runner=runner).copy(
+                source_bucket="private-models",
+                source_prefix="models/registrations/registration-id/",
+                destination_bucket="public-models",
+                destination_prefix="models/sha256/" + "a" * 64 + "/",
+            )
+
+        self.assertNotIn("AWS_CA_BUNDLE", calls[0][1]["env"])
 
     def test_rclone_paths_reject_remote_or_prefix_escape(self) -> None:
         with self.assertRaises(ValueError):
