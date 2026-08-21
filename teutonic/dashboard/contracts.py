@@ -80,7 +80,20 @@ def canonical_dataset_manifest_json(payload: Mapping[str, Any]) -> bytes:
     sources = payload.get("sources")
     if not isinstance(sources, list) or not sources:
         raise DashboardContractError("global dataset manifest needs at least one source")
-    source_fields = {"name", "proportion", "manifest_url", "manifest_sha256"}
+    source_fields = {
+        "name",
+        "proportion",
+        "manifest_url",
+        "manifest_sha256",
+        "source_repo",
+        "tokenizer",
+        "dtype",
+        "tokenization_mode",
+        "sequence_length",
+        "total_tokens",
+        "total_shards",
+        "estimated_sequences",
+    }
     for source in sources:
         if not isinstance(source, Mapping) or set(source) != source_fields:
             raise DashboardContractError(
@@ -112,6 +125,26 @@ def canonical_dataset_manifest_json(payload: Mapping[str, Any]) -> bytes:
             raise DashboardContractError(
                 "global dataset manifest source digest must be lowercase SHA-256"
             )
+        for field in ("source_repo", "tokenizer", "dtype", "tokenization_mode"):
+            value = source[field]
+            if value is not None and (not isinstance(value, str) or not value):
+                raise DashboardContractError(
+                    f"global dataset manifest source {field} must be text or null"
+                )
+        for field in ("sequence_length", "estimated_sequences"):
+            value = source[field]
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise DashboardContractError(
+                    f"global dataset manifest source {field} must be positive or null"
+                )
+        for field in ("total_tokens", "total_shards"):
+            value = source[field]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise DashboardContractError(
+                    f"global dataset manifest source {field} must be positive"
+                )
     try:
         return json.dumps(
             payload,

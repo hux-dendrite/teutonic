@@ -1,6 +1,6 @@
 // Cloudflare Worker bound to teutonic.ai and www.teutonic.ai.
-// Reverse-proxies every request to the Cloudflare R2 bucket where the
-// validator writes dashboard.json and where the dashboard html lives.
+// Reverse-proxies dashboard assets to their Cloudflare R2 bucket. The dataset
+// manifest route is resolved from the active dashboard bucket.
 //
 // Account: 00523074f51300584834607253cae0fa
 // Zone:    1075a976f65a8acdfeb5109615bb5906 (teutonic.ai)
@@ -12,6 +12,8 @@
 // state is never hidden by stale browser or intermediary responses.
 
 const ORIGIN = "https://pub-e2009eec1ca9488699de6263f40bb7e7.r2.dev";
+const DATASET_ORIGIN = "https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev";
+const DATASET_MANIFEST_PATH = "/datasets/manifest.json";
 
 // Content types that drive the live dashboard. These must always reflect
 // the current bytes in the bucket, so we disable every layer of caching.
@@ -33,10 +35,19 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname === "" || url.pathname === "/" ? "/index.html" : url.pathname;
 
+    if (path === DATASET_MANIFEST_PATH && request.method !== "GET" && request.method !== "HEAD") {
+      return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
+    }
+
     const headers = new Headers(request.headers);
     for (const h of REQ_STRIP) headers.delete(h);
 
-    const target = ORIGIN + path + (url.search || "");
+    let target;
+    if (path === DATASET_MANIFEST_PATH) {
+      target = DATASET_ORIGIN + DATASET_MANIFEST_PATH + (url.search || "");
+    } else {
+      target = ORIGIN + path + (url.search || "");
+    }
     const upstream = await fetch(target, {
       method: request.method,
       headers,

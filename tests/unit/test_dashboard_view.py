@@ -112,6 +112,14 @@ def dataset_manifest() -> dict:
             "proportion": 1.0,
             "manifest_url": "https://datasets.example/fixture/manifest.json",
             "manifest_sha256": "b" * 64,
+            "source_repo": "owner/dataset",
+            "tokenizer": "owner/tokenizer",
+            "dtype": "uint32",
+            "tokenization_mode": "seq_packed_shards",
+            "sequence_length": 2048,
+            "total_tokens": 2_048_000,
+            "total_shards": 4,
+            "estimated_sequences": 1000,
         }],
     }
 
@@ -156,8 +164,10 @@ class DashboardContractTests(unittest.TestCase):
         body = canonical_dataset_manifest_json(dataset_manifest())
         parsed = json.loads(body)
         self.assertEqual(parsed["eval_n"], 2000)
+        self.assertEqual(parsed["sources"][0]["total_tokens"], 2_048_000)
+        self.assertEqual(parsed["sources"][0]["estimated_sequences"], 1000)
         self.assertNotIn("manifest", parsed["sources"][0])
-        self.assertNotIn("shards", body.decode())
+        self.assertNotIn("shards", parsed["sources"][0])
         invalid = dataset_manifest()
         invalid["private_credentials"] = "never"
         with self.assertRaises(DashboardContractError):

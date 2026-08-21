@@ -1,8 +1,10 @@
 (function () {
   "use strict";
   var ENDPOINT = "/dashboard.json";
+  var DATASET_MANIFEST_URL = "https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev/datasets/manifest.json";
   var MODEL_STORAGE_BASE = "https://pub-0821d4e196224864af220294345fd141.r2.dev/";
   var POLL_MS = 15000;
+  var DATASET_POLL_MS = 60000;
   var lastPayload = null;
   var smoothMode = localStorage.getItem("smoothMode") || "lowess";
   if (smoothMode !== "lowess" && smoothMode !== "normal") smoothMode = "lowess";
@@ -23,6 +25,64 @@
   function ema(values, alpha) { if (alpha >= 1 || !values.length) return values.slice(); var output = [values[0]]; for (var i = 1; i < values.length; i++) output.push(alpha * values[i] + (1 - alpha) * output[i - 1]); return output; }
   function lowess(values, strength) { var n = values.length; if (n < 3 || strength <= 0) return values.slice(); var span = Math.min(n, Math.max(3, Math.ceil(n * (.12 + strength * .58)))), output = []; for (var i = 0; i < n; i++) { var distances = []; for (var j = 0; j < n; j++) distances.push({ index: j, distance: Math.abs(j - i) }); distances.sort(function (a, b) { return a.distance - b.distance; }); var bandwidth = distances[span - 1].distance || 1, sw = 0, swx = 0, swy = 0, swxx = 0, swxy = 0; for (var k = 0; k < span; k++) { var index = distances[k].index, u = distances[k].distance / bandwidth, weight = Math.pow(1 - Math.pow(u, 3), 3), xValue = index, yValue = values[index]; sw += weight; swx += weight * xValue; swy += weight * yValue; swxx += weight * xValue * xValue; swxy += weight * xValue * yValue; } var denominator = sw * swxx - swx * swx; output.push(Math.abs(denominator) < 1e-12 || sw === 0 ? (sw ? swy / sw : values[i]) : (swy - ((sw * swxy - swx * swy) / denominator) * swx) / sw + ((sw * swxy - swx * swy) / denominator) * i); } return output; }
   function smoothSeries(values, amount) { if (amount <= 0) return values.slice(); return smoothMode === "normal" ? ema(values, 1 / (1 + amount * 20)) : lowess(values, amount); }
+
+  function compactNumber(value) {
+    var n = finite(value); if (n == null) return "--";
+    var abs = Math.abs(n), units = [{ value: 1e12, suffix: "T" }, { value: 1e9, suffix: "B" }, { value: 1e6, suffix: "M" }, { value: 1e3, suffix: "K" }];
+    for (var i = 0; i < units.length; i++) { if (abs >= units[i].value) { var scaled = n / units[i].value; return scaled.toFixed(Math.abs(scaled) >= 100 ? 0 : 2).replace(/\.00$/, "") + units[i].suffix; } }
+    return number(n);
+  }
+  function datasetWeight(value) { var n = finite(value); if (n == null) return "--"; var pct = n * 100; return (Math.abs(pct - Math.round(pct)) < .05 ? String(Math.round(pct)) : pct.toFixed(1)) + "%"; }
+  function smallPercent(value) { var n = finite(value); if (n == null) return "--"; if (n === 0) return "0%"; if (Math.abs(n) < .01) return n.toPrecision(2) + "%"; return (Math.abs(n) >= 10 ? n.toFixed(1) : n.toFixed(3)).replace(/0+$/, "").replace(/\.$/, "") + "%"; }
+  function datasetCell(row, value, subtext, href) {
+    var td = document.createElement("td"), main;
+    if (href) { main = document.createElement("a"); main.href = href; main.target = "_blank"; main.rel = "noopener"; main.textContent = value || "--"; td.appendChild(main); }
+    else td.textContent = value || "--";
+    if (subtext) { var sub = document.createElement("span"); sub.className = "dataset-sub"; sub.textContent = subtext; td.appendChild(sub); }
+    row.appendChild(td);
+  }
+  async function fetchJson(url) {
+    var separator = url.indexOf("?") === -1 ? "?" : "&";
+    var response = await fetch(url + separator + "t=" + Date.now(), { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    return response.json();
+  }
+  async function fetchFirstJson(urls) {
+    var lastError;
+    for (var i = 0; i < urls.length; i++) { try { return await fetchJson(urls[i]); } catch (error) { lastError = error; } }
+    throw lastError || new Error("no manifest endpoint available");
+  }
+  function renderDatasetManifest(manifest) {
+    var view = TeutonicDashboardV1.datasetPresentation(manifest), summary = [view.rows.length + (view.rows.length === 1 ? " DATASET" : " DATASETS")];
+    if (view.totalTokens) summary.push(compactNumber(view.totalTokens) + " TOKENS");
+    if (view.totalShards) summary.push(number(view.totalShards) + " SHARDS");
+    if (view.sequenceLength) summary.push("SEQ LEN " + number(view.sequenceLength));
+    if (view.totalSequences) summary.push(compactNumber(view.totalSequences) + " POSSIBLE SEQ");
+    if (view.evalN) summary.push("EVAL SAMPLE " + number(view.evalN) + " SEQ" + (view.evalTokens ? " / " + compactNumber(view.evalTokens) + " TOKENS" : ""));
+    if (view.tokenizer) summary.push(view.tokenizer);
+    text("dataset-summary", summary.join(" · "));
+    var body = el("dataset-sources"); clear(body);
+    if (!view.rows.length) return emptyRow(body, 6, "NO DATASETS IN MANIFEST");
+    view.rows.forEach(function (source) {
+      var tr = document.createElement("tr");
+      datasetCell(tr, source.name, source.metadataLoaded ? source.tokenizationMode : "METADATA UNAVAILABLE", source.manifestUrl);
+      datasetCell(tr, datasetWeight(source.weight), "NORMALIZED " + datasetWeight(source.normalizedWeight));
+      datasetCell(tr, source.totalTokens ? compactNumber(source.totalTokens) : "--", source.totalShards ? number(source.totalShards) + " SHARDS" : "");
+      datasetCell(tr, source.sequences ? compactNumber(source.sequences) : "--", source.sequenceLength ? "LEN " + number(source.sequenceLength) : "");
+      datasetCell(tr, source.evalSequences ? number(source.evalSequences) + " SEQ" : "--", source.evalTokens ? compactNumber(source.evalTokens) + " TOKENS · " + smallPercent(source.sampleRate) + " SAMPLED" : "");
+      datasetCell(tr, source.source || "--", [source.tokenizer, source.dtype].filter(Boolean).join(" · "));
+      body.appendChild(tr);
+    });
+  }
+  async function loadDatasetManifest() {
+    try {
+      var manifest = await fetchFirstJson(["/datasets/manifest.json", DATASET_MANIFEST_URL]);
+      renderDatasetManifest(manifest);
+    } catch (error) {
+      text("dataset-summary", "MANIFEST UNAVAILABLE · USE THE MANIFEST LINK");
+      emptyRow(el("dataset-sources"), 6, "DATASET MANIFEST COULD NOT BE LOADED");
+    }
+  }
 
   function renderHeader(d) {
     var chain = d.chain || {};
@@ -101,4 +161,5 @@
   smoothSlider.addEventListener("input", function () { localStorage.setItem("smoothing", smoothSlider.value); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
   el("smooth-mode-toggle").addEventListener("click", function () { smoothMode = smoothMode === "lowess" ? "normal" : "lowess"; localStorage.setItem("smoothMode", smoothMode); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
   poll(); setInterval(poll, POLL_MS);
+  loadDatasetManifest(); setInterval(loadDatasetManifest, DATASET_POLL_MS);
 })();

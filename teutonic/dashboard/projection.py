@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from psycopg.rows import dict_row
 
@@ -59,6 +59,51 @@ def _bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).lower() in {"1", "true", "yes"}
+
+
+def _dataset_source(row: Mapping[str, Any]) -> dict[str, Any]:
+    manifest = row.get("manifest_json")
+    if not isinstance(manifest, Mapping):
+        raise DashboardProjectionError("dataset manifest metadata is not an object")
+    shards = manifest.get("shards")
+    if not isinstance(shards, list) or not shards:
+        raise DashboardProjectionError("dataset manifest metadata has no shards")
+    total_tokens = _int(manifest.get("total_tokens"))
+    if total_tokens is None:
+        shard_tokens = [
+            _int(shard.get("n_tokens")) if isinstance(shard, Mapping) else None
+            for shard in shards
+        ]
+        if any(value is None for value in shard_tokens):
+            raise DashboardProjectionError("dataset manifest has invalid shard token counts")
+        total_tokens = sum(value for value in shard_tokens if value is not None)
+    total_shards = _int(manifest.get("total_shards"))
+    if total_shards is None:
+        total_shards = len(shards)
+    sequence_length = _int(manifest.get("seq_len") or manifest.get("sequence_length"))
+    estimated_sequences = total_tokens // sequence_length if sequence_length else None
+
+    def optional_text(*names: str) -> str | None:
+        for name in names:
+            value = manifest.get(name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    return {
+        "name": str(row["name"]),
+        "proportion": float(row["sample_proportion"]),
+        "manifest_url": str(row["manifest_url"]),
+        "manifest_sha256": str(row["manifest_sha256"]),
+        "source_repo": optional_text("source_repo", "source"),
+        "tokenizer": optional_text("tokenizer"),
+        "dtype": optional_text("dtype"),
+        "tokenization_mode": optional_text("tokenization_mode"),
+        "sequence_length": sequence_length,
+        "total_tokens": total_tokens,
+        "total_shards": total_shards,
+        "estimated_sequences": estimated_sequences,
+    }
 
 
 def _scope_sql(view: str) -> str:
@@ -217,12 +262,7 @@ class DashboardProjectionRepository:
                 "inputs": ["block_hash", "hotkey"],
             },
             "sources": [
-                {
-                    "name": str(row["name"]),
-                    "proportion": float(row["sample_proportion"]),
-                    "manifest_url": str(row["manifest_url"]),
-                    "manifest_sha256": str(row["manifest_sha256"]),
-                }
+                _dataset_source(row)
                 for row in rows
             ],
         }

@@ -535,9 +535,25 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         self.assertEqual(manifest["eval_n"], 2000)
         self.assertEqual(manifest["delta_threshold"], 0.5)
         self.assertEqual(manifest["sources"][0]["name"], "fixture")
+        self.assertEqual(manifest["sources"][0]["total_tokens"], 4096)
+        self.assertEqual(manifest["sources"][0]["total_shards"], 1)
+        self.assertIsNone(manifest["sources"][0]["sequence_length"])
         self.assertEqual(
             set(manifest["sources"][0]),
-            {"name", "proportion", "manifest_url", "manifest_sha256"},
+            {
+                "name",
+                "proportion",
+                "manifest_url",
+                "manifest_sha256",
+                "source_repo",
+                "tokenizer",
+                "dtype",
+                "tokenization_mode",
+                "sequence_length",
+                "total_tokens",
+                "total_shards",
+                "estimated_sequences",
+            },
         )
 
 

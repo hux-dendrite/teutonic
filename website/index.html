@@ -25,6 +25,19 @@
         <span id="generation">GENERATION --</span>
         <span id="published-at">PUBLISHED --</span>
       </div>
+      <div class="dataset-panel" id="dataset-panel">
+        <div class="dataset-panel-head">
+          <h2>DATASET MIX</h2>
+          <a id="dataset-manifest-link" href="https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev/datasets/manifest.json" target="_blank" rel="noopener">MANIFEST</a>
+        </div>
+        <p class="dataset-overview" id="dataset-summary" aria-live="polite">LOADING DATASET MANIFEST...</p>
+        <div class="dataset-table-wrap">
+          <table class="dataset-table">
+            <thead><tr><th>DATASET</th><th>WEIGHT</th><th>TOKENS</th><th>SEQ @ LEN</th><th>EVAL DRAW</th><th>SOURCE</th></tr></thead>
+            <tbody id="dataset-sources"><tr><td colspan="6" class="dataset-loading">LOADING...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <div id="error-banner" class="error-banner" role="alert" hidden></div>

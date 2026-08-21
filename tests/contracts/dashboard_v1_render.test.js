@@ -65,4 +65,33 @@ assert.strictEqual(dashboard.presentation(staleMarketPayload).marketStale, true)
 const invalid = base();
 invalid.schema_version = 2;
 assert.throws(() => dashboard.presentation(invalid), /unsupported dashboard schema/);
+
+const datasetManifest = {
+    schema_version: 1,
+    dataset_label: "fixture-mix",
+    eval_n: 300,
+    sources: [{
+        name: "fixture",
+        proportion: 1,
+        manifest_url: "https://datasets.example/fixture/manifest.json",
+        manifest_sha256: "b".repeat(64),
+        source_repo: "owner/dataset",
+        tokenizer: "owner/tokenizer",
+        dtype: "uint32",
+        tokenization_mode: "seq_packed_shards",
+        sequence_length: 2048,
+        total_tokens: 2_048_000,
+        total_shards: 4,
+        estimated_sequences: 1000
+    }]
+};
+const dataset = dashboard.datasetPresentation(datasetManifest);
+assert.strictEqual(dataset.rows.length, 1);
+assert.strictEqual(dataset.totalTokens, 2_048_000);
+assert.strictEqual(dataset.totalSequences, 1000);
+assert.strictEqual(dataset.evalTokens, 614_400);
+assert.strictEqual(dataset.rows[0].normalizedWeight, 1);
+assert.strictEqual(dataset.rows[0].source, "owner/dataset");
+assert.strictEqual(dataset.rows[0].metadataLoaded, true);
+assert.throws(() => dashboard.datasetPresentation({}, {}), /sources must be an array/);
 console.log("dashboard-v1 representative render states passed");
