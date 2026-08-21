@@ -1,12 +1,12 @@
-# Teutonic MiMo V2.5 Pro — 104B/64-expert top-4 custom Transformers model.
+# Teutonic II — 110B/256-expert top-8 custom Transformers model.
 #
 # MiMo snapshots are self-contained and ship configuration_mimo_v2.py plus
 # modeling_mimo_v2.py. The validator permits only those exact files and
 # requires a challenger's copies to hash-match the current king.
 [chain]
-name = "mimo-v2.5-pro"
-seed_repo = "dendriteholdings/mimo-v2.5-pro-104b-64e-w1024-top4"
-repo_pattern = "^[^/]+/mimo-v2\\.5-pro-.+$"
+name = "teutonic-II-110B"
+seed_repo = "dendriteholdings/teutonic-II-110B-genesis"
+repo_pattern = "^[^/]+/teutonic-II-110B-.+$"
 
 [arch]
 module = "teutonic.archs.mimo"
@@ -44,7 +44,7 @@ extra_lock_keys = [
 ]
 
 [seed]
-tokenizer_repo = "dendriteholdings/mimo-v2.5-pro-104b-64e-w1024-top4"
+tokenizer_repo = "dendriteholdings/teutonic-II-110B-genesis"
 repo_backend = "hf"
-seed_digest = "hf:56fc5b83784cb00a32c3f59e5ef92b9b58a7d7a9"
+seed_digest = "hf:dbacb5e544b03345ca7b8cc322e74ac08bb0cc36"
 genesis_hotkey = "5E6yHkmZmSpBT5aa2rNZcmeYa1y3N9jw1h7g53oNPzMUpnqG"

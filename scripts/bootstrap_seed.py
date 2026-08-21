@@ -92,7 +92,8 @@ def main() -> int:
 
     log.info("verifying Hugging Face seed %s@%s", chain_config.SEED_REPO, chain_config.SEED_DIGEST)
     artifact = HuggingFaceSeed(
-        token=os.environ.get("HF_TOKEN"), max_workers=args.download_workers
+        token=os.environ.get("HF_TOKEN") or os.environ.get("HF_API_TOKEN"),
+        max_workers=args.download_workers,
     ).materialize(
         repo_id=chain_config.SEED_REPO,
         seed_digest=chain_config.SEED_DIGEST,
