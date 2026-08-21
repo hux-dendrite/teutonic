@@ -47,7 +47,7 @@ def evaluation_policy_from_env(
         sampling_seed=0,
         bootstrap_seed=int(env.get("TEUTONIC_EVAL_BOOTSTRAP_SEED", "0")),
         n=settings.n,
-        seq_len=int(env.get("TEUTONIC_EVAL_SEQ_LEN", "8192")),
+        seq_len=int(env.get("TEUTONIC_EVAL_SEQ_LEN", "2048")),
         n_bootstrap=int(env.get("TEUTONIC_EVAL_BOOTSTRAP_B", "10000")),
         alpha=float(env.get("TEUTONIC_EVAL_ALPHA", "0.001")),
         delta_threshold=settings.delta_threshold,

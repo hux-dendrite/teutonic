@@ -110,7 +110,7 @@ def test_eval_request_fixes_reference_runtime_settings():
     assert request.batch_size == 1
     assert request.parallel_batch_size == 1
     assert request.parallel_models is True
-    assert request.seq_len == 8192
+    assert request.seq_len == 2048
     assert request.lm_head_chunk == 1024
 
 

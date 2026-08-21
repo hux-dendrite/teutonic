@@ -126,7 +126,7 @@ class ValidatorRuntimeTests(unittest.TestCase):
             settings=self._settings(),
         )
         self.assertEqual(policy.n, 2000)
-        self.assertEqual(policy.seq_len, 8192)
+        self.assertEqual(policy.seq_len, 2048)
         self.assertEqual(policy.n_bootstrap, 10000)
         self.assertEqual(policy.delta_threshold, 0.5)
         self.assertEqual(policy.dataset_source, "pretokenized_npy")
