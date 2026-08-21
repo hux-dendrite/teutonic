@@ -112,7 +112,6 @@ def dataset_manifest() -> dict:
             "proportion": 1.0,
             "manifest_url": "https://datasets.example/fixture/manifest.json",
             "manifest_sha256": "b" * 64,
-            "manifest": {"shards": []},
         }],
     }
 
@@ -155,9 +154,16 @@ class DashboardContractTests(unittest.TestCase):
 
     def test_global_dataset_manifest_is_canonical_and_strict(self):
         body = canonical_dataset_manifest_json(dataset_manifest())
-        self.assertEqual(json.loads(body)["eval_n"], 2000)
+        parsed = json.loads(body)
+        self.assertEqual(parsed["eval_n"], 2000)
+        self.assertNotIn("manifest", parsed["sources"][0])
+        self.assertNotIn("shards", body.decode())
         invalid = dataset_manifest()
         invalid["private_credentials"] = "never"
+        with self.assertRaises(DashboardContractError):
+            canonical_dataset_manifest_json(invalid)
+        invalid = dataset_manifest()
+        invalid["sources"][0]["manifest"] = {"shards": []}
         with self.assertRaises(DashboardContractError):
             canonical_dataset_manifest_json(invalid)
 

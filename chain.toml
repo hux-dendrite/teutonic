@@ -59,7 +59,7 @@ genesis_hotkey = "5E6yHkmZmSpBT5aa2rNZcmeYa1y3N9jw1h7g53oNPzMUpnqG"
 
 [evaluation]
 dataset_label = "cosmopedia-wikihow-stories"
-n = 2000
+n = 300
 delta_threshold = 0.5
 
 [[evaluation.datasets]]

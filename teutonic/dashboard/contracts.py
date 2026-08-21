@@ -80,6 +80,38 @@ def canonical_dataset_manifest_json(payload: Mapping[str, Any]) -> bytes:
     sources = payload.get("sources")
     if not isinstance(sources, list) or not sources:
         raise DashboardContractError("global dataset manifest needs at least one source")
+    source_fields = {"name", "proportion", "manifest_url", "manifest_sha256"}
+    for source in sources:
+        if not isinstance(source, Mapping) or set(source) != source_fields:
+            raise DashboardContractError(
+                "global dataset manifest source has invalid fields"
+            )
+        if not isinstance(source["name"], str) or not source["name"]:
+            raise DashboardContractError("global dataset manifest source needs a name")
+        proportion = source["proportion"]
+        if not isinstance(proportion, (int, float)) or isinstance(proportion, bool):
+            raise DashboardContractError(
+                "global dataset manifest source proportion must be numeric"
+            )
+        if not 0 < float(proportion) <= 1:
+            raise DashboardContractError(
+                "global dataset manifest source proportion must be in (0, 1]"
+            )
+        if not isinstance(source["manifest_url"], str) or not source[
+            "manifest_url"
+        ].startswith("https://"):
+            raise DashboardContractError(
+                "global dataset manifest source URL must use HTTPS"
+            )
+        digest = source["manifest_sha256"]
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise DashboardContractError(
+                "global dataset manifest source digest must be lowercase SHA-256"
+            )
     try:
         return json.dumps(
             payload,

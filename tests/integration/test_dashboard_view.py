@@ -535,7 +535,10 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         self.assertEqual(manifest["eval_n"], 2000)
         self.assertEqual(manifest["delta_threshold"], 0.5)
         self.assertEqual(manifest["sources"][0]["name"], "fixture")
-        self.assertIn("shards", manifest["sources"][0]["manifest"])
+        self.assertEqual(
+            set(manifest["sources"][0]),
+            {"name", "proportion", "manifest_url", "manifest_sha256"},
+        )
 
 
 if __name__ == "__main__":

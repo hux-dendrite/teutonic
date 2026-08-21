@@ -222,7 +222,6 @@ class DashboardProjectionRepository:
                     "proportion": float(row["sample_proportion"]),
                     "manifest_url": str(row["manifest_url"]),
                     "manifest_sha256": str(row["manifest_sha256"]),
-                    "manifest": row["manifest_json"],
                 }
                 for row in rows
             ],
