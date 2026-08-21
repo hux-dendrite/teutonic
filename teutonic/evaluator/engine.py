@@ -944,6 +944,36 @@ def model_input_device(model) -> torch.device:
     return next(model.parameters()).device
 
 
+def patch_mimo_masking_compat(model) -> tuple[str, ...]:
+    """Adapt immutable MiMo code to the installed Transformers mask API."""
+    if getattr(model.config, "model_type", "") != "mimo_v2":
+        return ()
+    module = sys.modules.get(model.__class__.__module__)
+    if module is None:
+        raise RuntimeError("could not resolve the loaded MiMo model module")
+
+    patched: list[str] = []
+    for name in ("create_causal_mask", "create_sliding_window_causal_mask"):
+        function = getattr(module, name, None)
+        if function is None:
+            raise RuntimeError(f"MiMo model module does not expose {name}")
+        if getattr(function, "_teutonic_cache_position_compat", False):
+            continue
+        if "cache_position" in inspect.signature(function).parameters:
+            continue
+
+        def adapter(*args, _function=function, **kwargs):
+            kwargs.pop("cache_position", None)
+            return _function(*args, **kwargs)
+
+        adapter.__name__ = getattr(function, "__name__", name)
+        adapter.__doc__ = getattr(function, "__doc__", None)
+        adapter._teutonic_cache_position_compat = True
+        setattr(module, name, adapter)
+        patched.append(name)
+    return tuple(patched)
+
+
 def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: EvalRequest, gpu_ids: list[int] | None = None, on_phase=None):
     from accelerate import init_empty_weights, load_checkpoint_and_dispatch
     from transformers import AutoModelForCausalLM
@@ -968,6 +998,14 @@ def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: Eva
             model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
     finally:
         torch.set_default_dtype(old_dtype)
+    mask_compat = patch_mimo_masking_compat(model)
+    if mask_compat and on_phase:
+        on_phase(
+            {
+                "phase": f"{label}_masking_compat_enabled",
+                "functions": list(mask_compat),
+            }
+        )
     # Empty-weight construction cannot preserve aliases created by parameter
     # assignment. Re-establish any checkpoint-declared embedding/head ties before
     # Accelerate resolves tied tensors and streams the shards.

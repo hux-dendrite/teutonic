@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sys
 import threading
 import time
+import types
 from queue import Queue
 from types import SimpleNamespace
 
@@ -19,6 +21,7 @@ from teutonic.evaluator.engine import (
     kernel_cache_identity,
     load_eval_model,
     model_worker_specs,
+    patch_mimo_masking_compat,
     resolved_attention_types,
     snapshot_safetensor_keys,
 )
@@ -62,6 +65,36 @@ def test_mimo_schedule_is_derived_before_model_sets_layer_types():
         "sliding_window_attention",
         "full_attention",
     ]
+
+
+def test_mimo_masking_compat_removes_only_obsolete_cache_position():
+    module = types.ModuleType("test_mimo_masking_compat_module")
+
+    def current_mask(*, config, inputs_embeds, attention_mask, past_key_values, position_ids=None):
+        return config, inputs_embeds, attention_mask, past_key_values, position_ids
+
+    module.create_causal_mask = current_mask
+    module.create_sliding_window_causal_mask = current_mask
+    sys.modules[module.__name__] = module
+    try:
+        model_type = type("TestMiMo", (), {"__module__": module.__name__})
+        model = model_type()
+        model.config = SimpleNamespace(model_type="mimo_v2")
+        assert set(patch_mimo_masking_compat(model)) == {
+            "create_causal_mask",
+            "create_sliding_window_causal_mask",
+        }
+        assert module.create_causal_mask(
+            config="config",
+            inputs_embeds="embeds",
+            attention_mask="mask",
+            cache_position="obsolete",
+            past_key_values="cache",
+            position_ids="positions",
+        ) == ("config", "embeds", "mask", "cache", "positions")
+        assert patch_mimo_masking_compat(model) == ()
+    finally:
+        sys.modules.pop(module.__name__, None)
 
 
 def test_non_eager_or_malformed_hybrid_config_is_rejected():
