@@ -16,3 +16,11 @@ def test_mimo_chain_is_pinned_to_immutable_hf_seed():
         "configuration_mimo_v2.py",
         "modeling_mimo_v2.py",
     }
+    assert set(chain_config.GENESIS_CONTRACT_FILES) == {
+        "chat_template.jinja.txt",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "modeling_mimo_v2.py",
+        "config.json",
+        "configuration_mimo_v2.py",
+    }

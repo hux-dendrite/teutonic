@@ -10,6 +10,7 @@ from nacl.signing import SigningKey
 
 from teutonic.access import (
     AccessControllerJobRunner,
+    GenesisContractMismatch,
     MailboxCipher,
     MailboxStore,
     Manifest,
@@ -30,6 +31,8 @@ class FakeS3:
         self.objects: dict[tuple[str, str], bytes] = {}
         self.metadata: dict[tuple[str, str], dict[str, str]] = {}
         self.multipart: list[dict[str, str]] = []
+        self.get_keys: list[str] = []
+        self.head_keys: list[str] = []
 
     def put_object(self, *, Bucket, Key, Body, **kwargs):
         self.objects[(Bucket, Key)] = Body if isinstance(Body, bytes) else Body.read()
@@ -37,6 +40,7 @@ class FakeS3:
         return {"ETag": self._etag(self.objects[(Bucket, Key)])}
 
     def get_object(self, *, Bucket, Key):
+        self.get_keys.append(Key)
         value = self.objects[(Bucket, Key)]
         return {
             "Body": io.BytesIO(value),
@@ -45,6 +49,7 @@ class FakeS3:
         }
 
     def head_object(self, *, Bucket, Key):
+        self.head_keys.append(Key)
         value = self.objects[(Bucket, Key)]
         return {
             "ContentLength": len(value),
@@ -276,7 +281,13 @@ class AccessControllerContractTests(unittest.TestCase):
             Body=manifest.as_bytes(),
             Metadata={"sha256": manifest.manifest_sha256},
         )
-        controller = R2UploadController(s3, private_model_bucket="private")
+        controller = R2UploadController(
+            s3,
+            private_model_bucket="private",
+            genesis_contract_files={
+                "config.json": hashlib.sha256(files["config.json"]).hexdigest()
+            },
+        )
         verified = controller.verify_manifest(
             model_prefix=prefix,
             registration_id=self.registration,
@@ -290,6 +301,11 @@ class AccessControllerContractTests(unittest.TestCase):
         self.assertEqual(immutable.bucket, "private")
         self.assertEqual(set(immutable.etags), set(files))
         self.assertEqual(immutable.manifest_size, len(manifest.as_bytes()))
+        self.assertEqual(
+            s3.get_keys,
+            [f"{prefix}manifest.json", f"{prefix}config.json"],
+        )
+        self.assertEqual(s3.head_keys, [f"{prefix}weights/model.bin"])
         for path, value in files.items():
             self.assertEqual(s3.objects[("private", f"{prefix}{path}")], value)
 
@@ -311,7 +327,13 @@ class AccessControllerContractTests(unittest.TestCase):
             Metadata={"sha256": manifest.manifest_sha256},
         )
         s3.put_object(Bucket="private", Key=f"{prefix}undeclared.bin", Body=b"bad")
-        controller = R2UploadController(s3, private_model_bucket="private")
+        controller = R2UploadController(
+            s3,
+            private_model_bucket="private",
+            genesis_contract_files={
+                "model.bin": hashlib.sha256(files["model.bin"]).hexdigest()
+            },
+        )
         with self.assertRaises(ArtifactIntegrityError):
             controller.verify_manifest(
                 model_prefix=prefix,
@@ -342,7 +364,114 @@ class AccessControllerContractTests(unittest.TestCase):
             Metadata={"sha256": manifest.manifest_sha256},
         )
         with self.assertRaisesRegex(ArtifactIntegrityError, "metadata"):
-            R2UploadController(s3, private_model_bucket="private").verify_manifest(
+            R2UploadController(
+                s3,
+                private_model_bucket="private",
+                genesis_contract_files={
+                    "model.bin": hashlib.sha256(files["model.bin"]).hexdigest()
+                },
+            ).verify_manifest(
+                model_prefix=prefix,
+                registration_id=self.registration,
+                hotkey=self.hotkey,
+                expected_manifest_sha256=manifest.manifest_sha256,
+            )
+
+    def test_verifier_rejects_missing_or_changed_genesis_files_before_object_reads(self) -> None:
+        genesis = b"immutable-genesis-config"
+        files = {"config.json": b"miner-changed-config", "model.bin": b"weights"}
+        manifest = signed_manifest(self.miner, self.registration, files)
+        prefix = f"models/registrations/{self.registration}/"
+        s3 = FakeS3()
+        s3.put_object(
+            Bucket="private",
+            Key=f"{prefix}manifest.json",
+            Body=manifest.as_bytes(),
+            Metadata={"sha256": manifest.manifest_sha256},
+        )
+        controller = R2UploadController(
+            s3,
+            private_model_bucket="private",
+            genesis_contract_files={"config.json": hashlib.sha256(genesis).hexdigest()},
+        )
+        with self.assertRaisesRegex(GenesisContractMismatch, "changed=\\['config.json'\\]"):
+            controller.verify_manifest(
+                model_prefix=prefix,
+                registration_id=self.registration,
+                hotkey=self.hotkey,
+                expected_manifest_sha256=manifest.manifest_sha256,
+            )
+
+        missing_manifest = signed_manifest(
+            self.miner, self.registration, {"model.bin": b"weights"}
+        )
+        s3.put_object(
+            Bucket="private",
+            Key=f"{prefix}manifest.json",
+            Body=missing_manifest.as_bytes(),
+            Metadata={"sha256": missing_manifest.manifest_sha256},
+        )
+        with self.assertRaisesRegex(GenesisContractMismatch, "missing=\\['config.json'\\]"):
+            controller.verify_manifest(
+                model_prefix=prefix,
+                registration_id=self.registration,
+                hotkey=self.hotkey,
+                expected_manifest_sha256=missing_manifest.manifest_sha256,
+            )
+
+    def test_verifier_hashes_genesis_contract_bytes_instead_of_trusting_metadata(self) -> None:
+        expected = b"immutable-genesis-config"
+        changed = b"x" * len(expected)
+        expected_digest = hashlib.sha256(expected).hexdigest()
+        inventory = (
+            ManifestFile("config.json", len(expected), expected_digest),
+            ManifestFile(
+                "model.bin", len(b"weights"), hashlib.sha256(b"weights").hexdigest()
+            ),
+        )
+        manifest = Manifest(
+            registration_id=self.registration,
+            hotkey=self.hotkey,
+            model_name="forged-contract-test",
+            files=inventory,
+            model_digest=model_digest_from_inventory(
+                [(item.path, item.size, item.sha256) for item in inventory]
+            ),
+            signature="unsigned",
+        )
+        manifest = replace(
+            manifest,
+            signature=encode_signature(
+                self.miner.sign(manifest.signing_payload()).signature
+            ),
+        )
+        prefix = f"models/registrations/{self.registration}/"
+        s3 = FakeS3()
+        for path, value, declared_digest in (
+            ("config.json", changed, expected_digest),
+            ("model.bin", b"weights", hashlib.sha256(b"weights").hexdigest()),
+        ):
+            s3.put_object(
+                Bucket="private",
+                Key=f"{prefix}{path}",
+                Body=value,
+                Metadata={"sha256": declared_digest},
+            )
+        s3.put_object(
+            Bucket="private",
+            Key=f"{prefix}manifest.json",
+            Body=manifest.as_bytes(),
+            Metadata={"sha256": manifest.manifest_sha256},
+        )
+
+        with self.assertRaisesRegex(
+            GenesisContractMismatch, "genesis contract bytes differ"
+        ):
+            R2UploadController(
+                s3,
+                private_model_bucket="private",
+                genesis_contract_files={"config.json": expected_digest},
+            ).verify_manifest(
                 model_prefix=prefix,
                 registration_id=self.registration,
                 hotkey=self.hotkey,

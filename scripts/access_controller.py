@@ -16,6 +16,8 @@ import psycopg
 from botocore.config import Config
 from nacl.signing import SigningKey
 
+import chain_config
+
 from teutonic.access import (
     AccessControllerJobRunner,
     AccessControllerRepository,
@@ -139,6 +141,7 @@ def main() -> int:
             upload_controller=R2UploadController(
                 s3,
                 private_model_bucket=buckets.private_models,
+                genesis_contract_files=chain_config.GENESIS_CONTRACT_FILES,
                 chunk_size=8 * 1024 * 1024,
             ),
             mailbox_store=MailboxStore(s3, bucket=buckets.dashboard),

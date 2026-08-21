@@ -17,7 +17,9 @@ import os
 import pathlib
 import re
 import tomllib
+from types import MappingProxyType
 from types import ModuleType
+from typing import Mapping
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent
 _OVERRIDE = os.environ.get("TEUTONIC_CHAIN_OVERRIDE", "").strip()
@@ -50,6 +52,15 @@ SEED_TOKENIZER_REPO: str = _seed.get("tokenizer_repo", "")
 SEED_DIGEST: str = _seed.get("seed_digest", "")
 SEED_REPO_BACKEND: str = (_seed.get("repo_backend") or "hf").strip().lower()
 SEED_HOTKEY: str = _seed.get("genesis_hotkey", "").strip()
+_contract_files = _seed.get("contract_files", {})
+if not isinstance(_contract_files, dict):
+    raise RuntimeError("chain.toml [seed.contract_files] must be a table")
+GENESIS_CONTRACT_FILES: Mapping[str, str] = MappingProxyType(
+    {
+        str(path): str(digest).strip().lower()
+        for path, digest in sorted(_contract_files.items())
+    }
+)
 EVALUATION_DATASET_LABEL: str = str(_evaluation.get("dataset_label") or "").strip()
 EVALUATION_N: int = int(_evaluation.get("n") or 0)
 try:
@@ -76,6 +87,17 @@ if SEED_REPO_BACKEND not in _VALID_SEED_REPO_BACKENDS:
     )
 if not SEED_HOTKEY:
     raise RuntimeError("chain.toml [seed].genesis_hotkey is required")
+if not GENESIS_CONTRACT_FILES:
+    raise RuntimeError("chain.toml [seed.contract_files] requires at least one file")
+if any(
+    not path
+    or pathlib.PurePosixPath(path).is_absolute()
+    or ".." in pathlib.PurePosixPath(path).parts
+    or str(pathlib.PurePosixPath(path)) != path
+    or not re.fullmatch(r"[0-9a-f]{64}", digest)
+    for path, digest in GENESIS_CONTRACT_FILES.items()
+):
+    raise RuntimeError("chain.toml contains an invalid genesis contract file lock")
 if not EVALUATION_DATASET_LABEL:
     raise RuntimeError("chain.toml [evaluation].dataset_label is required")
 if EVALUATION_N < 1:
@@ -134,6 +156,7 @@ __all__ = [
     "EVALUATION_DATASETS",
     "SEED_REPO_BACKEND",
     "SEED_HOTKEY",
+    "GENESIS_CONTRACT_FILES",
     "CHAIN_GENERATION",
     "SEED_NAMESPACE",
     "load_arch",

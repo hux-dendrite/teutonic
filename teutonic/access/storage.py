@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any, Mapping
 
 from teutonic.storage.artifacts import ArtifactIntegrityError
 
 from .contracts import Manifest
 from .crypto import verify_hotkey_signature
+
+
+class GenesisContractMismatch(ArtifactIntegrityError):
+    """A submitted model differs from the immutable genesis contract files."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,15 +41,43 @@ class R2UploadController:
         s3_client: Any,
         *,
         private_model_bucket: str,
+        genesis_contract_files: Mapping[str, str],
         chunk_size: int = 1024 * 1024,
     ) -> None:
         if not private_model_bucket:
             raise ValueError("private model bucket is required")
         if chunk_size < 1:
             raise ValueError("chunk_size must be positive")
+        if not genesis_contract_files:
+            raise ValueError("genesis contract files are required")
+        if any(
+            not path
+            or path == "manifest.json"
+            or PurePosixPath(path).is_absolute()
+            or ".." in PurePosixPath(path).parts
+            or str(PurePosixPath(path)) != path
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            for path, digest in genesis_contract_files.items()
+        ):
+            raise ValueError("genesis contract file lock is invalid")
         self.s3 = s3_client
         self.private_model_bucket = private_model_bucket
+        self.genesis_contract_files = dict(genesis_contract_files)
         self.chunk_size = chunk_size
+
+    def _validate_genesis_contract(self, manifest: Manifest) -> None:
+        submitted = {item.path: item.sha256 for item in manifest.files}
+        missing = sorted(set(self.genesis_contract_files) - set(submitted))
+        changed = sorted(
+            path
+            for path, expected in self.genesis_contract_files.items()
+            if submitted.get(path) is not None and submitted[path] != expected
+        )
+        if missing or changed:
+            raise GenesisContractMismatch(
+                "submitted model does not byte-match genesis contract files; "
+                f"missing={missing}, changed={changed}"
+            )
 
     def _list_objects(self, bucket: str, prefix: str) -> dict[str, dict[str, Any]]:
         objects: dict[str, dict[str, Any]] = {}
@@ -119,6 +153,14 @@ class R2UploadController:
         }
         return captured, size, digest.hexdigest(), response.get("ETag"), metadata.get("sha256")
 
+    def _head_object(self, bucket: str, key: str) -> tuple[int, str | None, str | None]:
+        response = self.s3.head_object(Bucket=bucket, Key=key)
+        metadata = {
+            str(name).lower(): str(value).lower()
+            for name, value in (response.get("Metadata") or {}).items()
+        }
+        return int(response["ContentLength"]), response.get("ETag"), metadata.get("sha256")
+
     def verify_manifest(
         self,
         *,
@@ -155,6 +197,7 @@ class R2UploadController:
             verify_hotkey_signature(hotkey, manifest.signing_payload(), manifest.signature)
         except ValueError as exc:
             raise ArtifactIntegrityError(str(exc)) from exc
+        self._validate_genesis_contract(manifest)
 
         expected_keys = {manifest_key} | {
             f"{model_prefix}{item.path}" for item in manifest.files
@@ -169,11 +212,22 @@ class R2UploadController:
         etags: dict[str, str | None] = {}
         for item in manifest.files:
             key = f"{model_prefix}{item.path}"
-            _, size, digest, etag, metadata_digest = self._read_and_hash(
-                self.private_model_bucket, key
-            )
-            if size != item.size or digest != item.sha256:
-                raise ArtifactIntegrityError(f"object bytes do not match manifest: {item.path}")
+            if item.path in self.genesis_contract_files:
+                _, size, digest, etag, metadata_digest = self._read_and_hash(
+                    self.private_model_bucket, key
+                )
+                if size != item.size or digest != item.sha256:
+                    raise GenesisContractMismatch(
+                        f"submitted genesis contract bytes differ: {item.path}"
+                    )
+            else:
+                # The miner can declare custom SHA-256 metadata, so this is an
+                # inventory/immutability check only. The evaluator verifies all
+                # model bytes against the signed manifest during its one required
+                # download, before loading any model onto a GPU.
+                size, etag, metadata_digest = self._head_object(
+                    self.private_model_bucket, key
+                )
             if metadata_digest != item.sha256:
                 raise ArtifactIntegrityError(
                     f"object SHA-256 metadata is missing or incorrect: {item.path}"
@@ -183,7 +237,12 @@ class R2UploadController:
                 raise ArtifactIntegrityError(
                     f"R2 listing size changed during verification: {item.path}"
                 )
-            etags[item.path] = etag or objects[key].get("ETag")
+            listed_etag = objects[key].get("ETag")
+            if etag is not None and listed_etag is not None and etag != listed_etag:
+                raise ArtifactIntegrityError(
+                    f"R2 object changed during verification: {item.path}"
+                )
+            etags[item.path] = etag or listed_etag
         return VerifiedManifest(
             manifest=manifest,
             manifest_sha256=manifest_digest,
@@ -198,23 +257,12 @@ class R2UploadController:
         verified: VerifiedManifest,
     ) -> ImmutableSnapshotResult:
         manifest = verified.manifest
-        # Upload authority has already been revoked. Reverify the exact source
-        # tree before admitting this registration prefix to evaluation.
-        source = self.verify_manifest(
-            model_prefix=model_prefix,
-            registration_id=manifest.registration_id,
-            hotkey=manifest.hotkey,
-            expected_manifest_sha256=verified.manifest_sha256,
-        )
-        if source.manifest != manifest or source.manifest_size != verified.manifest_size:
-            raise ArtifactIntegrityError("manifest changed after initial verification")
-
         paths = ["manifest.json", *(item.path for item in manifest.files)]
         inventory_hash = hashlib.sha256(b"teutonic-immutable-snapshot-v1\0")
         for path in paths:
             if path == "manifest.json":
-                size = source.manifest_size
-                digest = source.manifest_sha256
+                size = verified.manifest_size
+                digest = verified.manifest_sha256
             else:
                 item = next(item for item in manifest.files if item.path == path)
                 size = item.size
@@ -228,8 +276,8 @@ class R2UploadController:
             bucket=self.private_model_bucket,
             prefix=model_prefix,
             version=inventory_hash.hexdigest(),
-            manifest_size=source.manifest_size,
-            etags=source.source_etags,
+            manifest_size=verified.manifest_size,
+            etags=verified.source_etags,
         )
 
     def abort_multipart_uploads(self, model_prefix: str) -> int:

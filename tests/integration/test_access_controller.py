@@ -194,7 +194,11 @@ class AccessControllerIntegrationTests(unittest.TestCase):
             self.repository,
             token_gateway=self.gateway,
             upload_controller=R2UploadController(
-                self.s3, private_model_bucket="private"
+                self.s3,
+                private_model_bucket="private",
+                genesis_contract_files={
+                    "config.json": hashlib.sha256(b"{}").hexdigest()
+                },
             ),
             mailbox_store=MailboxStore(self.s3, bucket="mailbox"),
             secret_cipher=SecretCipher(b"p" * 32),

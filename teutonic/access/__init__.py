@@ -29,6 +29,7 @@ _LAZY_EXPORTS = {
     "AccessControllerJobRunner": (".service", "AccessControllerJobRunner"),
     "MailboxStore": (".service", "MailboxStore"),
     "ImmutableSnapshotResult": (".storage", "ImmutableSnapshotResult"),
+    "GenesisContractMismatch": (".storage", "GenesisContractMismatch"),
     "R2UploadController": (".storage", "R2UploadController"),
 }
 
@@ -49,6 +50,7 @@ __all__ = [
     "ControllerLockUnavailable",
     "ControllerInvariantError",
     "FinalizedChainScanner",
+    "GenesisContractMismatch",
     "activation_signals_from_block",
     "ImmutableSnapshotResult",
     "MailboxCipher",
