@@ -603,11 +603,16 @@ CREATE VIEW control_plane.dashboard_current_evaluation WITH (security_barrier='t
             ELSE 'evaluating'::text
         END AS stage,
     (e.progress_summary ->> 'phase'::text) AS progress_phase,
-    (e.progress_summary ->> 'completed_sequences'::text) AS completed_sequences,
-    (e.progress_summary ->> 'requested_sequences'::text) AS requested_sequences,
-    (e.progress_summary ->> 'percent'::text) AS percent,
-    (e.progress_summary ->> 'elapsed_seconds'::text) AS elapsed_seconds,
-    (e.progress_summary ->> 'early_stopped'::text) AS early_stopped,
+    COALESCE(e.progress_summary ->> 'completed_sequences'::text, e.progress_summary ->> 'done'::text, '0'::text) AS completed_sequences,
+    COALESCE(e.progress_summary ->> 'requested_sequences'::text, e.progress_summary ->> 'total'::text, e.request_payload #>> '{limits,n}'::text[], '0'::text) AS requested_sequences,
+    COALESCE(e.progress_summary ->> 'percent'::text,
+        CASE
+            WHEN COALESCE((e.progress_summary ->> 'requested_sequences'::text)::numeric, (e.progress_summary ->> 'total'::text)::numeric, (e.request_payload #>> '{limits,n}'::text[])::numeric, 0::numeric) > 0::numeric
+            THEN ((COALESCE((e.progress_summary ->> 'completed_sequences'::text)::numeric, (e.progress_summary ->> 'done'::text)::numeric, 0::numeric) * 100::numeric) / COALESCE((e.progress_summary ->> 'requested_sequences'::text)::numeric, (e.progress_summary ->> 'total'::text)::numeric, (e.request_payload #>> '{limits,n}'::text[])::numeric))::text
+            ELSE '0'::text
+        END) AS percent,
+    COALESCE(e.progress_summary ->> 'elapsed_seconds'::text, GREATEST(EXTRACT(epoch FROM (e.heartbeat_at - e.started_at)), 0::numeric)::text, '0'::text) AS elapsed_seconds,
+    COALESCE(e.progress_summary ->> 'early_stopped'::text, 'false'::text) AS early_stopped,
     e.policy_version,
     e.dataset_version,
     e.started_at,

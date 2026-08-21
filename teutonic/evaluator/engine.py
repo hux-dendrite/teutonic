@@ -1928,8 +1928,31 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
     started_at = datetime.now(timezone.utc).isoformat()
 
     def on_phase(info: dict):
-        record.progress = info
-        events.put(record.event("progress", info))
+        previous = record.progress or {}
+        normalized = dict(info)
+        completed = normalized.pop(
+            "done",
+            normalized.get("completed_sequences", previous.get("completed_sequences", 0)),
+        )
+        requested = normalized.pop(
+            "total",
+            normalized.get(
+                "requested_sequences",
+                previous.get("requested_sequences", int(protocol_request.limits["n"])),
+            ),
+        )
+        completed = max(0, int(completed))
+        requested = max(0, int(requested))
+        normalized["completed_sequences"] = completed
+        normalized["requested_sequences"] = requested
+        normalized["percent"] = round(
+            (100.0 * completed / requested) if requested else 0.0,
+            4,
+        )
+        normalized["elapsed_seconds"] = round(max(time.time() - t0, 0.0), 1)
+        normalized["early_stopped"] = bool(normalized.get("early_stopped", False))
+        record.progress = normalized
+        events.put(record.event("progress", normalized))
 
     heartbeat_stop = threading.Event()
 

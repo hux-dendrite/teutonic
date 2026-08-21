@@ -1050,6 +1050,19 @@ class ValidatorRepository:
 
 
 def _bounded_progress(progress: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(progress)
+    if "completed_sequences" not in normalized and "done" in normalized:
+        normalized["completed_sequences"] = normalized["done"]
+    if "requested_sequences" not in normalized and "total" in normalized:
+        normalized["requested_sequences"] = normalized["total"]
+    if (
+        "percent" not in normalized
+        and "completed_sequences" in normalized
+        and "requested_sequences" in normalized
+    ):
+        completed = max(0, int(normalized["completed_sequences"]))
+        requested = max(0, int(normalized["requested_sequences"]))
+        normalized["percent"] = 100.0 * completed / requested if requested else 0.0
     allowed = {
         "phase",
         "completed_sequences",
@@ -1058,7 +1071,7 @@ def _bounded_progress(progress: Mapping[str, Any]) -> dict[str, Any]:
         "elapsed_seconds",
         "early_stopped",
     }
-    result = {key: progress[key] for key in allowed if key in progress}
+    result = {key: normalized[key] for key in allowed if key in normalized}
     encoded = json.dumps(result, separators=(",", ":"), ensure_ascii=True)
     if len(encoded.encode()) > 4096:
         raise SchedulerInvariantError("progress summary exceeds 4096 bytes")

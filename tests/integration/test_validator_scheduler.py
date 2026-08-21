@@ -112,8 +112,8 @@ class FakeEvaluator:
             "type": "progress",
             "data": {
                 "phase": "scoring",
-                "completed_sequences": 16,
-                "requested_sequences": 32,
+                "done": 16,
+                "total": 32,
                 "private_worker_hostname": "must-not-persist",
             },
         }
@@ -702,6 +702,15 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row[0:2], ("completed", "accepted"))
         self.assertNotIn("private_worker_hostname", row[2])
+        self.assertEqual(
+            row[2],
+            {
+                "phase": "scoring",
+                "completed_sequences": 16,
+                "requested_sequences": 32,
+                "percent": 50.0,
+            },
+        )
         self.assertEqual(row[3], "accepted_pending_promotion")
         self.assertEqual(row[4], "0.0015")
         self.assertEqual(
