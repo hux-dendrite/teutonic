@@ -342,16 +342,61 @@ def snapshot_safetensors_digest(snapshot_dir: str) -> str:
     shard_names = snapshot_safetensor_names(snapshot_dir)
     if not shard_names:
         raise FileNotFoundError(f"no .safetensors files found in {snapshot_dir}")
-    return safetensors_digest_from_file_digests(
-        {shard_name: sha256_file(path / shard_name) for shard_name in shard_names}
-    )
+    workers = min(len(shard_names), max(1, os.cpu_count() or 1))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        digests = dict(
+            zip(
+                shard_names,
+                executor.map(sha256_file, (path / name for name in shard_names)),
+                strict=True,
+            )
+        )
+    return safetensors_digest_from_file_digests(digests)
 
 
 def reject_duplicate_safetensors(king_snapshot: str, challenger_snapshot: str, on_phase=None) -> dict:
+    snapshots = {
+        "king": Path(king_snapshot),
+        "challenger": Path(challenger_snapshot),
+    }
+    shard_names = {
+        role: snapshot_safetensor_names(str(path)) for role, path in snapshots.items()
+    }
+    for role, names in shard_names.items():
+        if not names:
+            raise FileNotFoundError(f"no .safetensors files found in {snapshots[role]}")
+    work = [
+        (role, name, snapshots[role] / name)
+        for role in ("king", "challenger")
+        for name in shard_names[role]
+    ]
+    workers = min(len(work), max(1, os.cpu_count() or 1))
     if on_phase:
-        on_phase({"phase": "duplicate_check_start"})
-    king_digest = snapshot_safetensors_digest(king_snapshot)
-    challenger_digest = snapshot_safetensors_digest(challenger_snapshot)
+        on_phase({
+            "phase": "duplicate_check_start",
+            "king_shards": len(shard_names["king"]),
+            "challenger_shards": len(shard_names["challenger"]),
+            "hash_workers": workers,
+        })
+    started = time.monotonic()
+    file_digests: dict[str, dict[str, str]] = {"king": {}, "challenger": {}}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(sha256_file, path): (role, name)
+            for role, name, path in work
+        }
+        for future, (role, name) in futures.items():
+            file_digests[role][name] = future.result()
+    king_digest = safetensors_digest_from_file_digests(file_digests["king"])
+    challenger_digest = safetensors_digest_from_file_digests(file_digests["challenger"])
+    elapsed = time.monotonic() - started
+    log.info(
+        "duplicate check complete | king_shards=%d challenger_shards=%d workers=%d elapsed_s=%.1f",
+        len(shard_names["king"]),
+        len(shard_names["challenger"]),
+        workers,
+        elapsed,
+    )
     if king_digest == challenger_digest:
         raise RuntimeError("challenger .safetensors are identical to the king")
     meta = {
@@ -359,7 +404,12 @@ def reject_duplicate_safetensors(king_snapshot: str, challenger_snapshot: str, o
         "challenger_safetensors_sha256": challenger_digest,
     }
     if on_phase:
-        on_phase({"phase": "duplicate_check_done", **{k: v[:16] for k, v in meta.items()}})
+        on_phase({
+            "phase": "duplicate_check_done",
+            "hash_workers": workers,
+            "elapsed_seconds": round(elapsed, 1),
+            **{k: v[:16] for k, v in meta.items()},
+        })
     return meta
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 import threading
 import time
@@ -146,6 +147,51 @@ def test_safetensor_keys_are_read_from_index_without_loading_payloads(tmp_path):
         "model.layers.0.weight",
         "model.layers.1.weight",
     ]
+
+
+def test_duplicate_check_hashes_all_model_shards_in_parallel(monkeypatch, tmp_path):
+    king = tmp_path / "king"
+    challenger = tmp_path / "challenger"
+    king.mkdir()
+    challenger.mkdir()
+    for index in range(2):
+        (king / f"model-{index}.safetensors").write_bytes(f"king-{index}".encode())
+        (challenger / f"model-{index}.safetensors").write_bytes(
+            f"challenger-{index}".encode()
+        )
+
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def measured_sha256(path):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.03)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        with lock:
+            active -= 1
+        return digest
+
+    phases = []
+    monkeypatch.setattr(eval_server.os, "cpu_count", lambda: 4)
+    monkeypatch.setattr(eval_server, "sha256_file", measured_sha256)
+    result = eval_server.reject_duplicate_safetensors(
+        str(king), str(challenger), on_phase=phases.append
+    )
+
+    assert result["king_safetensors_sha256"] != result["challenger_safetensors_sha256"]
+    assert max_active == 4
+    assert phases[0] == {
+        "phase": "duplicate_check_start",
+        "king_shards": 2,
+        "challenger_shards": 2,
+        "hash_workers": 4,
+    }
+    assert phases[-1]["phase"] == "duplicate_check_done"
+    assert phases[-1]["hash_workers"] == 4
 
 
 def test_direct_checkpoint_loader_resolves_tied_meta_weights(tmp_path):
