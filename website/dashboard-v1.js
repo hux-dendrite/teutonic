@@ -104,6 +104,55 @@
         };
     }
 
+    function decisionPresentation(record) {
+        record = record || {};
+        var verdict = String(record.verdict || "").toLowerCase();
+        var lcb = finiteNumber(record.lcb, null);
+        var threshold = finiteNumber(
+            record.delta_threshold == null ? record.delta : record.delta_threshold,
+            null
+        );
+        var won = record.accepted === true || verdict === "accepted" || verdict === "challenger";
+        var lost = record.accepted === false || verdict === "rejected" || verdict === "king";
+
+        if (verdict === "error") {
+            return {
+                kind: "error",
+                label: "ERROR REASON",
+                summary: record.error_message || "The evaluation did not produce a verdict.",
+                detail: "No win or loss was recorded."
+            };
+        }
+        if (won) {
+            return {
+                kind: "win",
+                label: "WIN REASON",
+                summary: lcb == null || threshold == null
+                    ? "The challenger cleared the promotion policy."
+                    : "LCB " + lcb.toFixed(6) + " > REQUIRED " + threshold.toFixed(6)
+                        + " · MARGIN +" + (lcb - threshold).toFixed(6),
+                detail: "The confidence-adjusted improvement was high enough to replace the king."
+            };
+        }
+        if (lost) {
+            return {
+                kind: "loss",
+                label: "LOSS REASON",
+                summary: lcb == null || threshold == null
+                    ? "The challenger did not clear the promotion policy."
+                    : "LCB " + lcb.toFixed(6) + " ≤ REQUIRED " + threshold.toFixed(6)
+                        + " · SHORTFALL " + Math.max(0, threshold - lcb).toFixed(6),
+                detail: "The measured improvement was not confident enough to replace the king."
+            };
+        }
+        return {
+            kind: "unknown",
+            label: "DECISION",
+            summary: "A final win or loss reason is not available.",
+            detail: ""
+        };
+    }
+
     function datasetPresentation(manifest) {
         if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
             throw new Error("dataset manifest must be an object");
@@ -192,6 +241,7 @@
         historyPresentation: historyPresentation,
         taoMarketCapHotkeyUrl: taoMarketCapHotkeyUrl,
         shardPresentation: shardPresentation,
+        decisionPresentation: decisionPresentation,
         datasetPresentation: datasetPresentation
     };
 });

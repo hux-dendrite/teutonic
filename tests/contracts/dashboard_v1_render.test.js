@@ -99,6 +99,26 @@ assert.deepStrictEqual(shards.groups, [
 ]);
 assert.deepStrictEqual(dashboard.shardPresentation({}).groups, []);
 
+assert.deepStrictEqual(
+    dashboard.decisionPresentation({ verdict: "accepted", lcb: 0.64, delta: 0.5 }),
+    {
+        kind: "win",
+        label: "WIN REASON",
+        summary: "LCB 0.640000 > REQUIRED 0.500000 · MARGIN +0.140000",
+        detail: "The confidence-adjusted improvement was high enough to replace the king."
+    }
+);
+assert.deepStrictEqual(
+    dashboard.decisionPresentation({ verdict: "rejected", lcb: 0.38, delta_threshold: 0.5 }),
+    {
+        kind: "loss",
+        label: "LOSS REASON",
+        summary: "LCB 0.380000 ≤ REQUIRED 0.500000 · SHORTFALL 0.120000",
+        detail: "The measured improvement was not confident enough to replace the king."
+    }
+);
+assert.strictEqual(dashboard.decisionPresentation({ verdict: "error" }).kind, "error");
+
 const invalid = base();
 invalid.schema_version = 2;
 assert.throws(() => dashboard.presentation(invalid), /unsupported dashboard schema/);
