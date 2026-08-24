@@ -17,9 +17,13 @@ _REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _SERVER_SIDE_COPY = re.compile(r"\bCopied \(server-side copy\)")
 _STREAMED_COPY = re.compile(r"\bCopied \((?:new|replaced existing)\)")
-_COPY_TRANSFERS = 100
+_COPY_TRANSFERS = 32
 _COPY_CHECKERS = 100
 _COPY_RETRIES = 5
+_MULTI_THREAD_STREAMS = 32
+_MULTI_THREAD_CUTOFF = "32M"
+_UPLOAD_CONCURRENCY = 32
+_UPLOAD_CHUNK_SIZE = "64M"
 log = logging.getLogger("teutonic.promotion-worker.rclone")
 
 
@@ -74,30 +78,36 @@ class S3InventoryInspector:
 
 
 class RclonePromotionExecutor:
-    """Invoke rclone with one remote so Cloudflare R2 uses server-side CopyObject."""
+    """Stream private-to-public copies through the worker using two R2 remotes."""
 
     def __init__(
         self,
-        remote: str,
+        source_remote: str,
+        destination_remote: str,
         *,
         runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
         heartbeat_interval: timedelta = timedelta(seconds=20),
     ) -> None:
-        if not _REMOTE_RE.fullmatch(remote):
-            raise ValueError("rclone remote must be one configured remote name")
+        if not _REMOTE_RE.fullmatch(source_remote) or not _REMOTE_RE.fullmatch(
+            destination_remote
+        ):
+            raise ValueError("rclone remotes must be configured remote names")
+        if source_remote == destination_remote:
+            raise ValueError("host-routed promotion requires two rclone remote names")
         if heartbeat_interval <= timedelta(0):
             raise ValueError("rclone heartbeat interval must be positive")
-        self.remote = remote
+        self.source_remote = source_remote
+        self.destination_remote = destination_remote
         self.runner = runner
         self.heartbeat_interval = heartbeat_interval
 
-    def _path(self, bucket: str, prefix: str) -> str:
+    def _path(self, remote: str, bucket: str, prefix: str) -> str:
         if not _BUCKET_RE.fullmatch(bucket):
             raise ValueError("invalid R2 bucket name")
         normalized = prefix.strip("/")
         if not normalized or ".." in normalized.split("/"):
             raise ValueError("invalid R2 promotion prefix")
-        return f"{self.remote}:{bucket}/{normalized}/"
+        return f"{remote}:{bucket}/{normalized}/"
 
     def _run(self, command: list[str], *, heartbeat: Callable[[], None] | None) -> str:
         environment = os.environ.copy()
@@ -152,8 +162,8 @@ class RclonePromotionExecutor:
             raise RcloneExecutionError(f"rclone exited with status {return_code}{detail}")
         return output
 
-    def _object_path(self, bucket: str, prefix: str, path: str) -> str:
-        base = self._path(bucket, prefix).rstrip("/")
+    def _object_path(self, remote: str, bucket: str, prefix: str, path: str) -> str:
+        base = self._path(remote, bucket, prefix).rstrip("/")
         parsed = PurePosixPath(path)
         if not path or parsed.is_absolute() or ".." in parsed.parts or str(parsed) != path:
             raise ValueError("invalid R2 promotion object path")
@@ -185,19 +195,27 @@ class RclonePromotionExecutor:
                     str(_COPY_TRANSFERS),
                     "--checkers",
                     str(_COPY_CHECKERS),
+                    "--multi-thread-streams",
+                    str(_MULTI_THREAD_STREAMS),
+                    "--multi-thread-cutoff",
+                    _MULTI_THREAD_CUTOFF,
+                    "--s3-chunk-size",
+                    _UPLOAD_CHUNK_SIZE,
+                    "--s3-upload-concurrency",
+                    str(_UPLOAD_CONCURRENCY),
                 ]
             )
         return flags
 
-    def _require_server_side(self, output: str, *, expected: int, stage: str) -> None:
+    def _require_host_routed(self, output: str, *, expected: int, stage: str) -> None:
         server_side, streamed = self._copy_modes(output)
-        if streamed:
+        if server_side:
             raise RcloneExecutionError(
-                f"rclone {stage} attempted {streamed} host-streamed object copy/copies"
+                f"rclone {stage} unexpectedly used {server_side} server-side copy/copies"
             )
-        if server_side != expected:
+        if streamed != expected:
             raise RcloneExecutionError(
-                f"rclone {stage} confirmed {server_side} server-side copies; expected {expected}"
+                f"rclone {stage} confirmed {streamed} host-routed copies; expected {expected}"
             )
 
     def copy(
@@ -211,8 +229,10 @@ class RclonePromotionExecutor:
         expected_object_count: int,
         heartbeat: Callable[[], None] | None = None,
     ) -> None:
-        source = self._path(source_bucket, source_prefix)
-        destination = self._path(destination_bucket, destination_prefix)
+        source = self._path(self.source_remote, source_bucket, source_prefix)
+        destination = self._path(
+            self.destination_remote, destination_bucket, destination_prefix
+        )
         if source_bucket == destination_bucket:
             raise ValueError("private and public promotion buckets must differ")
         if expected_object_count < 1:
@@ -222,14 +242,21 @@ class RclonePromotionExecutor:
             [
                 "rclone",
                 "copyto",
-                self._object_path(source_bucket, source_prefix, probe_path),
-                self._object_path(destination_bucket, destination_prefix, probe_path),
+                self._object_path(
+                    self.source_remote, source_bucket, source_prefix, probe_path
+                ),
+                self._object_path(
+                    self.destination_remote,
+                    destination_bucket,
+                    destination_prefix,
+                    probe_path,
+                ),
                 *self._copy_flags(bulk=False),
             ],
             heartbeat=heartbeat,
         )
-        self._require_server_side(probe_output, expected=1, stage="probe")
-        log.info("rclone server-side copy confirmed probe=%s", probe_path)
+        self._require_host_routed(probe_output, expected=1, stage="probe")
+        log.info("rclone host-routed copy confirmed probe=%s", probe_path)
 
         remaining = expected_object_count - 1
         if remaining == 0:
@@ -238,12 +265,16 @@ class RclonePromotionExecutor:
             ["rclone", "copy", source, destination, *self._copy_flags(bulk=True)],
             heartbeat=heartbeat,
         )
-        self._require_server_side(bulk_output, expected=remaining, stage="bulk copy")
+        self._require_host_routed(bulk_output, expected=remaining, stage="bulk copy")
         log.info(
-            "rclone server-side bulk copy confirmed objects=%d transfers=%d checkers=%d",
+            "rclone host-routed bulk copy confirmed objects=%d transfers=%d "
+            "checkers=%d streams=%d upload_concurrency=%d chunk_size=%s",
             remaining,
             _COPY_TRANSFERS,
             _COPY_CHECKERS,
+            _MULTI_THREAD_STREAMS,
+            _UPLOAD_CONCURRENCY,
+            _UPLOAD_CHUNK_SIZE,
         )
 
     def delete_source(
@@ -253,7 +284,7 @@ class RclonePromotionExecutor:
             [
                 "rclone",
                 "delete",
-                self._path(bucket, prefix),
+                self._path(self.source_remote, bucket, prefix),
                 "--rmdirs",
                 "--fast-list",
                 "--checkers",

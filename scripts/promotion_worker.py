@@ -77,6 +77,7 @@ def configure_rclone(remote: str) -> None:
         "ENDPOINT": r2_endpoint(),
         "REGION": os.environ.get("TEUTONIC_R2_REGION", "auto"),
         "ENV_AUTH": "false",
+        "NO_CHECK_BUCKET": "true",
     }
     session_token = os.environ.get("R2_SESSION_TOKEN", "").strip()
     if session_token:
@@ -115,8 +116,11 @@ def main() -> int:
         seconds=int(os.environ.get("TEUTONIC_PROMOTION_RETRY_SECONDS", "30"))
     )
     attempts = int(os.environ.get("TEUTONIC_PROMOTION_MAX_ATTEMPTS", "8"))
-    remote = os.environ.get("TEUTONIC_RCLONE_REMOTE", "teutonicr2").strip()
-    configure_rclone(remote)
+    remote_base = os.environ.get("TEUTONIC_RCLONE_REMOTE", "teutonicr2").strip()
+    source_remote = f"{remote_base}source"
+    destination_remote = f"{remote_base}destination"
+    configure_rclone(source_remote)
+    configure_rclone(destination_remote)
     buckets = BucketNames.from_env()
     log.info(
         "promotion worker initializing instance=%s network=%s netuid=%d competition=%s",
@@ -177,7 +181,7 @@ def main() -> int:
 
         worker = PromotionWorker(
             promotions,
-            RclonePromotionExecutor(remote),
+            RclonePromotionExecutor(source_remote, destination_remote),
             S3InventoryInspector(build_r2_client()),
             lease=lease,
             retry_base_delay=retry,

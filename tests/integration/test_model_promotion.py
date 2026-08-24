@@ -57,7 +57,7 @@ class MemoryRclone:
     ):
         self.copy_calls += 1
         if expected_object_count < 1 or not probe_path:
-            raise AssertionError("promotion did not specify its server-side copy probe")
+            raise AssertionError("promotion did not specify its route-validation probe")
         if heartbeat is not None:
             heartbeat()
         source = list(self.inspector.inventory(source_bucket, source_prefix).values())

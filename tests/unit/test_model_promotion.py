@@ -62,15 +62,15 @@ class PromotionStorageTests(unittest.TestCase):
             inventory_digest(expected), inventory_digest(dict(reversed(expected.items())))
         )
 
-    def test_rclone_uses_one_remote_server_side_copy_and_never_move(self) -> None:
+    def test_rclone_uses_two_remotes_to_stream_through_host_and_never_move(self) -> None:
         commands = []
 
         def runner(command, **kwargs):
             commands.append((command, kwargs))
-            output = "INFO : config.json: Copied (server-side copy)\n"
+            output = "INFO : config.json: Multi-thread Copied (new)\n"
             return subprocess.CompletedProcess(command, 0, "", output)
 
-        executor = RclonePromotionExecutor("r2", runner=runner)
+        executor = RclonePromotionExecutor("r2source", "r2destination", runner=runner)
         prefix = "models/sha256/" + "a" * 64 + "/"
         executor.copy(
             source_bucket="private-models",
@@ -84,17 +84,21 @@ class PromotionStorageTests(unittest.TestCase):
 
         probe = commands[0][0]
         self.assertEqual(probe[0:2], ["rclone", "copyto"])
-        self.assertTrue(probe[2].startswith("r2:private-models/"))
-        self.assertTrue(probe[3].startswith("r2:public-models/"))
+        self.assertTrue(probe[2].startswith("r2source:private-models/"))
+        self.assertTrue(probe[3].startswith("r2destination:public-models/"))
 
         copy = commands[1][0]
         self.assertEqual(copy[0:2], ["rclone", "copy"])
-        self.assertTrue(copy[2].startswith("r2:private-models/"))
-        self.assertTrue(copy[3].startswith("r2:public-models/"))
+        self.assertTrue(copy[2].startswith("r2source:private-models/"))
+        self.assertTrue(copy[3].startswith("r2destination:public-models/"))
         for option, value in (
-            ("--transfers", "100"),
+            ("--transfers", "32"),
             ("--checkers", "100"),
             ("--retries", "5"),
+            ("--multi-thread-streams", "32"),
+            ("--multi-thread-cutoff", "32M"),
+            ("--s3-chunk-size", "64M"),
+            ("--s3-upload-concurrency", "32"),
         ):
             self.assertEqual(copy[copy.index(option) + 1], value)
         self.assertIn("--checksum", copy)
@@ -104,17 +108,17 @@ class PromotionStorageTests(unittest.TestCase):
         self.assertNotIn("move", copy)
         self.assertEqual(commands[2][0][0:2], ["rclone", "delete"])
 
-    def test_rclone_aborts_before_bulk_copy_when_probe_streams_through_host(self) -> None:
+    def test_rclone_aborts_before_bulk_copy_when_probe_uses_server_side_copy(self) -> None:
         commands = []
 
         def runner(command, **kwargs):
             commands.append((command, kwargs))
             return subprocess.CompletedProcess(
-                command, 0, "", "INFO : config.json: Copied (new)\n"
+                command, 0, "", "INFO : config.json: Copied (server-side copy)\n"
             )
 
-        executor = RclonePromotionExecutor("r2", runner=runner)
-        with self.assertRaisesRegex(RcloneExecutionError, "host-streamed"):
+        executor = RclonePromotionExecutor("r2source", "r2destination", runner=runner)
+        with self.assertRaisesRegex(RcloneExecutionError, "unexpectedly used"):
             executor.copy(
                 source_bucket="private-models",
                 source_prefix="models/registrations/registration-id/",
@@ -132,11 +136,13 @@ class PromotionStorageTests(unittest.TestCase):
         def runner(command, **kwargs):
             calls.append((command, kwargs))
             return subprocess.CompletedProcess(
-                command, 0, "", "INFO : config.json: Copied (server-side copy)\n"
+                command, 0, "", "INFO : config.json: Copied (new)\n"
             )
 
         with patch.dict(os.environ, {"AWS_CA_BUNDLE": "/validator/private-ca.pem"}):
-            RclonePromotionExecutor("r2", runner=runner).copy(
+            RclonePromotionExecutor(
+                "r2source", "r2destination", runner=runner
+            ).copy(
                 source_bucket="private-models",
                 source_prefix="models/registrations/registration-id/",
                 destination_bucket="public-models",
@@ -149,7 +155,9 @@ class PromotionStorageTests(unittest.TestCase):
 
     def test_rclone_paths_reject_remote_or_prefix_escape(self) -> None:
         with self.assertRaises(ValueError):
-            RclonePromotionExecutor("first:second")
-        executor = RclonePromotionExecutor("r2")
+            RclonePromotionExecutor("first:second", "destination")
+        with self.assertRaises(ValueError):
+            RclonePromotionExecutor("same", "same")
+        executor = RclonePromotionExecutor("r2source", "r2destination")
         with self.assertRaises(ValueError):
             executor.delete_source(bucket="private-models", prefix="models/../escape")
