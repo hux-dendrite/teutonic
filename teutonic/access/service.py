@@ -371,6 +371,7 @@ class AccessControllerJobRunner:
             raise ControllerInvariantError(
                 "private model upload cannot be verified before access is revoked"
             )
+        aborted = self.upload_controller.abort_multipart_uploads(context["model_prefix"])
         verified = self.upload_controller.verify_manifest(
             model_prefix=context["model_prefix"],
             registration_id=str(context["registration_id"]),
@@ -383,7 +384,7 @@ class AccessControllerJobRunner:
             source_etags=verified.source_etags,
             now=now,
         )
-        return {"model_digest": verified.manifest.model_digest}
+        return {"model_digest": verified.manifest.model_digest, "aborted": aborted}
 
     def _create_snapshot(self, job: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         upload_id = str(job["upload_id"])

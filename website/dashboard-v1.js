@@ -125,6 +125,17 @@
         };
     }
 
+    function uploadFailurePresentation(record) {
+        if (!record || !record.upload_id) return null;
+        return {
+            registration: "UID " + String(record.uid == null ? "--" : record.uid)
+                + " · " + String(record.registration_state || "unknown").toUpperCase(),
+            uploadId: String(record.upload_id),
+            uploadState: String(record.upload_state || "verification_failed"),
+            failureCode: String(record.error_code || "verification_failed")
+        };
+    }
+
     function decisionPresentation(record) {
         record = record || {};
         var verdict = String(record.verdict || "").toLowerCase();
@@ -263,6 +274,7 @@
         historyPresentation: historyPresentation,
         taoMarketCapHotkeyUrl: taoMarketCapHotkeyUrl,
         shardPresentation: shardPresentation,
+        uploadFailurePresentation: uploadFailurePresentation,
         decisionPresentation: decisionPresentation,
         datasetPresentation: datasetPresentation
     };

@@ -259,7 +259,23 @@ class DashboardContractTests(unittest.TestCase):
                 "model_identity": "hidden_until_promotion",
             }
         ]
+        upload_failure = deepcopy(fixture["history"][0])
+        upload_failure.update(
+            {
+                "uid": 170,
+                "error_code": "ArtifactIntegrityError",
+                "error_message": "The uploaded model artifacts failed integrity verification.",
+                "policy_version": None,
+                "dataset_version": None,
+                "registration_state": "active",
+                "upload_id": "9452d08b-b3bb-4bc9-9c45-01889fff6fa8",
+                "upload_state": "verification_failed",
+            }
+        )
+        fixture["history"].append(upload_failure)
         text = canonical_dashboard_json(fixture).decode()
+        self.assertIn("ArtifactIntegrityError", text)
+        self.assertIn("9452d08b-b3bb-4bc9-9c45-01889fff6fa8", text)
         forbidden = (
             "secret_access_key",
             "access_key_id",

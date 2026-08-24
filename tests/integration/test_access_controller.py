@@ -319,6 +319,13 @@ class AccessControllerIntegrationTests(unittest.TestCase):
             Body=manifest.as_bytes(),
             Metadata={"sha256": manifest.manifest_sha256},
         )
+        self.s3.multipart.append(
+            {
+                "Key": f"{prefix}unfinished.bin",
+                "UploadId": "unfinished-after-upload",
+                "Parts": [],
+            }
+        )
         upload_id = self.repository.accept_ready_signal(
             ReadySignal.parse(
                 f"r2ready:v1|{registration}|{manifest.manifest_sha256}",
@@ -352,6 +359,7 @@ class AccessControllerIntegrationTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(token_state, "revoked")
         self.assertEqual(len(self.gateway.revoked), 1)
+        self.assertEqual(self.s3.multipart, [])
         self.assertNotIn(
             ("mailbox", mailbox_object_key(registration, 1)),
             self.s3.objects,

@@ -279,6 +279,67 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         ):
             self.assertNotIn(marker.lower(), text.lower())
 
+    def test_upload_verification_failure_is_projected_as_hidden_history_error(self):
+        registration = "a" * 64
+        hotkey = "5" + "F" * 47
+        snapshot = self.owner.execute(
+            """
+            SELECT snapshot_id
+              FROM control_plane.metagraph_snapshots
+             WHERE netuid = 306 AND chain_generation = 'test'
+            """
+        ).fetchone()[0]
+        self.owner.execute(
+            """
+            INSERT INTO control_plane.metagraph_uid_assignments
+                (snapshot_id, uid, hotkey, coldkey, registration_block)
+            VALUES (%s, 170, %s, %s, 950)
+            """,
+            (snapshot, hotkey, "5" + "D" * 47),
+        )
+        self.owner.execute(
+            """
+            INSERT INTO control_plane.registrations (
+                registration_id, netuid, chain_generation, uid, hotkey,
+                first_seen_finalized_block, last_seen_finalized_block, model_prefix, state
+            ) VALUES (%s, 306, 'test', 170, %s, 900, 1000, %s, 'active')
+            """,
+            (registration, hotkey, f"models/registrations/{registration}/"),
+        )
+        self.owner.execute(
+            """
+            INSERT INTO control_plane.r2_parent_tokens (
+                registration_id, cloudflare_token_id, access_key_id, state, activated_at
+            ) VALUES (%s, 'failed-upload-parent-token', 'failed-upload-parent-access',
+                      'active', %s)
+            """,
+            (registration, NOW),
+        )
+        upload_id = "9452d08b-b3bb-4bc9-9c45-01889fff6fa8"
+        self.owner.execute(
+            """
+            INSERT INTO control_plane.uploads (
+                upload_id, registration_id, chain_generation, signalling_hotkey,
+                ready_payload, ready_finalized_block, ready_extrinsic_index,
+                ready_event_index, manifest_sha256, state, failure_code, ready_at, updated_at
+            ) VALUES (%s, %s, 'test', %s, 'r2ready:v1', 902, 0, 0, %s,
+                      'verification_failed', 'ArtifactIntegrityError', %s, %s)
+            """,
+            (upload_id, registration, hotkey, "a" * 64, NOW, NOW),
+        )
+
+        projected = self.repository.project(now=NOW)
+        failure = next(item for item in projected["history"] if item.get("upload_id") == upload_id)
+        self.assertEqual(failure["uid"], 170)
+        self.assertEqual(failure["registration_state"], "active")
+        self.assertEqual(failure["upload_state"], "verification_failed")
+        self.assertEqual(failure["error_code"], "ArtifactIntegrityError")
+        self.assertEqual(failure["verdict"], "error")
+        self.assertEqual(failure["model_identity"], "hidden_until_promotion")
+        self.assertIsNone(failure["policy_version"])
+        self.assertIsNone(failure["dataset_version"])
+        canonical_dashboard_json(projected)
+
     def test_current_evaluation_projects_provisional_bootstrap_metrics(self):
         self.owner.execute(
             """
@@ -562,6 +623,7 @@ class DashboardViewIntegrationTests(unittest.TestCase):
                 "dashboard_queue",
                 "dashboard_service_health",
                 "dashboard_stats",
+                "dashboard_upload_failures",
                 "dashboard_weight_status",
             },
         )

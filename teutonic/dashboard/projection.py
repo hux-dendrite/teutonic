@@ -11,6 +11,10 @@ from psycopg.rows import dict_row
 DASHBOARD_LOCK_ID = 6_082_759_349_011_801
 
 PUBLIC_ERROR_MESSAGES = {
+    "ArtifactIntegrityError": "The uploaded model artifacts failed integrity verification.",
+    "GenesisContractMismatch": "The uploaded model does not match the required genesis contract.",
+    "UploadQuotaExceeded": "The uploaded model exceeded the allowed artifact quota.",
+    "verification_failed": "The uploaded model could not be verified.",
     "invalid_evaluation_input": "The submission did not satisfy the evaluation input policy.",
     "config_rejected": "The model configuration was rejected by the public evaluation policy.",
     "model_copy": "The submission matched a model that is not eligible to compete.",
@@ -221,6 +225,11 @@ class DashboardProjectionRepository:
                 + " ORDER BY completed_at ASC NULLS LAST, challenge_id ASC",
                 self._scope,
             ).fetchall()
+            upload_failures = cursor.execute(
+                _scope_sql("dashboard_upload_failures")
+                + " ORDER BY failed_at ASC, challenge_id ASC",
+                self._scope,
+            ).fetchall()
             weights = cursor.execute(_scope_sql("dashboard_weight_status"), self._scope).fetchone()
             services = cursor.execute(
                 "SELECT * FROM control_plane.dashboard_service_health ORDER BY service_name"
@@ -232,6 +241,9 @@ class DashboardProjectionRepository:
         service_status = self._services(services, current, weight_status, generated)
         king = self._king(king_rows[0]) if king_rows else None
         current_weight = _float(king_rows[0].get("current_weight")) if king_rows else None
+        history_entries = [self._history(row) for row in history]
+        history_entries.extend(self._upload_failure(row) for row in upload_failures)
+        history_entries.sort(key=lambda item: (item["timestamp"] or "", item["challenge_id"]))
         payload = {
             "schema_version": 1,
             "publication_id": str(uuid.uuid4()),
@@ -265,7 +277,7 @@ class DashboardProjectionRepository:
             },
             "current_eval": current,
             "queue": [self._queue(row) for row in queue],
-            "history": [self._history(row) for row in history],
+            "history": history_entries,
             "weight_status": weight_status,
             "service_status": service_status,
             "market": None,
@@ -414,6 +426,41 @@ class DashboardProjectionRepository:
             "model_reference": row["public_model_reference"] if public else None,
             "publication_disposition": row["publication_disposition"] if public else None,
             "model_identity": "public" if public else "hidden_until_promotion",
+        }
+
+    def _upload_failure(self, row) -> dict[str, Any]:
+        error_code = str(row["public_error_code"])
+        return {
+            **self._identity(row),
+            "challenge_id": row["challenge_id"],
+            "baseline_hotkey": row["baseline_hotkey"],
+            "baseline_coldkey": row["baseline_coldkey"],
+            "baseline_uid": int(row["baseline_uid"]),
+            "verdict": "error",
+            "accepted": False,
+            "mu_hat": None,
+            "lcb": None,
+            "delta": None,
+            "avg_king_loss": None,
+            "avg_challenger_loss": None,
+            "wall_time_s": None,
+            "n_sequences_evaluated": None,
+            "n_sequences": None,
+            "early_stopped": False,
+            "shards_used": [],
+            "error_code": error_code,
+            "error_message": PUBLIC_ERROR_MESSAGES[error_code],
+            "policy_version": None,
+            "dataset_version": None,
+            "timestamp": _iso(row["failed_at"]),
+            "challenger_repo": None,
+            "challenger_digest": None,
+            "model_reference": None,
+            "publication_disposition": None,
+            "model_identity": "hidden_until_promotion",
+            "registration_state": row["registration_state"],
+            "upload_id": str(row["upload_id"]),
+            "upload_state": row["upload_state"],
         }
 
     @staticmethod

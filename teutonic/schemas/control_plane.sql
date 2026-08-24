@@ -913,6 +913,50 @@ CREATE VIEW control_plane.dashboard_evaluation_history WITH (security_barrier='t
 ALTER VIEW control_plane.dashboard_evaluation_history OWNER TO teutonic_schema_owner;
 
 --
+-- Name: dashboard_upload_failures; Type: VIEW; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+CREATE VIEW control_plane.dashboard_upload_failures WITH (security_barrier='true') AS
+ SELECT c.netuid,
+    c.chain_generation,
+    c.name AS competition,
+    SUBSTRING(encode(public.digest((u.upload_id)::text, 'sha256'::text), 'hex'::text) FROM 1 FOR 16) AS challenge_id,
+    r.hotkey,
+    identity.coldkey,
+    r.uid,
+    baseline.hotkey AS baseline_hotkey,
+    baseline_identity.coldkey AS baseline_coldkey,
+    baseline.uid AS baseline_uid,
+    r.state AS registration_state,
+    u.upload_id,
+    u.state AS upload_state,
+        CASE
+            WHEN (u.failure_code = ANY (ARRAY['ArtifactIntegrityError'::text, 'GenesisContractMismatch'::text, 'UploadQuotaExceeded'::text])) THEN u.failure_code
+            ELSE 'verification_failed'::text
+        END AS public_error_code,
+    u.updated_at AS failed_at
+   FROM (((control_plane.uploads u
+     JOIN control_plane.registrations r ON ((r.registration_id = u.registration_id)))
+     JOIN control_plane.competitions c ON (((c.netuid = r.netuid) AND (c.chain_generation = r.chain_generation))))
+     JOIN control_plane.king_reigns baseline ON ((baseline.reign_id = c.current_reign_id)))
+     LEFT JOIN LATERAL ( SELECT assignment.coldkey
+           FROM (control_plane.metagraph_snapshots snapshot
+             JOIN control_plane.metagraph_uid_assignments assignment ON ((assignment.snapshot_id = snapshot.snapshot_id)))
+          WHERE ((snapshot.netuid = r.netuid) AND (snapshot.chain_generation = r.chain_generation) AND (assignment.hotkey = r.hotkey) AND snapshot.is_complete)
+          ORDER BY snapshot.finalized_block DESC
+         LIMIT 1) identity ON (true)
+     LEFT JOIN LATERAL ( SELECT assignment.coldkey
+           FROM (control_plane.metagraph_snapshots snapshot
+             JOIN control_plane.metagraph_uid_assignments assignment ON ((assignment.snapshot_id = snapshot.snapshot_id)))
+          WHERE ((snapshot.netuid = c.netuid) AND (snapshot.chain_generation = c.chain_generation) AND (assignment.hotkey = baseline.hotkey) AND snapshot.is_complete)
+          ORDER BY snapshot.finalized_block DESC
+         LIMIT 1) baseline_identity ON (true)
+  WHERE (u.state = 'verification_failed'::text);
+
+
+ALTER VIEW control_plane.dashboard_upload_failures OWNER TO teutonic_schema_owner;
+
+--
 -- Name: dashboard_king_reigns; Type: VIEW; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -2259,6 +2303,13 @@ GRANT SELECT ON TABLE control_plane.model_promotions TO teutonic_auditor;
 --
 
 GRANT SELECT ON TABLE control_plane.dashboard_evaluation_history TO teutonic_dashboard_view;
+
+
+--
+-- Name: TABLE dashboard_upload_failures; Type: ACL; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+GRANT SELECT ON TABLE control_plane.dashboard_upload_failures TO teutonic_dashboard_view;
 
 
 --

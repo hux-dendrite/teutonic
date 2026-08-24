@@ -123,6 +123,23 @@ assert.deepStrictEqual(shards.groups, [
 assert.deepStrictEqual(dashboard.shardPresentation({}).groups, []);
 
 assert.deepStrictEqual(
+    dashboard.uploadFailurePresentation({
+        uid: 170,
+        registration_state: "active",
+        upload_id: "9452d08b-b3bb-4bc9-9c45-01889fff6fa8",
+        upload_state: "verification_failed",
+        error_code: "ArtifactIntegrityError"
+    }),
+    {
+        registration: "UID 170 · ACTIVE",
+        uploadId: "9452d08b-b3bb-4bc9-9c45-01889fff6fa8",
+        uploadState: "verification_failed",
+        failureCode: "ArtifactIntegrityError"
+    }
+);
+assert.strictEqual(dashboard.uploadFailurePresentation({ verdict: "error" }), null);
+
+assert.deepStrictEqual(
     dashboard.decisionPresentation({ verdict: "accepted", lcb: 0.64, delta: 0.5 }),
     {
         kind: "win",
