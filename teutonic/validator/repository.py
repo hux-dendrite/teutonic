@@ -130,7 +130,10 @@ class ValidatorRepository:
                        u.upload_id, u.registration_id, u.model_digest, u.model_name,
                        u.ready_finalized_block, u.ready_extrinsic_index, u.ready_event_index,
                        ready_snapshot.finalized_block_hash AS ready_finalized_block_hash,
-                       vu.immutable_bucket, vu.immutable_prefix,
+                       COALESCE(promoted.public_bucket, vu.immutable_bucket)
+                           AS challenger_bucket,
+                       COALESCE(promoted.public_prefix, vu.immutable_prefix)
+                           AS challenger_prefix,
                        r.hotkey, r.uid,
                        assignment.coldkey,
                        previous.evaluation_id AS previous_evaluation_id,
@@ -150,6 +153,18 @@ class ValidatorRepository:
                        WHERE candidate_registration.netuid = c.netuid
                          AND candidate.chain_generation = c.chain_generation
                          AND candidate.state IN ('ready_for_evaluation', 'retry_pending')
+                         AND NOT EXISTS (
+                             SELECT 1
+                               FROM control_plane.uploads pending
+                               JOIN control_plane.registrations pending_registration
+                                 ON pending_registration.registration_id = pending.registration_id
+                              WHERE pending_registration.netuid = c.netuid
+                                AND pending.chain_generation = c.chain_generation
+                                AND pending.state IN (
+                                    'evaluation_claimed', 'evaluating',
+                                    'accepted_pending_promotion', 'promoted'
+                                )
+                         )
                        ORDER BY candidate.ready_finalized_block,
                                 candidate.ready_extrinsic_index,
                                 candidate.ready_event_index,
@@ -163,6 +178,9 @@ class ValidatorRepository:
                    AND ready_snapshot.finalized_block = u.ready_finalized_block
                    AND ready_snapshot.is_complete
                   JOIN control_plane.verified_uploads vu ON vu.upload_id = u.upload_id
+                  LEFT JOIN control_plane.model_promotions promoted
+                    ON promoted.model_digest = u.model_digest
+                   AND promoted.state = 'promoted'
                   JOIN control_plane.registrations r ON r.registration_id = u.registration_id
                   LEFT JOIN LATERAL (
                       SELECT e.evaluation_id, e.attempt_number, e.state, e.started_at,
@@ -263,8 +281,8 @@ class ValidatorRepository:
                     },
                     "challenger": {
                         "kind": "r2-prefix",
-                        "bucket": row["immutable_bucket"],
-                        "prefix": row["immutable_prefix"],
+                        "bucket": row["challenger_bucket"],
+                        "prefix": row["challenger_prefix"],
                         "expected_digest": row["model_digest"],
                     },
                     "miner": {
@@ -497,6 +515,7 @@ class ValidatorRepository:
                         updated_at = clock_timestamp()
                     WHERE EXCLUDED.disposition = 'winner'
                       AND model_promotions.state = 'promoted'
+                    RETURNING state
                     """,
                     (
                         row["upload_id"],
@@ -513,6 +532,16 @@ class ValidatorRepository:
                         row["total_size_bytes"],
                     ),
                 )
+                promotion = cursor.fetchone()
+                if accepted and promotion is not None and promotion["state"] == "promoted":
+                    cursor.execute(
+                        """
+                        UPDATE control_plane.uploads
+                           SET state = 'promoted', updated_at = clock_timestamp()
+                         WHERE upload_id = %s AND state = 'accepted_pending_promotion'
+                        """,
+                        (row["upload_id"],),
+                    )
         return verdict
 
     def fail_attempt(

@@ -356,6 +356,30 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         )
         return promotion
 
+
+    def test_next_submission_waits_until_winner_is_crowned(self) -> None:
+        first = self.repository.claim_next(now=NOW, policy=policy())
+        self.assertIsNone(self.repository.claim_next(now=NOW, policy=policy()))
+        promotion = self._accept_and_promote(first)
+        self.assertIsNone(self.repository.claim_next(now=NOW, policy=policy()))
+        self.connection.execute(
+            "UPDATE control_plane.uploads SET state = 'promoted' WHERE upload_id = %s",
+            (first.upload_id,),
+        )
+        self.assertIsNone(self.repository.claim_next(now=NOW, policy=policy()))
+        reign = self.repository.crown_promoted_winner(
+            str(promotion),
+            now=NOW,
+            crowned_finalized_block=110,
+            policy_hotkeys=["hotkey-3"],
+            target_hotkeys=["hotkey-3"],
+            target_uids=[3],
+            normalized_weights=[1.0],
+        )
+        second = self.repository.claim_next(now=NOW, policy=policy())
+        self.assertEqual(second.upload_id, str(self.uploads[1]))
+        self.assertEqual(second.claimed_king_reign_id, reign)
+
     def test_claim_order_and_competition_lock_are_deterministic(self) -> None:
         standby = self._repository(self.second_connection, "validator-b")
         with self.assertRaises(SchedulerLockUnavailable):
@@ -994,4 +1018,34 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
                 "SELECT count(*) FROM control_plane.weight_publications"
             ).fetchone()[0],
             0,
+        )
+
+        retry = self.repository.claim_next(now=NOW, policy=policy())
+        self.assertEqual(retry.upload_id, claim.upload_id)
+        self.assertEqual(retry.request["challenger"]["bucket"], "public-models")
+        self.assertEqual(
+            retry.request["challenger"]["prefix"],
+            f"models/sha256/{retry.request['challenger']['expected_digest']}/",
+        )
+        self.repository.complete_verdict(
+            retry.evaluation_id,
+            result=terminal_result(retry.request, accepted=True),
+            now=NOW,
+            publish_non_winning=False,
+        )
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT state FROM control_plane.uploads WHERE upload_id = %s",
+                (claim.upload_id,),
+            ).fetchone()[0],
+            "promoted",
+        )
+        recrowned = self.repository.crown_promoted_winner(
+            str(promotion),
+            now=NOW,
+            crowned_finalized_block=111,
+            policy_hotkeys=["hotkey-3"],
+            target_hotkeys=["hotkey-3"],
+            target_uids=[3],
+            normalized_weights=[1.0],
         )
