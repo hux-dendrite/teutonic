@@ -147,11 +147,17 @@ class PromotionWorker:
         if claim.state != "deleting_private_source" and set(destination) != set(claim.expected):
             source = self.inspector.inventory(claim.private_bucket, claim.private_prefix)
             verify_inventory(claim.expected, source, complete=True)
+            missing = sorted(
+                set(claim.expected) - set(destination),
+                key=lambda path: (claim.expected[path].size, path),
+            )
             self.executor.copy(
                 source_bucket=claim.private_bucket,
                 source_prefix=claim.private_prefix,
                 destination_bucket=claim.public_bucket,
                 destination_prefix=claim.public_prefix,
+                probe_path=missing[0],
+                expected_object_count=len(missing),
                 heartbeat=heartbeat,
             )
             self._stage("copy_completed", claim)

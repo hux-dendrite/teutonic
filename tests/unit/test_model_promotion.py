@@ -9,6 +9,7 @@ from teutonic.promotion import (
     ObservedObject,
     PromotionCollisionError,
     PromotionObject,
+    RcloneExecutionError,
     RclonePromotionExecutor,
     S3InventoryInspector,
     inventory_digest,
@@ -66,7 +67,8 @@ class PromotionStorageTests(unittest.TestCase):
 
         def runner(command, **kwargs):
             commands.append((command, kwargs))
-            return subprocess.CompletedProcess(command, 0, "", "")
+            output = "INFO : config.json: Copied (server-side copy)\n"
+            return subprocess.CompletedProcess(command, 0, "", output)
 
         executor = RclonePromotionExecutor("r2", runner=runner)
         prefix = "models/sha256/" + "a" * 64 + "/"
@@ -75,24 +77,63 @@ class PromotionStorageTests(unittest.TestCase):
             source_prefix=prefix,
             destination_bucket="public-models",
             destination_prefix=prefix,
+            probe_path="config.json",
+            expected_object_count=2,
         )
         executor.delete_source(bucket="private-models", prefix=prefix)
 
-        copy = commands[0][0]
+        probe = commands[0][0]
+        self.assertEqual(probe[0:2], ["rclone", "copyto"])
+        self.assertTrue(probe[2].startswith("r2:private-models/"))
+        self.assertTrue(probe[3].startswith("r2:public-models/"))
+
+        copy = commands[1][0]
         self.assertEqual(copy[0:2], ["rclone", "copy"])
         self.assertTrue(copy[2].startswith("r2:private-models/"))
         self.assertTrue(copy[3].startswith("r2:public-models/"))
+        for option, value in (
+            ("--transfers", "100"),
+            ("--checkers", "100"),
+            ("--retries", "5"),
+        ):
+            self.assertEqual(copy[copy.index(option) + 1], value)
+        self.assertIn("--checksum", copy)
+        self.assertIn("--fast-list", copy)
         self.assertIn("--immutable", copy)
         self.assertIn("--metadata", copy)
         self.assertNotIn("move", copy)
-        self.assertEqual(commands[1][0][0:2], ["rclone", "delete"])
+        self.assertEqual(commands[2][0][0:2], ["rclone", "delete"])
+
+    def test_rclone_aborts_before_bulk_copy_when_probe_streams_through_host(self) -> None:
+        commands = []
+
+        def runner(command, **kwargs):
+            commands.append((command, kwargs))
+            return subprocess.CompletedProcess(
+                command, 0, "", "INFO : config.json: Copied (new)\n"
+            )
+
+        executor = RclonePromotionExecutor("r2", runner=runner)
+        with self.assertRaisesRegex(RcloneExecutionError, "host-streamed"):
+            executor.copy(
+                source_bucket="private-models",
+                source_prefix="models/registrations/registration-id/",
+                destination_bucket="public-models",
+                destination_prefix="models/sha256/" + "a" * 64 + "/",
+                probe_path="config.json",
+                expected_object_count=52,
+            )
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][0][0:2], ["rclone", "copyto"])
 
     def test_rclone_does_not_inherit_boto_custom_ca_bundle(self) -> None:
         calls = []
 
         def runner(command, **kwargs):
             calls.append((command, kwargs))
-            return subprocess.CompletedProcess(command, 0, "", "")
+            return subprocess.CompletedProcess(
+                command, 0, "", "INFO : config.json: Copied (server-side copy)\n"
+            )
 
         with patch.dict(os.environ, {"AWS_CA_BUNDLE": "/validator/private-ca.pem"}):
             RclonePromotionExecutor("r2", runner=runner).copy(
@@ -100,6 +141,8 @@ class PromotionStorageTests(unittest.TestCase):
                 source_prefix="models/registrations/registration-id/",
                 destination_bucket="public-models",
                 destination_prefix="models/sha256/" + "a" * 64 + "/",
+                probe_path="config.json",
+                expected_object_count=1,
             )
 
         self.assertNotIn("AWS_CA_BUNDLE", calls[0][1]["env"])

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping
 from datetime import timedelta
+from pathlib import PurePosixPath
 from typing import Any
 
 from .contracts import ObservedObject
@@ -12,6 +15,12 @@ from .contracts import ObservedObject
 
 _REMOTE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+_SERVER_SIDE_COPY = re.compile(r"\bCopied \(server-side copy\)")
+_STREAMED_COPY = re.compile(r"\bCopied \((?:new|replaced existing)\)")
+_COPY_TRANSFERS = 100
+_COPY_CHECKERS = 100
+_COPY_RETRIES = 5
+log = logging.getLogger("teutonic.promotion-worker.rclone")
 
 
 class PromotionStorageError(RuntimeError):
@@ -90,7 +99,7 @@ class RclonePromotionExecutor:
             raise ValueError("invalid R2 promotion prefix")
         return f"{self.remote}:{bucket}/{normalized}/"
 
-    def _run(self, command: list[str], *, heartbeat: Callable[[], None] | None) -> None:
+    def _run(self, command: list[str], *, heartbeat: Callable[[], None] | None) -> str:
         environment = os.environ.copy()
         # boto3 needs the validator host's private CA bundle, but rclone's S3
         # backend cannot combine AWS_CA_BUNDLE with its wrapped HTTP transport.
@@ -107,32 +116,89 @@ class RclonePromotionExecutor:
             if heartbeat is not None:
                 heartbeat()
             return_code = result.returncode
+            output = "\n".join(part for part in (result.stdout, result.stderr) if part)
         else:
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                env=environment,
-            )
-            while True:
-                try:
-                    return_code = process.wait(timeout=self.heartbeat_interval.total_seconds())
-                    break
-                except subprocess.TimeoutExpired:
-                    if heartbeat is not None:
-                        try:
-                            heartbeat()
-                        except BaseException:
-                            process.terminate()
+            with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output_file:
+                process = subprocess.Popen(
+                    command,
+                    stdout=output_file,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=environment,
+                )
+                while True:
+                    try:
+                        return_code = process.wait(
+                            timeout=self.heartbeat_interval.total_seconds()
+                        )
+                        break
+                    except subprocess.TimeoutExpired:
+                        if heartbeat is not None:
                             try:
-                                process.wait(timeout=10)
-                            except subprocess.TimeoutExpired:
-                                process.kill()
-                                process.wait(timeout=10)
-                            raise
+                                heartbeat()
+                            except BaseException:
+                                process.terminate()
+                                try:
+                                    process.wait(timeout=10)
+                                except subprocess.TimeoutExpired:
+                                    process.kill()
+                                    process.wait(timeout=10)
+                                raise
+                output_file.seek(0)
+                output = output_file.read()
         if return_code:
-            raise RcloneExecutionError(f"rclone exited with status {return_code}")
+            tail = " | ".join(line.strip() for line in output.splitlines()[-8:] if line.strip())
+            detail = f": {tail}" if tail else ""
+            raise RcloneExecutionError(f"rclone exited with status {return_code}{detail}")
+        return output
+
+    def _object_path(self, bucket: str, prefix: str, path: str) -> str:
+        base = self._path(bucket, prefix).rstrip("/")
+        parsed = PurePosixPath(path)
+        if not path or parsed.is_absolute() or ".." in parsed.parts or str(parsed) != path:
+            raise ValueError("invalid R2 promotion object path")
+        return f"{base}/{path}"
+
+    @staticmethod
+    def _copy_modes(output: str) -> tuple[int, int]:
+        return len(_SERVER_SIDE_COPY.findall(output)), len(_STREAMED_COPY.findall(output))
+
+    @staticmethod
+    def _copy_flags(*, bulk: bool) -> list[str]:
+        flags = [
+            "--checksum",
+            "--immutable",
+            "--metadata",
+            "--retries",
+            str(_COPY_RETRIES),
+            "--log-level",
+            "INFO",
+            "--stats",
+            "0",
+        ]
+        if bulk:
+            flags.extend(
+                [
+                    "--fast-list",
+                    "--check-first",
+                    "--transfers",
+                    str(_COPY_TRANSFERS),
+                    "--checkers",
+                    str(_COPY_CHECKERS),
+                ]
+            )
+        return flags
+
+    def _require_server_side(self, output: str, *, expected: int, stage: str) -> None:
+        server_side, streamed = self._copy_modes(output)
+        if streamed:
+            raise RcloneExecutionError(
+                f"rclone {stage} attempted {streamed} host-streamed object copy/copies"
+            )
+        if server_side != expected:
+            raise RcloneExecutionError(
+                f"rclone {stage} confirmed {server_side} server-side copies; expected {expected}"
+            )
 
     def copy(
         self,
@@ -141,30 +207,60 @@ class RclonePromotionExecutor:
         source_prefix: str,
         destination_bucket: str,
         destination_prefix: str,
+        probe_path: str,
+        expected_object_count: int,
         heartbeat: Callable[[], None] | None = None,
     ) -> None:
         source = self._path(source_bucket, source_prefix)
         destination = self._path(destination_bucket, destination_prefix)
         if source_bucket == destination_bucket:
             raise ValueError("private and public promotion buckets must differ")
-        self._run(
+        if expected_object_count < 1:
+            raise ValueError("promotion copy must expect at least one missing object")
+
+        probe_output = self._run(
             [
                 "rclone",
-                "copy",
-                source,
-                destination,
-                "--immutable",
-                "--metadata",
-                "--check-first",
+                "copyto",
+                self._object_path(source_bucket, source_prefix, probe_path),
+                self._object_path(destination_bucket, destination_prefix, probe_path),
+                *self._copy_flags(bulk=False),
             ],
             heartbeat=heartbeat,
+        )
+        self._require_server_side(probe_output, expected=1, stage="probe")
+        log.info("rclone server-side copy confirmed probe=%s", probe_path)
+
+        remaining = expected_object_count - 1
+        if remaining == 0:
+            return
+        bulk_output = self._run(
+            ["rclone", "copy", source, destination, *self._copy_flags(bulk=True)],
+            heartbeat=heartbeat,
+        )
+        self._require_server_side(bulk_output, expected=remaining, stage="bulk copy")
+        log.info(
+            "rclone server-side bulk copy confirmed objects=%d transfers=%d checkers=%d",
+            remaining,
+            _COPY_TRANSFERS,
+            _COPY_CHECKERS,
         )
 
     def delete_source(
         self, *, bucket: str, prefix: str, heartbeat: Callable[[], None] | None = None
     ) -> None:
         self._run(
-            ["rclone", "delete", self._path(bucket, prefix), "--rmdirs"],
+            [
+                "rclone",
+                "delete",
+                self._path(bucket, prefix),
+                "--rmdirs",
+                "--fast-list",
+                "--checkers",
+                str(_COPY_CHECKERS),
+                "--retries",
+                str(_COPY_RETRIES),
+            ],
             heartbeat=heartbeat,
         )
 
