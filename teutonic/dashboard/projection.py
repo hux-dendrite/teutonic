@@ -4,6 +4,7 @@ import math
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Mapping
+from urllib.parse import unquote, urlsplit
 
 from psycopg.rows import dict_row
 
@@ -59,6 +60,39 @@ def _bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).lower() in {"1", "true", "yes"}
+
+
+def _shard_name(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    path = urlsplit(text).path or text.split("?", 1)[0].split("#", 1)[0]
+    name = unquote(path.rstrip("/").rsplit("/", 1)[-1]).strip()
+    return name[:512] if name and name not in {".", ".."} else None
+
+
+def _shards_used(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    groups: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        source_value = item.get("source")
+        source = source_value.strip()[:128] if isinstance(source_value, str) else "dataset"
+        raw_names = item.get("names")
+        if not isinstance(raw_names, list):
+            raw_names = item.get("refs")
+        if not isinstance(raw_names, list):
+            raw_names = []
+        names = []
+        for raw_name in raw_names:
+            name = _shard_name(raw_name)
+            if name and name not in names:
+                names.append(name)
+        if names:
+            groups.append({"source": source or "dataset", "names": names})
+    return groups
 
 
 def _dataset_source(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -364,6 +398,7 @@ class DashboardProjectionRepository:
             "n_sequences_evaluated": _int(row["n_sequences_evaluated"]),
             "n_sequences": _int(row["n_sequences"]),
             "early_stopped": _bool(row["early_stopped"]),
+            "shards_used": _shards_used(row.get("shards_used")),
             "error_code": error_code,
             "error_message": PUBLIC_ERROR_MESSAGES.get(error_code) if error_code else None,
             "policy_version": row["policy_version"],

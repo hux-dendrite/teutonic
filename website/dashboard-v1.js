@@ -84,6 +84,26 @@
         return "https://taomarketcap.com/hotkey/" + encodeURIComponent(address) + "/metagraph";
     }
 
+    function shardPresentation(record) {
+        var rawGroups = record && Array.isArray(record.shards_used) ? record.shards_used : [];
+        var groups = rawGroups.map(function(group) {
+            var source = group && typeof group.source === "string" && group.source.trim()
+                ? group.source.trim() : "dataset";
+            var rawNames = group && Array.isArray(group.names) ? group.names : [];
+            var names = [];
+            rawNames.forEach(function(value) {
+                if (typeof value !== "string" || !value.trim()) return;
+                var name = value.trim();
+                if (names.indexOf(name) === -1) names.push(name);
+            });
+            return { source: source, names: names };
+        }).filter(function(group) { return group.names.length > 0; });
+        return {
+            groups: groups,
+            count: groups.reduce(function(total, group) { return total + group.names.length; }, 0)
+        };
+    }
+
     function datasetPresentation(manifest) {
         if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
             throw new Error("dataset manifest must be an object");
@@ -171,6 +191,7 @@
         presentation: presentation,
         historyPresentation: historyPresentation,
         taoMarketCapHotkeyUrl: taoMarketCapHotkeyUrl,
+        shardPresentation: shardPresentation,
         datasetPresentation: datasetPresentation
     };
 });

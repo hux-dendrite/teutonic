@@ -85,6 +85,20 @@ assert.strictEqual(
 );
 assert.strictEqual(dashboard.taoMarketCapHotkeyUrl(""), "");
 
+const shards = dashboard.shardPresentation({
+    shards_used: [
+        { source: "finewebedu", names: ["part-001.npy", "part-002.npy", "part-001.npy"] },
+        { source: " ", names: ["part-003.npy", ""] },
+        { source: "ignored", names: [] }
+    ]
+});
+assert.strictEqual(shards.count, 3);
+assert.deepStrictEqual(shards.groups, [
+    { source: "finewebedu", names: ["part-001.npy", "part-002.npy"] },
+    { source: "dataset", names: ["part-003.npy"] }
+]);
+assert.deepStrictEqual(dashboard.shardPresentation({}).groups, []);
+
 const invalid = base();
 invalid.schema_version = 2;
 assert.throws(() => dashboard.presentation(invalid), /unsupported dashboard schema/);

@@ -182,7 +182,7 @@
     "history_entry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["challenge_id", "hotkey", "coldkey", "uid", "baseline_hotkey", "baseline_coldkey", "baseline_uid", "verdict", "accepted", "mu_hat", "lcb", "delta", "avg_king_loss", "avg_challenger_loss", "wall_time_s", "n_sequences_evaluated", "n_sequences", "early_stopped", "error_code", "error_message", "policy_version", "dataset_version", "timestamp", "challenger_repo", "challenger_digest", "model_reference", "publication_disposition", "model_identity"],
+      "required": ["challenge_id", "hotkey", "coldkey", "uid", "baseline_hotkey", "baseline_coldkey", "baseline_uid", "verdict", "accepted", "mu_hat", "lcb", "delta", "avg_king_loss", "avg_challenger_loss", "wall_time_s", "n_sequences_evaluated", "n_sequences", "early_stopped", "shards_used", "error_code", "error_message", "policy_version", "dataset_version", "timestamp", "challenger_repo", "challenger_digest", "model_reference", "publication_disposition", "model_identity"],
       "properties": {
         "challenge_id": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
         "hotkey": { "type": "string", "minLength": 1 },
@@ -202,6 +202,22 @@
         "n_sequences_evaluated": { "$ref": "#/$defs/nullable_integer" },
         "n_sequences": { "$ref": "#/$defs/nullable_integer" },
         "early_stopped": { "type": "boolean" },
+        "shards_used": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source", "names"],
+            "properties": {
+              "source": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "names": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+              }
+            }
+          }
+        },
         "error_code": { "$ref": "#/$defs/nullable_string" },
         "error_message": { "$ref": "#/$defs/nullable_string" },
         "policy_version": { "type": "string", "minLength": 1 },

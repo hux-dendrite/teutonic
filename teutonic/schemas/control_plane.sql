@@ -868,7 +868,20 @@ CREATE VIEW control_plane.dashboard_evaluation_history WITH (security_barrier='t
         CASE
             WHEN (p.state = 'promoted'::text) THEN p.disposition
             ELSE NULL::text
-        END AS publication_disposition
+        END AS publication_disposition,
+    COALESCE(( SELECT jsonb_agg(jsonb_build_object('source', COALESCE(NULLIF((shard_group.value ->> 'source'::text), ''::text), 'dataset'::text), 'names', COALESCE(( SELECT jsonb_agg(regexp_replace(split_part(split_part((shard_ref.value #>> '{}'::text[]), '?'::text, 1), '#'::text, 1), '^.*/'::text, ''::text) ORDER BY shard_ref.ordinality)
+                   FROM jsonb_array_elements(
+                        CASE
+                            WHEN (jsonb_typeof((shard_group.value -> 'refs'::text)) = 'array'::text) THEN (shard_group.value -> 'refs'::text)
+                            ELSE '[]'::jsonb
+                        END) WITH ORDINALITY shard_ref(value, ordinality)
+                  WHERE (jsonb_typeof(shard_ref.value) = 'string'::text)), '[]'::jsonb)) ORDER BY shard_group.ordinality)
+           FROM jsonb_array_elements(
+                CASE
+                    WHEN (jsonb_typeof(COALESCE((e.verdict_summary -> 'shards_used'::text), (e.verdict_summary #> '{dataset,shards_used}'::text[]), '[]'::jsonb)) = 'array'::text) THEN COALESCE((e.verdict_summary -> 'shards_used'::text), (e.verdict_summary #> '{dataset,shards_used}'::text[]), '[]'::jsonb)
+                    ELSE '[]'::jsonb
+                END) WITH ORDINALITY shard_group(value, ordinality)
+          WHERE (jsonb_typeof(shard_group.value) = 'object'::text)), '[]'::jsonb) AS shards_used
    FROM (((((((control_plane.evaluations e
      JOIN control_plane.uploads u ON ((u.upload_id = e.upload_id)))
      JOIN control_plane.registrations r ON ((r.registration_id = u.registration_id)))

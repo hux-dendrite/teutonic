@@ -220,7 +220,9 @@ class DashboardViewIntegrationTests(unittest.TestCase):
                 competition,
                 reign,
                 '{"mu_hat":0.01,"lcb":0.005,"delta_threshold":0.02,"avg_king_loss":2.1,'
-                '"avg_challenger_loss":2.09,"wall_time_s":42,"n_sequences":64}',
+                '"avg_challenger_loss":2.09,"wall_time_s":42,"n_sequences":64,'
+                '"shards_used":[{"source":"fixture","refs":['
+                '"https://datasets.example/private/path/part-000.npy?secret=never"]}]}',
                 NOW,
             ),
         ).fetchone()[0]
@@ -258,6 +260,10 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["source_watermark"] > 0, True)
         self.assertEqual(len(payload["history"]), 1)
         self.assertEqual(payload["history"][0]["delta"], 0.02)
+        self.assertEqual(
+            payload["history"][0]["shards_used"],
+            [{"source": "fixture", "names": ["part-000.npy"]}],
+        )
         self.assertEqual(payload["history"][0]["model_identity"], "hidden_until_promotion")
         self.assertIsNone(payload["history"][0]["challenger_repo"])
         self.assertEqual(payload["king"]["coldkey"], "5" + "G" * 47)
@@ -268,6 +274,8 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             "result_artifact_reference",
             "private_diagnostic_reference",
             "immutable_bucket",
+            "datasets.example/private",
+            "secret=never",
         ):
             self.assertNotIn(marker.lower(), text.lower())
 

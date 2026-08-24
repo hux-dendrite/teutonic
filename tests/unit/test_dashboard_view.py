@@ -219,6 +219,7 @@ class DashboardContractTests(unittest.TestCase):
                 "n_sequences_evaluated": None,
                 "n_sequences": None,
                 "early_stopped": False,
+                "shards_used": [],
                 "error_code": "evaluation_failed",
                 "error_message": "The evaluation could not be completed.",
                 "policy_version": "policy-v1",
