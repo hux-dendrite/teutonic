@@ -1,0 +1,97 @@
+"use strict";
+
+const assert = require("assert");
+const dashboard = require("../../website/dashboard-v1.js");
+
+function base() {
+    return {
+        schema_version: 1,
+        publication_id: "11111111-1111-4111-8111-111111111111",
+        generated_at: "2026-08-18T12:00:00Z",
+        updated_at: "2026-08-18T12:00:00Z",
+        source_watermark: 1,
+        chain: { name: "Teutonic", netuid: 306, generation: "test", competition: "quasar" },
+        king: null,
+        king_payout: { weight: null, alpha_per_hour: null, usd_per_hour: null },
+        king_chain: [],
+        stats: {},
+        current_eval: null,
+        queue: [],
+        history: [],
+        weight_status: {},
+        service_status: { overall: "healthy" },
+        market: null
+    };
+}
+
+function hiddenRecord() {
+    return { model_identity: "hidden_until_promotion", challenger_repo: null };
+}
+
+const idle = dashboard.presentation(base());
+assert.strictEqual(idle.idle, true);
+assert.strictEqual(idle.historyEmpty, true);
+
+const queuedPayload = base();
+queuedPayload.queue = [hiddenRecord()];
+const queued = dashboard.presentation(queuedPayload);
+assert.strictEqual(queued.idle, false);
+assert.strictEqual(queued.duelIdentity, dashboard.HIDDEN);
+
+const evaluatingPayload = base();
+evaluatingPayload.current_eval = hiddenRecord();
+assert.strictEqual(dashboard.presentation(evaluatingPayload).duelIdentity, dashboard.HIDDEN);
+
+const rejectedPayload = base();
+rejectedPayload.history = [hiddenRecord()];
+assert.strictEqual(dashboard.presentation(rejectedPayload).historyIdentity[0], dashboard.HIDDEN);
+
+const winnerPayload = base();
+winnerPayload.history = [{ model_identity: "public", challenger_repo: "owner/winner" }];
+assert.strictEqual(dashboard.presentation(winnerPayload).historyIdentity[0], "owner/winner");
+
+const nonWinnerPayload = base();
+nonWinnerPayload.history = [{ model_identity: "public", challenger_repo: "owner/non-winner" }];
+assert.strictEqual(dashboard.presentation(nonWinnerPayload).historyIdentity[0], "owner/non-winner");
+
+const degradedPayload = base();
+degradedPayload.service_status.overall = "degraded";
+assert.strictEqual(dashboard.presentation(degradedPayload).degraded, true);
+
+const staleMarketPayload = base();
+staleMarketPayload.market = { stale: true };
+assert.strictEqual(dashboard.presentation(staleMarketPayload).marketStale, true);
+
+const invalid = base();
+invalid.schema_version = 2;
+assert.throws(() => dashboard.presentation(invalid), /unsupported dashboard schema/);
+
+const datasetManifest = {
+    schema_version: 1,
+    dataset_label: "fixture-mix",
+    eval_n: 300,
+    sources: [{
+        name: "fixture",
+        proportion: 1,
+        manifest_url: "https://datasets.example/fixture/manifest.json",
+        manifest_sha256: "b".repeat(64),
+        source_repo: "owner/dataset",
+        tokenizer: "owner/tokenizer",
+        dtype: "uint32",
+        tokenization_mode: "seq_packed_shards",
+        sequence_length: 2048,
+        total_tokens: 2_048_000,
+        total_shards: 4,
+        estimated_sequences: 1000
+    }]
+};
+const dataset = dashboard.datasetPresentation(datasetManifest);
+assert.strictEqual(dataset.rows.length, 1);
+assert.strictEqual(dataset.totalTokens, 2_048_000);
+assert.strictEqual(dataset.totalSequences, 1000);
+assert.strictEqual(dataset.evalTokens, 614_400);
+assert.strictEqual(dataset.rows[0].normalizedWeight, 1);
+assert.strictEqual(dataset.rows[0].source, "owner/dataset");
+assert.strictEqual(dataset.rows[0].metadataLoaded, true);
+assert.throws(() => dashboard.datasetPresentation({}, {}), /sources must be an array/);
+console.log("dashboard-v1 representative render states passed");

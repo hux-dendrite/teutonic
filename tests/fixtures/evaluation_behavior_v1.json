@@ -1,0 +1,66 @@
+{
+  "fixed_now": "2026-08-18T10:00:00+00:00",
+  "identity": {
+    "challenge_id": "challenge-001",
+    "challenger_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "challenger_repo": "miner/model",
+    "hotkey": "5AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "uid": 42,
+    "coldkey": "5CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+  },
+  "cases": [
+    {
+      "name": "accepted",
+      "kind": "verdict",
+      "input": {"accepted": true, "verdict": "challenger", "mu_hat": 0.003, "lcb": 0.002, "delta_threshold": 0.0015, "avg_king_loss": 1.2, "avg_challenger_loss": 1.197, "wall_time_s": 90},
+      "policy_input": {"king_losses": [1.2, 1.21, 1.19, 1.205], "challenger_losses": [1.197, 1.207, 1.187, 1.202], "bootstrap_seed": 17, "n_bootstrap": 256, "alpha": 0.1, "delta_threshold": 0.0015},
+      "policy_expected": {"accepted": true, "verdict": "challenger", "mu_hat": 0.003, "lcb": 0.003},
+      "expected": {"accepted": true, "verdict": "challenger", "delta": 0.0015, "best_loss": 1.197}
+    },
+    {
+      "name": "rejected",
+      "kind": "verdict",
+      "input": {"accepted": false, "verdict": "king", "mu_hat": 0.0002, "lcb": -0.0001, "delta": 0.0015, "avg_king_loss": 1.2, "avg_challenger_loss": 1.1998, "wall_time_s": 85},
+      "policy_input": {"king_losses": [1.2, 1.2, 1.2, 1.2], "challenger_losses": [1.199, 1.201, 1.199, 1.201], "bootstrap_seed": 23, "n_bootstrap": 256, "alpha": 0.1, "delta_threshold": 0.0015},
+      "policy_expected": {"accepted": false, "verdict": "king", "mu_hat": 0.0},
+      "expected": {"accepted": false, "verdict": "king", "delta": 0.0015, "best_loss": 1.1998}
+    },
+    {
+      "name": "copy",
+      "kind": "failure",
+      "error_code": "model_copy",
+      "error_detail": "model is a copy of the king",
+      "policy_input": {
+        "challenger_repo": "miner/model",
+        "challenger_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "king_repo": "king/model",
+        "king_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "challenger_info": {"safetensor_layers": {"model.safetensors": "cccc"}, "committed_at": "2026-08-18T09:00:00+00:00", "timestamp_source": "harbor_artifact.push_time"},
+        "king_info": {"safetensor_layers": {"model.safetensors": "cccc"}, "committed_at": "2026-08-18T08:00:00+00:00", "timestamp_source": "harbor_artifact.push_time"}
+      },
+      "policy_expected": {"action": "reject", "challenger_committed_at": "2026-08-18T09:00:00+00:00", "king_committed_at": "2026-08-18T08:00:00+00:00"},
+      "expected": {"accepted": false, "verdict": "error", "error_code": "model_copy"}
+    },
+    {
+      "name": "invalid_config",
+      "kind": "failure",
+      "error_code": "config_rejected",
+      "error_detail": "hidden_size mismatch",
+      "policy_input": {"king_config": {"architectures": ["QuasarForCausalLM"], "hidden_size": 4096}, "challenger_config": {"architectures": ["QuasarForCausalLM"], "hidden_size": 2048}},
+      "policy_expected": "hidden_size mismatch: king=4096 challenger=2048",
+      "expected": {"accepted": false, "verdict": "error", "error_code": "config_rejected"}
+    },
+    {
+      "name": "transient_error",
+      "kind": "error",
+      "input": "server disconnected while streaming",
+      "expected": {"transient": true, "marker": "server disconnected"}
+    },
+    {
+      "name": "terminal_error",
+      "kind": "error",
+      "input": "eval server error: model failed sanity probe",
+      "expected": {"transient": false, "marker": "eval_server_reported"}
+    }
+  ]
+}

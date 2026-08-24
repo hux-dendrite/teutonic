@@ -1,44 +1,69 @@
-# Teutonic Quasar — self-contained Quasar/Qwen3.5 snapshots.
+# Teutonic II — 110B/256-expert top-8 custom Transformers model.
 #
-# This chain uses Quasar checkpoints that carry their own config/custom code:
-#   configuration_qwen3_5.py
-#   modeling_qwen3_5.py
-#
-# The validator allows those files only through the Quasar custom-code policy:
-# auto_map must point to the exact local classes and the code files must match
-# the current king byte-for-byte.
+# MiMo snapshots are self-contained and ship configuration_mimo_v2.py plus
+# modeling_mimo_v2.py. The validator permits only those exact files and
+# requires a challenger's copies to hash-match the current king.
 [chain]
-name = "teutonic"
-seed_repo = "dendrite/teutonic-x-genesis"
-repo_pattern = "^[^/]+/teutonic-.+$"
+name = "teutonic-II-110B"
+seed_repo = "dendriteholdings/teutonic-II-110B-genesis"
+repo_pattern = "^[^/]+/teutonic-II-110B-.+$"
 
 [arch]
-module = "archs.quasar"
-# Generic structural keys are enforced by validator.py automatically. These
-# extra keys pin the Quasar/Qwen3.5-specific architecture surface visible in
-# model/teutonic-x/config.json
+module = "teutonic.archs.mimo"
 extra_lock_keys = [
-  "attention_bias",
-  "attention_dropout",
-  "attn_output_gate",
-  "eos_token_id",
-  "full_attention_interval",
-  "linear_conv_kernel_dim",
-  "linear_key_head_dim",
-  "linear_num_key_heads",
-  "linear_num_value_heads",
-  "linear_value_head_dim",
-  "mamba_ssm_dtype",
-  "mlp_only_layers",
-  "mtp_num_hidden_layers",
-  "mtp_use_dedicated_embeddings",
+  "add_full_attention_sink_bias",
+  "add_swa_attention_sink_bias",
+  "attention_chunk_size",
+  "attention_projection_layout",
+  "attention_value_scale",
+  "hybrid_block_size",
+  "hybrid_layer_pattern",
+  "layer_types",
+  "layernorm_epsilon",
+  "moe_intermediate_size",
+  "moe_layer_freq",
+  "n_group",
+  "n_routed_experts",
+  "n_shared_experts",
+  "norm_topk_prob",
+  "num_experts_per_tok",
   "partial_rotary_factor",
-  "rms_norm_eps",
   "rope_parameters",
-  "use_gla",
-  "use_nope",
+  "routed_scaling_factor",
+  "scoring_func",
+  "sliding_window",
+  "sliding_window_size",
+  "swa_head_dim",
+  "swa_num_attention_heads",
+  "swa_num_key_value_heads",
+  "swa_rope_theta",
+  "swa_v_head_dim",
+  "topk_group",
+  "topk_method",
+  "v_head_dim",
 ]
+
 [seed]
-tokenizer_repo = "silx-ai/Quasar-10B"
-repo_backend = "hippius"
-seed_digest = "sha256:51556b3b2d0b6ba211f192c9fd7eaa05d51b441bf3eac98c0fdc9489634fb9a5"
+tokenizer_repo = "dendriteholdings/teutonic-II-110B-genesis"
+repo_backend = "hf"
+seed_digest = "hf:8f971f030f5d801f812540007b396058f69cc08a"
+genesis_hotkey = "5E6yHkmZmSpBT5aa2rNZcmeYa1y3N9jw1h7g53oNPzMUpnqG"
+initial_weight_uids = [110, 115, 143, 224, 226]
+
+[seed.contract_files]
+"chat_template.jinja.txt" = "bafea0fe0bd53ef1156649859ca6eeec812ef1d95a62d08323841f2431067cc2"
+"config.json" = "a464b9817f4a9832e71b8f10c67e756d81843f263a064a89b085d6c50107554d"
+"configuration_mimo_v2.py" = "4ecf7496d022aeca24e58d523302d3ea1ad78784e8bc50b3af7134526c623d80"
+"modeling_mimo_v2.py" = "08ee07cc45353e4bf01c7e2d207764f561f24c14d2bc258497928cd81f0c3f37"
+"tokenizer.json" = "71e1168ef6233c01973f3b8b90abcd86236e146f7aee8da59655d2ca51afdb20"
+"tokenizer_config.json" = "2cb1d781e7d20a1386d6a6c2c89fdc9b18a9c6f277071488f39dbfc02829589e"
+
+[evaluation]
+dataset_label = "finewebedu"
+n = 2000
+delta_threshold = 0.5
+
+[[evaluation.datasets]]
+name = "finewebedu"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/finewebedu/manifest.json"
+proportion = 1

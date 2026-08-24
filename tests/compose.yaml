@@ -1,0 +1,59 @@
+name: teutonic-test
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: teutonic_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: teutonic-local-test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d teutonic_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - ../teutonic/schemas/control_plane.sql:/docker-entrypoint-initdb.d/001-control-plane.sql:ro
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  control-plane-tests:
+    build:
+      context: ..
+      dockerfile: tests/docker/Dockerfile
+    environment:
+      TEUTONIC_TEST_DATABASE_URL: postgresql://postgres:teutonic-local-test@postgres:5432/teutonic_test
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ..:/app:ro
+
+  dashboard-website-tests:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - ..:/app:ro
+    command: ["node", "tests/contracts/dashboard_v1_render.test.js"]
+
+  database-recovery-tests:
+    profiles: ["recovery"]
+    image: postgres:16.4-alpine
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: teutonic-local-test
+      TEUTONIC_DATABASE_URL: postgresql://postgres:teutonic-local-test@postgres:5432/teutonic_test
+      TEUTONIC_BACKUP_ALLOW_OVERWRITE: "1"
+      TEUTONIC_RESTORE_DATABASE_URL: postgresql://postgres:teutonic-local-test@postgres:5432/teutonic_restore_test
+      TEUTONIC_RESTORE_CONFIRM_DATABASE: teutonic_restore_test
+    depends_on:
+      postgres:
+        condition: service_healthy
+      control-plane-tests:
+        condition: service_completed_successfully
+    volumes:
+      - ..:/app:ro
+    tmpfs:
+      - /backups
+    command: ["sh", "/app/scripts/db/test_backup_restore.sh"]

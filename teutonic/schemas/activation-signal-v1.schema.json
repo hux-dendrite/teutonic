@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://teutonic.ai/schemas/activation-signal-v1.schema.json",
+  "title": "Teutonic finalized on-chain activation signal v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "signature_scheme",
+    "chain_generation",
+    "netuid",
+    "uid",
+    "hotkey",
+    "registration_id",
+    "registration_block",
+    "payload"
+  ],
+  "properties": {
+    "protocol_version": { "const": 1 },
+    "signature_scheme": { "const": "ed25519" },
+    "chain_generation": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "netuid": { "type": "integer", "minimum": 0 },
+    "uid": { "type": "integer", "minimum": 0 },
+    "hotkey": { "type": "string", "minLength": 40, "maxLength": 64 },
+    "registration_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "registration_block": { "type": "integer", "minimum": 0 },
+    "payload": { "type": "string", "pattern": "^r2activate:v1:[A-Za-z0-9_-]{86}$", "maxLength": 128 }
+  }
+}

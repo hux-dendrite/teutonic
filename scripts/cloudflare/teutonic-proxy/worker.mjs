@@ -1,24 +1,19 @@
 // Cloudflare Worker bound to teutonic.ai and www.teutonic.ai.
-// Reverse-proxies every request to the Cloudflare R2 bucket where the
-// validator writes dashboard.json and where the dashboard html lives.
+// Reverse-proxies dashboard assets to their Cloudflare R2 bucket. The dataset
+// manifest route is resolved from the active dashboard bucket.
 //
 // Account: 00523074f51300584834607253cae0fa
 // Zone:    1075a976f65a8acdfeb5109615bb5906 (teutonic.ai)
 // Worker:  teutonic-proxy
 // Deploy:  scripts/cloudflare/deploy.sh
 //
-// IMPORTANT: The old Hippius origin was buggy in two ways that this worker
-// compensates for if similar storage metadata issues recur:
-//   1) Last-Modified is a static timestamp that never updates on PUT, so a
-//      browser's If-Modified-Since revalidation always returns 304 and the
-//      browser keeps showing whatever HTML body it cached the first time.
-//   2) Hippius forces Cache-Control: public, max-age=300, sw-revalidate=60
-//      regardless of what we set when uploading.
-// For HTML/JSON/markdown we strip the conditional-request headers on the
-// way out, drop Last-Modified on the way back, and rewrite Cache-Control to
-// no-cache so browsers always revalidate via ETag (which IS correct).
+// For HTML/JSON/markdown we strip conditional-request headers on the way out,
+// drop Last-Modified on the way back, and disable caching so live dashboard
+// state is never hidden by stale browser or intermediary responses.
 
 const ORIGIN = "https://pub-e2009eec1ca9488699de6263f40bb7e7.r2.dev";
+const DATASET_ORIGIN = "https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev";
+const DATASET_MANIFEST_PATH = "/datasets/manifest.json";
 
 // Content types that drive the live dashboard. These must always reflect
 // the current bytes in the bucket, so we disable every layer of caching.
@@ -29,29 +24,30 @@ const NO_CACHE_TYPES = [
   /^text\/plain/i,
 ];
 
-// Conditional-request headers that we never want to forward to Hippius,
-// because Hippius's static Last-Modified would turn them into bogus 304s.
+// Conditional-request headers are not forwarded for live dashboard assets.
 const REQ_STRIP = ["if-modified-since", "if-none-match"];
 
 // Upstream noise we don't need to expose.
-const RESP_STRIP = [
-  "x-hippius-gateway-time-ms",
-  "x-hippius-api-time-ms",
-  "x-hippius-ray-id",
-  "x-hippius-access-mode",
-  "x-hippius-source",
-  "server",
-];
+const RESP_STRIP = ["server"];
 
 export default {
   async fetch(request) {
     const url = new URL(request.url);
     const path = url.pathname === "" || url.pathname === "/" ? "/index.html" : url.pathname;
 
+    if (path === DATASET_MANIFEST_PATH && request.method !== "GET" && request.method !== "HEAD") {
+      return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
+    }
+
     const headers = new Headers(request.headers);
     for (const h of REQ_STRIP) headers.delete(h);
 
-    const target = ORIGIN + path + (url.search || "");
+    let target;
+    if (path === DATASET_MANIFEST_PATH) {
+      target = DATASET_ORIGIN + DATASET_MANIFEST_PATH + (url.search || "");
+    } else {
+      target = ORIGIN + path + (url.search || "");
+    }
     const upstream = await fetch(target, {
       method: request.method,
       headers,
