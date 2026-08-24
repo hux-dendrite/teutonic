@@ -52,6 +52,9 @@ SEED_TOKENIZER_REPO: str = _seed.get("tokenizer_repo", "")
 SEED_DIGEST: str = _seed.get("seed_digest", "")
 SEED_REPO_BACKEND: str = (_seed.get("repo_backend") or "hf").strip().lower()
 SEED_HOTKEY: str = _seed.get("genesis_hotkey", "").strip()
+SEED_INITIAL_WEIGHT_UIDS: tuple[int, ...] = tuple(
+    int(value) for value in _seed.get("initial_weight_uids", ())
+)
 _contract_files = _seed.get("contract_files", {})
 if not isinstance(_contract_files, dict):
     raise RuntimeError("chain.toml [seed.contract_files] must be a table")
@@ -87,6 +90,14 @@ if SEED_REPO_BACKEND not in _VALID_SEED_REPO_BACKENDS:
     )
 if not SEED_HOTKEY:
     raise RuntimeError("chain.toml [seed].genesis_hotkey is required")
+if (
+    len(SEED_INITIAL_WEIGHT_UIDS) != 5
+    or len(set(SEED_INITIAL_WEIGHT_UIDS)) != len(SEED_INITIAL_WEIGHT_UIDS)
+    or any(uid < 0 for uid in SEED_INITIAL_WEIGHT_UIDS)
+):
+    raise RuntimeError(
+        "chain.toml [seed].initial_weight_uids must contain five distinct non-negative UIDs"
+    )
 if not GENESIS_CONTRACT_FILES:
     raise RuntimeError("chain.toml [seed.contract_files] requires at least one file")
 if any(
@@ -156,6 +167,7 @@ __all__ = [
     "EVALUATION_DATASETS",
     "SEED_REPO_BACKEND",
     "SEED_HOTKEY",
+    "SEED_INITIAL_WEIGHT_UIDS",
     "GENESIS_CONTRACT_FILES",
     "CHAIN_GENERATION",
     "SEED_NAMESPACE",

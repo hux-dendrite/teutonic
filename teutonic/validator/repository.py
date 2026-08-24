@@ -689,10 +689,11 @@ class ValidatorRepository:
                 raise LeaseLostError("evaluation cannot be adopted")
 
     def promotion_weight_hotkeys(self, promotion_id: str, *, limit: int = 5) -> tuple[str, ...]:
-        """Return the promoted challenger followed by the recent king hotkeys.
+        """Return the promoted challenger followed by the current durable policy.
 
         UID resolution deliberately happens against a finalized metagraph in the
-        runtime. PostgreSQL supplies only the durable reign ordering here.
+        runtime. PostgreSQL supplies hotkeys so deregistration and UID remaps do not
+        silently redirect weight. Older databases fall back to recent reign ordering.
         """
         if limit < 1:
             raise ValueError("weight hotkey limit must be positive")
@@ -710,17 +711,31 @@ class ValidatorRepository:
             ).fetchone()
             if row is None:
                 raise SchedulerInvariantError("only a promoted winner has weight targets")
-            reigns = cursor.execute(
+            current_policy = cursor.execute(
                 """
-                SELECT hotkey
-                  FROM control_plane.king_reigns
-                 WHERE competition_id = %s
-                 ORDER BY reign_number DESC
-                 LIMIT %s
+                SELECT weights.policy_hotkeys
+                  FROM control_plane.competitions competition
+                  JOIN control_plane.weight_publications weights
+                    ON weights.source_reign_id = competition.current_reign_id
+                 WHERE competition.competition_id = %s
                 """,
-                (row["competition_id"], limit),
-            ).fetchall()
-        ordered = [row["signalling_hotkey"], *(item["hotkey"] for item in reigns)]
+                (row["competition_id"],),
+            ).fetchone()
+            if current_policy is not None:
+                previous_hotkeys = tuple(current_policy["policy_hotkeys"])
+            else:
+                reigns = cursor.execute(
+                    """
+                    SELECT hotkey
+                      FROM control_plane.king_reigns
+                     WHERE competition_id = %s
+                     ORDER BY reign_number DESC
+                     LIMIT %s
+                    """,
+                    (row["competition_id"], limit),
+                ).fetchall()
+                previous_hotkeys = tuple(item["hotkey"] for item in reigns)
+        ordered = [row["signalling_hotkey"], *previous_hotkeys]
         return tuple(dict.fromkeys(ordered))[:limit]
 
     def current_weight_policy(self) -> Mapping[str, Any] | None:

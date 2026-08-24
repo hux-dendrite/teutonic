@@ -15,8 +15,10 @@ import chain_config
 from teutonic.bootstrap import (
     GenesisIdentity,
     HuggingFaceSeed,
+    InitialWeightTarget,
     PublicSeedStore,
     bootstrap_genesis,
+    bootstrap_initial_weights,
 )
 from teutonic.config import BucketNames
 from teutonic.evaluation.configuration import (
@@ -60,6 +62,19 @@ def r2_client(*, max_pool_connections: int):
     )
 
 
+def initial_weight_targets(chain) -> tuple[InitialWeightTarget, ...]:
+    hotkey_by_uid = {uid: hotkey for hotkey, uid in chain.uid_by_hotkey.items()}
+    missing = [uid for uid in chain_config.SEED_INITIAL_WEIGHT_UIDS if uid not in hotkey_by_uid]
+    if missing:
+        raise RuntimeError(
+            f"initial weight UIDs are absent from the finalized metagraph: {missing}"
+        )
+    return tuple(
+        InitialWeightTarget(hotkey=str(hotkey_by_uid[uid]), uid=uid)
+        for uid in chain_config.SEED_INITIAL_WEIGHT_UIDS
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -82,6 +97,11 @@ def main() -> int:
         action="store_true",
         help="stop after verified public R2 publication without changing PostgreSQL",
     )
+    parser.add_argument(
+        "--weights-only",
+        action="store_true",
+        help="attach configured initial weights to an existing genesis without model transfer",
+    )
     args = parser.parse_args()
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -93,6 +113,36 @@ def main() -> int:
     log.info("reading genesis configuration from %s", chain_config.CONFIG_PATH)
     if chain_config.SEED_REPO_BACKEND != "hf":
         raise RuntimeError("genesis bootstrap only accepts the configured Hugging Face backend")
+    if args.upload_only and args.weights_only:
+        raise ValueError("--upload-only and --weights-only are mutually exclusive")
+
+    from teutonic.validator import BittensorFinalizedMetagraphReader
+
+    if args.weights_only:
+        chain = BittensorFinalizedMetagraphReader(
+            network=required("TEUTONIC_NETWORK"),
+            netuid=int(required("TEUTONIC_NETUID")),
+        ).snapshot()
+        starting_weights = initial_weight_targets(chain)
+        with psycopg.connect(
+            required("TEUTONIC_DATABASE_URL"), row_factory=dict_row
+        ) as connection:
+            weights = bootstrap_initial_weights(
+                connection,
+                netuid=int(required("TEUTONIC_NETUID")),
+                chain_generation=required("TEUTONIC_CHAIN_GENERATION"),
+                competition=required("TEUTONIC_COMPETITION"),
+                targets=starting_weights,
+                finalized_block=chain.block,
+            )
+        log.info(
+            "%s initial weight publication=%s finalized_block=%s targets=%s",
+            "created" if weights.created else "verified existing",
+            weights.publication_id,
+            chain.block,
+            ",".join(f"{target.uid}:20%" for target in starting_weights),
+        )
+        return 0
 
     log.info("verifying Hugging Face seed %s@%s", chain_config.SEED_REPO, chain_config.SEED_DIGEST)
     artifact = HuggingFaceSeed(
@@ -121,12 +171,11 @@ def main() -> int:
         log.info("verified public genesis upload; PostgreSQL bootstrap intentionally skipped")
         return 0
 
-    from teutonic.validator import BittensorFinalizedMetagraphReader
-
-    hotkey = chain_config.SEED_HOTKEY
     chain = BittensorFinalizedMetagraphReader(
         network=required("TEUTONIC_NETWORK"), netuid=int(required("TEUTONIC_NETUID"))
     ).snapshot()
+    starting_weights = initial_weight_targets(chain)
+    hotkey = chain_config.SEED_HOTKEY
     uid = chain.uid_by_hotkey.get(hotkey)
     if uid is None:
         raise RuntimeError("genesis hotkey is not registered at the current finalized block")
@@ -152,6 +201,14 @@ def main() -> int:
             public_bucket=buckets.public_models,
             artifact=artifact,
             identity=identity,
+        )
+        weights = bootstrap_initial_weights(
+            connection,
+            netuid=int(required("TEUTONIC_NETUID")),
+            chain_generation=required("TEUTONIC_CHAIN_GENERATION"),
+            competition=required("TEUTONIC_COMPETITION"),
+            targets=starting_weights,
+            finalized_block=chain.block,
         )
         evaluation = store_evaluation_configuration(
             connection,
@@ -179,6 +236,12 @@ def main() -> int:
         chain_config.EVALUATION_N,
         chain_config.EVALUATION_DELTA_THRESHOLD,
         ",".join(item.name for item in dataset_manifests),
+    )
+    log.info(
+        "%s initial weight publication=%s targets=%s",
+        "created" if weights.created else "verified existing",
+        weights.publication_id,
+        ",".join(f"{target.uid}:20%" for target in starting_weights),
     )
     return 0
 

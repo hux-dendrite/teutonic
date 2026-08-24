@@ -819,6 +819,34 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             (claim.request["miner"]["hotkey"], "genesis-hotkey"),
         )
 
+    def test_promoted_winner_displaces_one_initial_weight_hotkey(self) -> None:
+        starter_hotkeys = [f"starter-hotkey-{uid}" for uid in (110, 115, 143, 224, 226)]
+        self.connection.execute(
+            """
+            INSERT INTO control_plane.weight_publications (
+                competition_id, source_reign_id, policy_version, policy_hotkeys,
+                target_hotkeys, target_uids, normalized_weights, payload_sha256,
+                mapping_finalized_block, idempotency_key, state
+            ) VALUES (%s, %s, 'genesis-equal-v1', %s, %s,
+                      ARRAY[110, 115, 143, 224, 226],
+                      ARRAY[0.2, 0.2, 0.2, 0.2, 0.2], %s, 103,
+                      'initial-weight-policy-test', 'requested')
+            """,
+            (
+                self.competition_id,
+                self.genesis_reign_id,
+                starter_hotkeys,
+                starter_hotkeys,
+                "7" * 64,
+            ),
+        )
+        claim = self.repository.claim_next(now=NOW, policy=policy())
+        promotion = self._accept_and_promote(claim)
+        self.assertEqual(
+            self.repository.promotion_weight_hotkeys(str(promotion), limit=5),
+            (claim.request["miner"]["hotkey"], *starter_hotkeys[:4]),
+        )
+
     def test_current_reign_weight_plan_revises_after_winner_uid_remap(self) -> None:
         claim = self.repository.claim_next(now=NOW, policy=policy())
         promotion = self._accept_and_promote(claim)

@@ -48,6 +48,7 @@ tokenizer_repo = "dendriteholdings/teutonic-II-110B-genesis"
 repo_backend = "hf"
 seed_digest = "hf:8f971f030f5d801f812540007b396058f69cc08a"
 genesis_hotkey = "5E6yHkmZmSpBT5aa2rNZcmeYa1y3N9jw1h7g53oNPzMUpnqG"
+initial_weight_uids = [110, 115, 143, 224, 226]
 
 [seed.contract_files]
 "chat_template.jinja.txt" = "bafea0fe0bd53ef1156649859ca6eeec812ef1d95a62d08323841f2431067cc2"

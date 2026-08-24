@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -64,6 +65,22 @@ class GenesisIdentity:
 class GenesisRecord:
     competition_id: str
     reign_id: str
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class InitialWeightTarget:
+    hotkey: str
+    uid: int
+
+    def __post_init__(self) -> None:
+        if not self.hotkey or self.uid < 0:
+            raise ValueError("initial weight target requires a hotkey and non-negative UID")
+
+
+@dataclass(frozen=True, slots=True)
+class InitialWeightRecord:
+    publication_id: str
     created: bool
 
 
@@ -402,3 +419,98 @@ def bootstrap_genesis(
             (reign_id, competition_id),
         )
         return GenesisRecord(str(competition_id), str(reign_id), True)
+
+
+def bootstrap_initial_weights(
+    connection: Any,
+    *,
+    netuid: int,
+    chain_generation: str,
+    competition: str,
+    targets: tuple[InitialWeightTarget, ...],
+    finalized_block: int,
+) -> InitialWeightRecord:
+    """Attach the initial equal-weight policy to an existing genesis reign."""
+    if netuid < 0 or not chain_generation or not competition or finalized_block < 0:
+        raise ValueError("initial weight competition identity is invalid")
+    if len(targets) != 5 or len({target.hotkey for target in targets}) != len(targets):
+        raise ValueError("initial weights require five distinct hotkeys")
+    if len({target.uid for target in targets}) != len(targets):
+        raise ValueError("initial weights require five distinct UIDs")
+
+    policy_version = "genesis-equal-v1"
+    policy_hotkeys = [target.hotkey for target in targets]
+    target_uids = [target.uid for target in targets]
+    weights = [1.0 / len(targets) for _target in targets]
+    payload = {
+        "target_uids": target_uids,
+        "normalized_weights": weights,
+    }
+    payload_sha256 = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+    with connection.transaction():
+        connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"teutonic-genesis-weights:{netuid}:{chain_generation}:{competition}",),
+        )
+        row = connection.execute(
+            """
+            SELECT c.competition_id, c.current_reign_id, current.reign_number
+              FROM control_plane.competitions c
+              JOIN control_plane.king_reigns current
+                ON current.reign_id = c.current_reign_id
+             WHERE c.netuid = %s AND c.chain_generation = %s AND c.name = %s
+             FOR UPDATE OF c
+            """,
+            (netuid, chain_generation, competition),
+        ).fetchone()
+        if row is None:
+            raise SeedBootstrapError("genesis must exist before initial weights")
+        if int(row["reign_number"]) != 0:
+            raise SeedBootstrapError(
+                "initial weights cannot be installed after a challenger became king"
+            )
+
+        existing = connection.execute(
+            """
+            SELECT weight_publication_id, policy_version, policy_hotkeys
+              FROM control_plane.weight_publications
+             WHERE source_reign_id = %s
+            """,
+            (row["current_reign_id"],),
+        ).fetchone()
+        if existing is not None:
+            if (
+                str(existing["policy_version"]) != policy_version
+                or tuple(existing["policy_hotkeys"]) != tuple(policy_hotkeys)
+            ):
+                raise SeedBootstrapError(
+                    "genesis already has a different initial weight policy"
+                )
+            return InitialWeightRecord(str(existing["weight_publication_id"]), False)
+
+        publication_id = connection.execute(
+            """
+            INSERT INTO control_plane.weight_publications (
+                competition_id, source_reign_id, policy_version, policy_hotkeys,
+                target_hotkeys, target_uids, normalized_weights, payload_sha256,
+                mapping_finalized_block, idempotency_key, state
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'requested')
+            RETURNING weight_publication_id
+            """,
+            (
+                row["competition_id"],
+                row["current_reign_id"],
+                policy_version,
+                policy_hotkeys,
+                policy_hotkeys,
+                target_uids,
+                weights,
+                payload_sha256,
+                finalized_block,
+                f"publish-genesis-weights:{row['current_reign_id']}",
+            ),
+        ).fetchone()["weight_publication_id"]
+        return InitialWeightRecord(str(publication_id), True)

@@ -12,9 +12,11 @@ except ImportError:
 
 from teutonic.bootstrap import (
     GenesisIdentity,
+    InitialWeightTarget,
     SeedArtifact,
     SeedBootstrapError,
     bootstrap_genesis,
+    bootstrap_initial_weights,
 )
 
 
@@ -94,6 +96,47 @@ class SeedBootstrapIntegrationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(SeedBootstrapError, "different genesis"):
             self.bootstrap(artifact=conflicting)
+
+    def test_existing_genesis_gets_idempotent_initial_equal_weight_plan(self):
+        genesis = self.bootstrap()
+        targets = tuple(
+            InitialWeightTarget(f"starter-hotkey-{uid}", uid)
+            for uid in (110, 115, 143, 224, 226)
+        )
+        created = bootstrap_initial_weights(
+            self.connection,
+            netuid=3,
+            chain_generation="generation-1",
+            competition="mimo",
+            targets=targets,
+            finalized_block=101,
+        )
+        replay = bootstrap_initial_weights(
+            self.connection,
+            netuid=3,
+            chain_generation="generation-1",
+            competition="mimo",
+            targets=targets,
+            finalized_block=999,
+        )
+        self.assertTrue(created.created)
+        self.assertFalse(replay.created)
+        self.assertEqual(created.publication_id, replay.publication_id)
+        row = self.connection.execute(
+            """
+            SELECT source_reign_id, policy_version, policy_hotkeys, target_hotkeys,
+                   target_uids, normalized_weights, mapping_finalized_block, state
+              FROM control_plane.weight_publications
+            """
+        ).fetchone()
+        self.assertEqual(str(row["source_reign_id"]), genesis.reign_id)
+        self.assertEqual(row["policy_version"], "genesis-equal-v1")
+        self.assertEqual(row["policy_hotkeys"], [target.hotkey for target in targets])
+        self.assertEqual(row["target_hotkeys"], [target.hotkey for target in targets])
+        self.assertEqual(row["target_uids"], [110, 115, 143, 224, 226])
+        self.assertEqual(row["normalized_weights"], [0.2] * 5)
+        self.assertEqual(row["mapping_finalized_block"], 101)
+        self.assertEqual(row["state"], "requested")
 
 
 if __name__ == "__main__":
