@@ -170,6 +170,33 @@ class DashboardContractTests(unittest.TestCase):
         self.assertNotIn(b"NaN", body)
         self.assertEqual(json.loads(body)["schema_version"], 1)
 
+    def test_current_evaluation_accepts_provisional_bootstrap_metrics(self):
+        fixture = payload()
+        fixture["current_eval"] = {
+            "challenge_id": "0123456789abcdef",
+            "hotkey": "public-hotkey",
+            "coldkey": "public-coldkey",
+            "uid": 7,
+            "model_identity": "hidden_until_promotion",
+            "stage": "eval_progress",
+            "progress": 400,
+            "total": 2000,
+            "percent": 20.0,
+            "elapsed_seconds": 120.0,
+            "early_stopped": False,
+            "policy_version": "policy-v1",
+            "dataset_version": "dataset-v1",
+            "started_at": "2026-08-18T11:58:00Z",
+            "last_progress_at": "2026-08-18T12:00:00Z",
+            "provisional_mu_hat": 0.72,
+            "provisional_lcb": 0.61,
+            "provisional_n_sequences": 400,
+            "provisional_n_bootstrap": 1000,
+            "delta_threshold": 0.5,
+        }
+        parsed = json.loads(canonical_dashboard_json(fixture))
+        self.assertEqual(parsed["current_eval"]["provisional_lcb"], 0.61)
+
     def test_global_dataset_manifest_is_canonical_and_strict(self):
         body = canonical_dataset_manifest_json(dataset_manifest())
         parsed = json.loads(body)

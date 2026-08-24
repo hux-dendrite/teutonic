@@ -375,6 +375,11 @@ class DashboardProjectionRepository:
             "dataset_version": row["dataset_version"],
             "started_at": _iso(row["started_at"]),
             "last_progress_at": _iso(row["last_progress_at"]),
+            "provisional_mu_hat": _float(row["provisional_mu_hat"]),
+            "provisional_lcb": _float(row["provisional_lcb"]),
+            "provisional_n_sequences": _int(row["provisional_n_sequences"]),
+            "provisional_n_bootstrap": _int(row["provisional_n_bootstrap"]),
+            "delta_threshold": _float(row["delta_threshold"]),
         }
 
     def _history(self, row) -> dict[str, Any]:

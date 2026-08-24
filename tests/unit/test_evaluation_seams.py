@@ -21,6 +21,7 @@ from teutonic.evaluation import (
     decide_model_copy,
     normalize_verdict,
     paired_bootstrap_verdict,
+    provisional_paired_bootstrap,
     validate_config_lock,
 )
 
@@ -122,6 +123,47 @@ def legacy_bootstrap_verdict(policy_input, now):
 
 
 class EvaluationPolicyRegressionTests(unittest.TestCase):
+    def test_provisional_bootstrap_uses_configured_count_and_marks_its_sample(self) -> None:
+        king = [1.2, 1.1, 1.3, 1.25]
+        challenger = [1.0, 1.05, 1.1, 1.15]
+        progress = provisional_paired_bootstrap(
+            king,
+            challenger,
+            bootstrap_seed=17,
+            n_bootstrap=10_000,
+            alpha=0.1,
+            delta_threshold=0.05,
+        )
+        expected = paired_bootstrap_verdict(
+            king,
+            challenger,
+            bootstrap_seed=17,
+            n_bootstrap=10_000,
+            alpha=0.1,
+            delta_threshold=0.05,
+        )
+        self.assertEqual(
+            progress,
+            {
+                "provisional_mu_hat": expected["mu_hat"],
+                "provisional_lcb": expected["lcb"],
+                "provisional_n_sequences": 4,
+                "provisional_n_bootstrap": 10_000,
+            },
+        )
+
+    def test_provisional_bootstrap_rejects_unpaired_or_empty_losses(self) -> None:
+        parameters = {
+            "bootstrap_seed": 17,
+            "n_bootstrap": 128,
+            "alpha": 0.1,
+            "delta_threshold": 0.05,
+        }
+        with self.assertRaises(ValueError):
+            provisional_paired_bootstrap([], [], **parameters)
+        with self.assertRaises(ValueError):
+            provisional_paired_bootstrap([1.0], [1.0, 2.0], **parameters)
+
     def test_empty_message_transport_errors_are_retryable(self) -> None:
         cases = (
             (httpx.ConnectError(""), "connecterror"),

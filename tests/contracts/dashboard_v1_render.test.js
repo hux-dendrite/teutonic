@@ -44,6 +44,29 @@ assert.strictEqual(queued.duelIdentity, dashboard.HIDDEN);
 const evaluatingPayload = base();
 evaluatingPayload.current_eval = hiddenRecord();
 assert.strictEqual(dashboard.presentation(evaluatingPayload).duelIdentity, dashboard.HIDDEN);
+assert.deepStrictEqual(
+    dashboard.currentEvaluationPresentation({
+        provisional_mu_hat: 0.72,
+        provisional_lcb: 0.61,
+        delta_threshold: 0.5,
+        provisional_n_sequences: 400,
+        provisional_n_bootstrap: 1000
+    }),
+    {
+        available: true,
+        lcb: 0.61,
+        muHat: 0.72,
+        threshold: 0.5,
+        sequences: 400,
+        bootstraps: 1000,
+        clearsThreshold: true
+    }
+);
+assert.strictEqual(dashboard.currentEvaluationPresentation({}).available, false);
+assert.strictEqual(
+    dashboard.currentEvaluationPresentation({ provisional_lcb: null }).available,
+    false
+);
 
 const rejectedPayload = base();
 rejectedPayload.history = [hiddenRecord()];

@@ -64,6 +64,36 @@ def paired_bootstrap_verdict(
     }
 
 
+def provisional_paired_bootstrap(
+    king_losses: list[float],
+    challenger_losses: list[float],
+    *,
+    bootstrap_seed: int,
+    n_bootstrap: int,
+    alpha: float,
+    delta_threshold: float,
+) -> dict[str, Any]:
+    """Compute an explicitly provisional checkpoint from partial paired losses."""
+    if not king_losses or len(king_losses) != len(challenger_losses):
+        raise ValueError("provisional bootstrap requires non-empty paired losses")
+    if n_bootstrap < 1:
+        raise ValueError("provisional bootstrap count must be positive")
+    verdict = paired_bootstrap_verdict(
+        king_losses,
+        challenger_losses,
+        bootstrap_seed=bootstrap_seed,
+        n_bootstrap=n_bootstrap,
+        alpha=alpha,
+        delta_threshold=delta_threshold,
+    )
+    return {
+        "provisional_mu_hat": verdict["mu_hat"],
+        "provisional_lcb": verdict["lcb"],
+        "provisional_n_sequences": verdict["n_sequences"],
+        "provisional_n_bootstrap": n_bootstrap,
+    }
+
+
 def validate_config_lock(
     king_config: Mapping[str, Any],
     challenger_config: Mapping[str, Any],

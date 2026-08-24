@@ -144,7 +144,7 @@
     "current_eval": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["challenge_id", "hotkey", "coldkey", "uid", "model_identity", "stage", "progress", "total", "percent", "elapsed_seconds", "early_stopped", "policy_version", "dataset_version", "started_at", "last_progress_at"],
+      "required": ["challenge_id", "hotkey", "coldkey", "uid", "model_identity", "stage", "progress", "total", "percent", "elapsed_seconds", "early_stopped", "policy_version", "dataset_version", "started_at", "last_progress_at", "provisional_mu_hat", "provisional_lcb", "provisional_n_sequences", "provisional_n_bootstrap", "delta_threshold"],
       "properties": {
         "challenge_id": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
         "hotkey": { "type": "string", "minLength": 1 },
@@ -160,7 +160,12 @@
         "policy_version": { "type": "string", "minLength": 1 },
         "dataset_version": { "type": "string", "minLength": 1 },
         "started_at": { "$ref": "#/$defs/nullable_timestamp" },
-        "last_progress_at": { "$ref": "#/$defs/nullable_timestamp" }
+        "last_progress_at": { "$ref": "#/$defs/nullable_timestamp" },
+        "provisional_mu_hat": { "$ref": "#/$defs/nullable_number" },
+        "provisional_lcb": { "$ref": "#/$defs/nullable_number" },
+        "provisional_n_sequences": { "$ref": "#/$defs/nullable_integer" },
+        "provisional_n_bootstrap": { "$ref": "#/$defs/nullable_integer" },
+        "delta_threshold": { "$ref": "#/$defs/nullable_number" }
       }
     },
     "queue_entry": {

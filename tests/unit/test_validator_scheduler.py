@@ -7,9 +7,29 @@ from datetime import timedelta
 from teutonic.evaluation.configuration import DatasetManifestSnapshot, canonical_manifest_bytes
 from teutonic.promotion import promotion_worker_lock_key
 from teutonic.validator import EvaluationPolicyConfig, scheduler_lock_key
+from teutonic.validator.repository import SchedulerInvariantError, _bounded_progress
 
 
 class ValidatorSchedulerPolicyTests(unittest.TestCase):
+    def test_provisional_progress_metrics_are_bounded_and_private_fields_are_dropped(self):
+        progress = _bounded_progress(
+            {
+                "phase": "eval_progress",
+                "done": 16,
+                "total": 32,
+                "provisional_mu_hat": 0.003,
+                "provisional_lcb": 0.002,
+                "provisional_n_sequences": 16,
+                "provisional_n_bootstrap": 128,
+                "private_worker_hostname": "never-persist",
+            }
+        )
+        self.assertEqual(progress["provisional_lcb"], 0.002)
+        self.assertEqual(progress["provisional_n_sequences"], 16)
+        self.assertNotIn("private_worker_hostname", progress)
+        with self.assertRaises(SchedulerInvariantError):
+            _bounded_progress({"provisional_lcb": float("nan")})
+
     def _policy(self, **overrides):
         manifest = {
             "shards": [{

@@ -616,7 +616,12 @@ CREATE VIEW control_plane.dashboard_current_evaluation WITH (security_barrier='t
     e.policy_version,
     e.dataset_version,
     e.started_at,
-    e.heartbeat_at AS last_progress_at
+    e.heartbeat_at AS last_progress_at,
+    (e.progress_summary ->> 'provisional_mu_hat'::text) AS provisional_mu_hat,
+    (e.progress_summary ->> 'provisional_lcb'::text) AS provisional_lcb,
+    (e.progress_summary ->> 'provisional_n_sequences'::text) AS provisional_n_sequences,
+    (e.progress_summary ->> 'provisional_n_bootstrap'::text) AS provisional_n_bootstrap,
+    (e.request_payload #>> '{limits,delta_threshold}'::text[]) AS delta_threshold
    FROM ((((control_plane.evaluations e
      JOIN control_plane.uploads u ON ((u.upload_id = e.upload_id)))
      JOIN control_plane.registrations r ON ((r.registration_id = u.registration_id)))

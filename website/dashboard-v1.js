@@ -65,6 +65,27 @@
         return Number.isFinite(number) ? number : fallback;
     }
 
+    function currentEvaluationPresentation(record) {
+        record = record || {};
+        function optionalNumber(value) {
+            return value == null || value === "" ? null : finiteNumber(value, null);
+        }
+        var lcb = optionalNumber(record.provisional_lcb);
+        var muHat = optionalNumber(record.provisional_mu_hat);
+        var threshold = optionalNumber(record.delta_threshold);
+        var sequences = optionalNumber(record.provisional_n_sequences);
+        var bootstraps = optionalNumber(record.provisional_n_bootstrap);
+        return {
+            available: lcb != null,
+            lcb: lcb,
+            muHat: muHat,
+            threshold: threshold,
+            sequences: sequences == null ? null : Math.max(0, Math.floor(sequences)),
+            bootstraps: bootstraps == null ? null : Math.max(0, Math.floor(bootstraps)),
+            clearsThreshold: lcb == null || threshold == null ? null : lcb > threshold
+        };
+    }
+
     function historyPresentation(history, showErrors) {
         if (!Array.isArray(history)) throw new Error("dashboard history must be an array");
         var errorCount = history.filter(function(item) {
@@ -238,6 +259,7 @@
         HIDDEN: HIDDEN,
         validate: validate,
         presentation: presentation,
+        currentEvaluationPresentation: currentEvaluationPresentation,
         historyPresentation: historyPresentation,
         taoMarketCapHotkeyUrl: taoMarketCapHotkeyUrl,
         shardPresentation: shardPresentation,

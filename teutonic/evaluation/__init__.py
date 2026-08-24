@@ -13,6 +13,7 @@ from .policy import (
     decide_model_copy,
     normalize_verdict,
     paired_bootstrap_verdict,
+    provisional_paired_bootstrap,
     validate_config_lock,
 )
 from .protocol_v2 import (
@@ -38,6 +39,7 @@ __all__ = [
     "decide_model_copy",
     "normalize_verdict",
     "paired_bootstrap_verdict",
+    "provisional_paired_bootstrap",
     "validate_config_lock",
     "PROTOCOL_VERSION",
     "AttemptBusyError",

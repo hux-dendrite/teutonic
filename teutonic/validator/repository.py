@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timedelta
 from typing import Any, Mapping, Sequence
 
@@ -1087,6 +1088,26 @@ def _bounded_progress(progress: Mapping[str, Any]) -> dict[str, Any]:
         "early_stopped",
     }
     result = {key: normalized[key] for key in allowed if key in normalized}
+    for key in ("provisional_mu_hat", "provisional_lcb"):
+        if key not in normalized:
+            continue
+        try:
+            value = float(normalized[key])
+        except (TypeError, ValueError) as exc:
+            raise SchedulerInvariantError(f"progress {key} must be numeric") from exc
+        if not math.isfinite(value):
+            raise SchedulerInvariantError(f"progress {key} must be finite")
+        result[key] = value
+    for key in ("provisional_n_sequences", "provisional_n_bootstrap"):
+        if key not in normalized:
+            continue
+        try:
+            value = int(normalized[key])
+        except (TypeError, ValueError) as exc:
+            raise SchedulerInvariantError(f"progress {key} must be an integer") from exc
+        if value < 1:
+            raise SchedulerInvariantError(f"progress {key} must be positive")
+        result[key] = value
     encoded = json.dumps(result, separators=(",", ":"), ensure_ascii=True)
     if len(encoded.encode()) > 4096:
         raise SchedulerInvariantError("progress summary exceeds 4096 bytes")

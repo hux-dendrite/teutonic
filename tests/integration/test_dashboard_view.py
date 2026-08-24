@@ -279,6 +279,36 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         ):
             self.assertNotIn(marker.lower(), text.lower())
 
+    def test_current_evaluation_projects_provisional_bootstrap_metrics(self):
+        self.owner.execute(
+            """
+            UPDATE control_plane.evaluations
+               SET state = 'evaluating', verdict = NULL, verdict_summary = NULL,
+                   completed_at = NULL, started_at = %s, heartbeat_at = %s,
+                   request_payload = %s::jsonb, progress_summary = %s::jsonb
+             WHERE evaluation_id = %s
+            """,
+            (
+                NOW,
+                NOW,
+                '{"limits":{"n":2000,"delta_threshold":0.5}}',
+                '{"phase":"eval_progress","completed_sequences":400,'
+                '"requested_sequences":2000,"percent":20.0,'
+                '"provisional_mu_hat":0.72,"provisional_lcb":0.61,'
+                '"provisional_n_sequences":400,"provisional_n_bootstrap":1000}',
+                self.ids["evaluation"],
+            ),
+        )
+        projected = self.repository.project(now=NOW)
+        current = projected["current_eval"]
+        self.assertIsNotNone(current)
+        self.assertEqual(current["provisional_mu_hat"], 0.72)
+        self.assertEqual(current["provisional_lcb"], 0.61)
+        self.assertEqual(current["provisional_n_sequences"], 400)
+        self.assertEqual(current["provisional_n_bootstrap"], 1000)
+        self.assertEqual(current["delta_threshold"], 0.5)
+        canonical_dashboard_json(projected)
+
     def test_current_king_uses_remapped_uid_from_latest_weight_revision(self):
         self.owner.execute(
             """

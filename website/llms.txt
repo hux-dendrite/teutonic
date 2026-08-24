@@ -57,7 +57,9 @@ Key fields in dashboard.json:
                    duel stats that crowned it (`mu_hat`, `lcb`, `delta`)
 - `king_chain`   — recent reigns that currently share rewards
 - `king_payout`  — current king weight share and estimated earnings
-- `queue` / `current_eval` / `history` — pending, live, and past duels
+- `queue` / `current_eval` / `history` — pending, live, and past duels;
+  live scoring publishes checkpointed `provisional_mu_hat` and
+  `provisional_lcb` values with their sequence/bootstrap sample sizes
 - `weight_status` / `service_status`  — validator publication health
 - `market`       — TAO/USD price, SN3 alpha price in TAO, and
                    `sn3_reg_burn_tao` (current registration cost)
@@ -338,8 +340,11 @@ teutonic-miner ready --hotkey h0
   `evaluation_failed`, `retry_exhausted`, ...) plus `shards_used` (the
   exact dataset shards drawn for that duel).
 - Live duel: dashboard.json `current_eval` (model identity is hidden until
-  promotion; progress and timing are visible). Dashboard republishes every
-  5 s during an eval, every 20 s otherwise.
+  promotion; progress, timing, and checkpointed provisional LCB are visible).
+  The provisional statistic is recomputed at roughly 10% intervals with the
+  configured full bootstrap count and can change before the final verdict
+  because each checkpoint contains only the paired losses completed so far.
+  Dashboard republishes every 5 s during an eval, every 20 s otherwise.
 - King lineage: `king`, `king_chain`, `king.reign_number`.
 - Reward publication health: `weight_status` (state, 101-block cadence,
   next due block) and `service_status` (overall health, per-service

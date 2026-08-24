@@ -114,6 +114,10 @@ class FakeEvaluator:
                 "phase": "scoring",
                 "done": 16,
                 "total": 32,
+                "provisional_mu_hat": 0.003,
+                "provisional_lcb": 0.002,
+                "provisional_n_sequences": 16,
+                "provisional_n_bootstrap": 128,
                 "private_worker_hostname": "must-not-persist",
             },
         }
@@ -709,6 +713,10 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
                 "completed_sequences": 16,
                 "requested_sequences": 32,
                 "percent": 50.0,
+                "provisional_mu_hat": 0.003,
+                "provisional_lcb": 0.002,
+                "provisional_n_sequences": 16,
+                "provisional_n_bootstrap": 128,
             },
         )
         self.assertEqual(row[3], "accepted_pending_promotion")

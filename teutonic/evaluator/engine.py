@@ -58,6 +58,7 @@ from teutonic.evaluation import (
     EvaluationRequestV2,
     ProtocolValidationError,
     paired_bootstrap_verdict,
+    provisional_paired_bootstrap,
     result_provenance,
     validate_result_v2,
 )
@@ -1558,13 +1559,20 @@ class PersistentModelWorkerPool:
         self.ready = ready
         return generation
 
-    def score(self, sequences: list[list[int]], generation: str, on_progress) -> tuple[list[float], list[float], dict]:
+    def score(
+        self,
+        sequences: list[list[int]],
+        generation: str,
+        req: EvalRequest,
+        on_progress,
+    ) -> tuple[list[float], list[float], dict]:
         king_losses: list[float | None] = [None] * len(sequences)
         challenger_losses: list[float | None] = [None] * len(sequences)
         next_index = {"king": 0, "challenger": 0}
         in_flight = {spec["worker_id"]: 0 for spec in self.specs}
         paired_done = 0
         progress_log_interval = max(1, (len(sequences) + 9) // 10)
+        provisional: dict[str, Any] = {}
 
         def fill_worker(worker_id: str, role: str) -> None:
             depth = int(self.ready[worker_id].get("pipeline_depth", 1))
@@ -1590,7 +1598,12 @@ class PersistentModelWorkerPool:
                 dead = self.dead_workers()
                 if dead:
                     raise RuntimeError(f"model workers exited without a result: {dead}")
-                on_progress({"phase": "heartbeat", "done": paired_done, "total": len(sequences)})
+                on_progress({
+                    "phase": "heartbeat",
+                    "done": paired_done,
+                    "total": len(sequences),
+                    **provisional,
+                })
                 continue
             if message.get("generation") != generation:
                 raise RuntimeError(f"stale model worker message during scoring: {message}")
@@ -1626,6 +1639,19 @@ class PersistentModelWorkerPool:
                 avg_challenger_loss = float(paired_challenger.mean())
                 loss_delta = float((paired_king - paired_challenger).mean())
                 seq_per_s = paired_done / elapsed
+                crossed_log_boundary = (
+                    paired_done // progress_log_interval
+                    != previous_done // progress_log_interval
+                )
+                if paired_done == len(sequences) or crossed_log_boundary:
+                    provisional = provisional_paired_bootstrap(
+                        [float(value) for value in paired_king],
+                        [float(value) for value in paired_challenger],
+                        bootstrap_seed=req.bootstrap_seed,
+                        n_bootstrap=req.n_bootstrap,
+                        alpha=req.alpha,
+                        delta_threshold=req.delta_threshold,
+                    )
                 on_progress({
                     "phase": "eval_progress",
                     "done": paired_done,
@@ -1634,20 +1660,18 @@ class PersistentModelWorkerPool:
                     "seq_per_s": round(seq_per_s, 4),
                     "avg_king_loss": round(avg_king_loss, 6),
                     "avg_challenger_loss": round(avg_challenger_loss, 6),
+                    **provisional,
                 })
-                crossed_log_boundary = (
-                    paired_done // progress_log_interval
-                    != previous_done // progress_log_interval
-                )
                 if paired_done == len(sequences) or crossed_log_boundary:
                     eval_log.info(
                         "loss progress | paired=%d/%d king=%.6f challenger=%.6f "
-                        "king_minus_challenger=%.6f seq_per_s=%.4f",
+                        "king_minus_challenger=%.6f provisional_lcb=%.6f seq_per_s=%.4f",
                         paired_done,
                         len(sequences),
                         avg_king_loss,
                         avg_challenger_loss,
                         loss_delta,
+                        float(provisional["provisional_lcb"]),
                         seq_per_s,
                     )
         return (
@@ -1732,7 +1756,7 @@ def score_with_model_workers(
     pool = get_model_worker_pool(gpu_ids)
     try:
         generation = pool.load_models(req, king_snapshot, challenger_snapshot, on_progress)
-        return pool.score(sequences, generation, on_progress)
+        return pool.score(sequences, generation, req, on_progress)
     except Exception:
         # In particular, an eager-attention OOM must halt every queued sequence
         # immediately: never keep scoring, truncate, or switch attention backend.
