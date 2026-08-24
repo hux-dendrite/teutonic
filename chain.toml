@@ -46,23 +46,23 @@ extra_lock_keys = [
 [seed]
 tokenizer_repo = "dendriteholdings/teutonic-II-110B-genesis"
 repo_backend = "hf"
-seed_digest = "hf:dbacb5e544b03345ca7b8cc322e74ac08bb0cc36"
+seed_digest = "hf:8f971f030f5d801f812540007b396058f69cc08a"
 genesis_hotkey = "5E6yHkmZmSpBT5aa2rNZcmeYa1y3N9jw1h7g53oNPzMUpnqG"
 
 [seed.contract_files]
 "chat_template.jinja.txt" = "bafea0fe0bd53ef1156649859ca6eeec812ef1d95a62d08323841f2431067cc2"
-"config.json" = "b299e7fcf6efe0c4afd434222f00c65f7b10cab8298deabbf6e37cd6792899e3"
+"config.json" = "a464b9817f4a9832e71b8f10c67e756d81843f263a064a89b085d6c50107554d"
 "configuration_mimo_v2.py" = "4ecf7496d022aeca24e58d523302d3ea1ad78784e8bc50b3af7134526c623d80"
 "modeling_mimo_v2.py" = "08ee07cc45353e4bf01c7e2d207764f561f24c14d2bc258497928cd81f0c3f37"
 "tokenizer.json" = "71e1168ef6233c01973f3b8b90abcd86236e146f7aee8da59655d2ca51afdb20"
 "tokenizer_config.json" = "2cb1d781e7d20a1386d6a6c2c89fdc9b18a9c6f277071488f39dbfc02829589e"
 
 [evaluation]
-dataset_label = "cosmopedia-wikihow-stories"
-n = 300
+dataset_label = "finewebedu"
+n = 2000
 delta_threshold = 0.5
 
 [[evaluation.datasets]]
-name = "cosmopedia-wikihow-stories"
-manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/cosmopedia-wikihow-stories/manifest.json"
-proportion = 1.0
+name = "finewebedu"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/finewebedu/manifest.json"
+proportion = 1
