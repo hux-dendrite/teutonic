@@ -16,7 +16,14 @@ from teutonic.dashboard.contracts import (
     canonical_dataset_manifest_json,
     validate_dashboard,
 )
-from teutonic.dashboard.market import MarketClient, MarketDataError, select_market
+from teutonic.dashboard.market import (
+    COINGECKO_PRICE_URL,
+    KEYLESS_MARKET_SOURCE,
+    KeylessMarketClient,
+    MarketClient,
+    MarketDataError,
+    select_market,
+)
 from teutonic.dashboard.storage import DashboardObjectStore
 from teutonic.dashboard.service import DashboardViewService
 
@@ -37,6 +44,9 @@ def payload() -> dict:
             "netuid": 306,
             "generation": "test",
             "competition": "quasar",
+            "seed_repo": "owner/genesis",
+            "seed_digest": "hf:" + "b" * 40,
+            "seed_repo_backend": "hf",
             "finalized_start_block": None,
             "last_finalized_block": None,
             "observed_at": None,
@@ -255,6 +265,85 @@ class MarketTests(unittest.TestCase):
         with self.assertRaises(MarketDataError):
             client.fetch(now=NOW)
 
+    def test_keyless_client_combines_coingecko_and_subnet_chain_data(self):
+        requests = []
+
+        def handler(request):
+            requests.append(str(request.url))
+            return httpx.Response(
+                200,
+                json={
+                    "bittensor": {
+                        "usd": 192.10,
+                        "usd_24h_change": -0.53,
+                        "last_updated_at": int(NOW.timestamp()),
+                    }
+                },
+            )
+
+        class Balance:
+            def __init__(self, tao):
+                self.tao = tao
+
+        class Subtensor:
+            def __init__(self):
+                self.price_calls = []
+                self.recycle_calls = []
+
+            def get_subnet_price(self, netuid):
+                self.price_calls.append(netuid)
+                return Balance(0.0276)
+
+            def recycle(self, netuid):
+                self.recycle_calls.append(netuid)
+                return Balance(0.001525)
+
+        subtensor = Subtensor()
+        client = KeylessMarketClient(
+            netuid=3,
+            transport=httpx.MockTransport(handler),
+            subtensor=subtensor,
+        )
+        first = client.fetch(now=NOW)
+        cached = client.fetch(now=NOW + timedelta(seconds=30))
+
+        self.assertEqual(requests, [COINGECKO_PRICE_URL])
+        self.assertEqual(subtensor.price_calls, [3])
+        self.assertEqual(subtensor.recycle_calls, [3])
+        self.assertEqual(first, cached)
+        self.assertEqual(first["source"], KEYLESS_MARKET_SOURCE)
+        self.assertEqual(first["tao_price_usd"], 192.10)
+        self.assertEqual(first["tao_change_24h"], -0.53)
+        self.assertEqual(first["sn3_alpha_price_tao"], 0.0276)
+        self.assertEqual(first["sn3_reg_burn_tao"], 0.001525)
+
+    def test_keyless_client_rejects_stale_coingecko_quote(self):
+        response = httpx.Response(
+            200,
+            json={
+                "bittensor": {
+                    "usd": 192.10,
+                    "usd_24h_change": -0.53,
+                    "last_updated_at": int((NOW - timedelta(minutes=11)).timestamp()),
+                }
+            },
+        )
+
+        class Subtensor:
+            def get_subnet_price(self, _netuid):
+                return 0.0276
+
+            def recycle(self, _netuid):
+                return 0.001525
+
+        client = KeylessMarketClient(
+            netuid=3,
+            transport=httpx.MockTransport(lambda _request: response),
+            subtensor=Subtensor(),
+        )
+        with self.assertRaisesRegex(MarketDataError, "already stale"):
+            client.fetch(now=NOW)
+
     def test_failure_reuses_bounded_stale_market_then_expires_it(self):
         previous = market(fetched_at="2026-08-18T11:30:00Z")
         selected = select_market(None, previous, now=NOW, maximum_stale=timedelta(hours=1))
@@ -307,6 +396,31 @@ class DashboardStorageTests(unittest.TestCase):
 
 
 class DashboardServiceTests(unittest.TestCase):
+    def test_market_only_refresh_preserves_existing_dashboard_snapshot(self):
+        previous = payload()
+
+        class Store:
+            def previous_payload(self):
+                return deepcopy(previous)
+
+            def publish(self, body, *, source_watermark):
+                self.published = json.loads(body)
+                return source_watermark
+
+        class LiveMarket:
+            def fetch(self, *, now):
+                return market(fetched_at=now.isoformat().replace("+00:00", "Z"))
+
+        store = Store()
+        result = DashboardViewService(
+            None, store, market_client=LiveMarket()
+        ).publish_market_only(now=NOW)
+
+        self.assertEqual(result, previous["source_watermark"])
+        self.assertEqual(store.published["publication_id"], previous["publication_id"])
+        self.assertEqual(store.published["generated_at"], previous["generated_at"])
+        self.assertEqual(store.published["market"]["tao_price_usd"], 412.5)
+
     def test_market_failure_does_not_block_new_database_publication(self):
         previous = payload()
         previous["market"] = market(fetched_at="2026-08-18T11:30:00Z")

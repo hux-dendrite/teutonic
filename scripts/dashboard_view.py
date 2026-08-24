@@ -13,11 +13,13 @@ import boto3
 import psycopg
 from botocore.config import Config
 
+import chain_config
 from teutonic.config import BucketNames
 from teutonic.dashboard import (
     DashboardObjectStore,
     DashboardProjectionRepository,
     DashboardViewService,
+    KeylessMarketClient,
     MarketClient,
 )
 
@@ -59,67 +61,113 @@ def main() -> int:
         region_name="auto",
         config=Config(signature_version="s3v4", retries={"max_attempts": 3, "mode": "standard"}),
     )
+    netuid = int(required("TEUTONIC_NETUID"))
+    market_refresh_seconds = int(os.environ.get("TEUTONIC_MARKET_REFRESH_SECONDS", "60"))
     market_url = os.environ.get("TEUTONIC_MARKET_URL", "").strip()
-    market = (
-        MarketClient(market_url, source=required("TEUTONIC_MARKET_SOURCE"))
-        if market_url
-        else None
+    if market_url:
+        market = MarketClient(market_url, source=required("TEUTONIC_MARKET_SOURCE"))
+    else:
+        market = KeylessMarketClient(
+            netuid=netuid,
+            network=os.environ.get("TEUTONIC_NETWORK", "finney"),
+            refresh_interval=timedelta(seconds=market_refresh_seconds),
+        )
+    maximum_market_stale = timedelta(
+        seconds=int(os.environ.get("TEUTONIC_MARKET_MAX_STALE_SECONDS", "3600"))
+    )
+    store = DashboardObjectStore(
+        client,
+        bucket=BucketNames.from_env().dashboard,
+        maximum_bytes=int(os.environ.get("TEUTONIC_DASHBOARD_MAX_BYTES", 10 * 1024 * 1024)),
+    )
+    market_service = DashboardViewService(
+        None,
+        store,
+        market_client=market,
+        maximum_market_stale=maximum_market_stale,
     )
     instance = os.environ.get("TEUTONIC_INSTANCE_ID", f"{socket.gethostname()}-{os.getpid()}")
     del instance  # Reserved for service heartbeat integration; never published.
-    repository = None
-    with psycopg.connect(required("TEUTONIC_DATABASE_URL"), autocommit=True) as connection:
-        repository = DashboardProjectionRepository(
-            connection,
-            netuid=int(required("TEUTONIC_NETUID")),
-            chain_generation=required("TEUTONIC_CHAIN_GENERATION"),
-            competition=required("TEUTONIC_COMPETITION"),
-            chain_name=os.environ.get("TEUTONIC_CHAIN_NAME", "Teutonic"),
-        )
-        if not repository.acquire_lock():
-            raise RuntimeError("another dashboard-view publisher holds the advisory lock")
-        service = DashboardViewService(
-            repository,
-            DashboardObjectStore(
-                client,
-                bucket=BucketNames.from_env().dashboard,
-                maximum_bytes=int(os.environ.get("TEUTONIC_DASHBOARD_MAX_BYTES", 10 * 1024 * 1024)),
-            ),
-            market_client=market,
-            maximum_market_stale=timedelta(
-                seconds=int(os.environ.get("TEUTONIC_MARKET_MAX_STALE_SECONDS", "3600"))
-            ),
-        )
-        failures = 0
+    failures = 0
+    database_url = required("TEUTONIC_DATABASE_URL")
+    while not stopping:
+        repository = None
         try:
-            while not stopping:
+            with psycopg.connect(database_url, autocommit=True) as connection:
+                repository = DashboardProjectionRepository(
+                    connection,
+                    netuid=netuid,
+                    chain_generation=required("TEUTONIC_CHAIN_GENERATION"),
+                    competition=required("TEUTONIC_COMPETITION"),
+                    chain_name=os.environ.get("TEUTONIC_CHAIN_NAME", "Teutonic"),
+                    seed_repo=chain_config.SEED_REPO,
+                    seed_digest=chain_config.SEED_DIGEST,
+                    seed_repo_backend=chain_config.SEED_REPO_BACKEND,
+                )
+                if not repository.acquire_lock():
+                    raise RuntimeError("another dashboard-view publisher holds the advisory lock")
+                service = DashboardViewService(
+                    repository,
+                    store,
+                    market_client=market,
+                    maximum_market_stale=maximum_market_stale,
+                )
                 try:
-                    result, dataset_result = service.publish_once()
-                    failures = 0
-                    log.info(
-                        "dashboard %s bytes=%d sha256=%s",
-                        result.state,
-                        result.size_bytes,
-                        result.sha256,
-                    )
-                    log.info(
-                        "dataset manifest %s bytes=%d sha256=%s",
-                        dataset_result.state,
-                        dataset_result.size_bytes,
-                        dataset_result.sha256,
-                    )
-                    if args.once:
-                        return 0
-                    active = repository.project()["current_eval"] is not None
-                    time.sleep(5 if active else 20)
-                except Exception as exc:
-                    failures += 1
-                    log.error("dashboard publication failed type=%s", type(exc).__name__)
-                    if args.once:
-                        raise
-                    time.sleep(min(60, 2 ** min(failures, 5)))
-        finally:
-            repository.release_lock()
+                    while not stopping:
+                        try:
+                            result, dataset_result = service.publish_once()
+                            failures = 0
+                            log.info(
+                                "dashboard %s bytes=%d sha256=%s",
+                                result.state,
+                                result.size_bytes,
+                                result.sha256,
+                            )
+                            log.info(
+                                "dataset manifest %s bytes=%d sha256=%s",
+                                dataset_result.state,
+                                dataset_result.size_bytes,
+                                dataset_result.sha256,
+                            )
+                            if args.once:
+                                return 0
+                            active = repository.project()["current_eval"] is not None
+                            time.sleep(5 if active else 20)
+                        except psycopg.Error:
+                            raise
+                        except Exception as exc:
+                            failures += 1
+                            log.error(
+                                "dashboard publication failed type=%s", type(exc).__name__
+                            )
+                            overlay = market_service.publish_market_only()
+                            log.info(
+                                "market overlay %s bytes=%d sha256=%s",
+                                overlay.state,
+                                overlay.size_bytes,
+                                overlay.sha256,
+                            )
+                            if args.once:
+                                raise
+                            time.sleep(min(60, 2 ** min(failures, 5)))
+                finally:
+                    repository.release_lock()
+        except psycopg.Error as exc:
+            failures += 1
+            log.error("dashboard database unavailable type=%s", type(exc).__name__)
+            try:
+                overlay = market_service.publish_market_only()
+                log.info(
+                    "market overlay %s bytes=%d sha256=%s",
+                    overlay.state,
+                    overlay.size_bytes,
+                    overlay.sha256,
+                )
+            except Exception as market_exc:
+                log.error("market overlay failed type=%s", type(market_exc).__name__)
+            if args.once:
+                raise
+            time.sleep(market_refresh_seconds)
     return 0
 
 

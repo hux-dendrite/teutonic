@@ -11,6 +11,14 @@ class MarketDataError(ValueError):
     pass
 
 
+KEYLESS_MARKET_SOURCE = "coingecko-keyless+bittensor-chain-v1"
+COINGECKO_PRICE_URL = (
+    "https://api.coingecko.com/api/v3/simple/price"
+    "?ids=bittensor&vs_currencies=usd"
+    "&include_24hr_change=true&include_last_updated_at=true"
+)
+
+
 def _timestamp(value: Any) -> datetime:
     if not isinstance(value, str):
         raise MarketDataError("market timestamp is missing")
@@ -101,6 +109,114 @@ class MarketClient:
         if not isinstance(payload, Mapping):
             raise MarketDataError("market response must be an object")
         return validate_market(payload, expected_source=self.source, now=now)
+
+
+class KeylessMarketClient:
+    """Combine public TAO market data with live subnet chain state."""
+
+    source = KEYLESS_MARKET_SOURCE
+
+    def __init__(
+        self,
+        *,
+        netuid: int,
+        network: str = "finney",
+        refresh_interval: timedelta = timedelta(minutes=1),
+        connect_timeout: float = 2.0,
+        response_timeout: float = 4.0,
+        transport=None,
+        subtensor=None,
+    ) -> None:
+        if netuid < 0:
+            raise MarketDataError("market netuid cannot be negative")
+        if refresh_interval < timedelta(seconds=20):
+            raise MarketDataError("keyless market refresh interval cannot be below 20 seconds")
+        self.netuid = netuid
+        self.network = network
+        self.refresh_interval = refresh_interval
+        self.timeout = httpx.Timeout(response_timeout, connect=connect_timeout)
+        self.transport = transport
+        self._subtensor = subtensor
+        self._owns_subtensor = subtensor is None
+        self._cached: dict[str, Any] | None = None
+        self._cached_at: datetime | None = None
+
+    def _chain(self):
+        if self._subtensor is None:
+            import bittensor as bt
+
+            self._subtensor = bt.Subtensor(network=self.network)
+        return self._subtensor
+
+    @staticmethod
+    def _tao(value: Any, name: str) -> float:
+        if value is None:
+            raise MarketDataError(f"chain market field {name} is unavailable")
+        raw = getattr(value, "tao", value)
+        try:
+            result = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise MarketDataError(f"chain market field {name} is invalid") from exc
+        if not math.isfinite(result) or result < 0:
+            raise MarketDataError(f"chain market field {name} is invalid")
+        return result
+
+    def fetch(self, *, now: datetime) -> dict[str, Any]:
+        current = now.astimezone(timezone.utc)
+        if (
+            self._cached is not None
+            and self._cached_at is not None
+            and current - self._cached_at < self.refresh_interval
+        ):
+            return dict(self._cached)
+
+        with httpx.Client(
+            timeout=self.timeout,
+            follow_redirects=False,
+            transport=self.transport,
+        ) as client:
+            response = client.get(COINGECKO_PRICE_URL, headers={"Accept": "application/json"})
+            response.raise_for_status()
+            if len(response.content) > 64 * 1024:
+                raise MarketDataError("CoinGecko response is too large")
+            response_payload = response.json()
+        if not isinstance(response_payload, Mapping):
+            raise MarketDataError("CoinGecko response must be an object")
+        tao = response_payload.get("bittensor")
+        if not isinstance(tao, Mapping):
+            raise MarketDataError("CoinGecko response has no Bittensor quote")
+        updated_at = tao.get("last_updated_at")
+        if isinstance(updated_at, bool) or not isinstance(updated_at, (int, float)):
+            raise MarketDataError("CoinGecko response has no valid update time")
+        fetched_at = datetime.fromtimestamp(float(updated_at), tz=timezone.utc)
+
+        try:
+            subtensor = self._chain()
+            alpha_price = self._tao(
+                subtensor.get_subnet_price(self.netuid), "sn3_alpha_price_tao"
+            )
+            registration = self._tao(subtensor.recycle(self.netuid), "sn3_reg_burn_tao")
+        except Exception:
+            if self._owns_subtensor:
+                self._subtensor = None
+            raise
+
+        payload = validate_market(
+            {
+                "source": self.source,
+                "fetched_at": fetched_at.isoformat().replace("+00:00", "Z"),
+                "stale": False,
+                "tao_price_usd": tao.get("usd"),
+                "tao_change_24h": tao.get("usd_24h_change"),
+                "sn3_alpha_price_tao": alpha_price,
+                "sn3_reg_burn_tao": registration,
+            },
+            expected_source=self.source,
+            now=current,
+        )
+        self._cached = payload
+        self._cached_at = current
+        return dict(payload)
 
 
 def select_market(

@@ -10,7 +10,10 @@ function base() {
         generated_at: "2026-08-18T12:00:00Z",
         updated_at: "2026-08-18T12:00:00Z",
         source_watermark: 1,
-        chain: { name: "Teutonic", netuid: 306, generation: "test", competition: "quasar" },
+        chain: {
+            name: "Teutonic", netuid: 306, generation: "test", competition: "quasar",
+            seed_repo: "owner/genesis", seed_digest: "hf:" + "b".repeat(40), seed_repo_backend: "hf"
+        },
         king: null,
         king_payout: { weight: null, alpha_per_hour: null, usd_per_hour: null },
         king_chain: [],

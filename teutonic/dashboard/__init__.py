@@ -4,7 +4,7 @@ from .contracts import (
     canonical_dataset_manifest_json,
     validate_dashboard,
 )
-from .market import MarketClient, select_market
+from .market import KeylessMarketClient, MarketClient, select_market
 from .projection import DashboardProjectionRepository
 from .service import DashboardViewService
 from .storage import DashboardObjectStore, PublicationResult
@@ -14,6 +14,7 @@ __all__ = [
     "DashboardObjectStore",
     "DashboardProjectionRepository",
     "DashboardViewService",
+    "KeylessMarketClient",
     "MarketClient",
     "PublicationResult",
     "canonical_dashboard_json",

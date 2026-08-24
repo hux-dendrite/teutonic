@@ -62,12 +62,15 @@
     "chain": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "netuid", "generation", "competition", "finalized_start_block", "last_finalized_block", "observed_at"],
+      "required": ["name", "netuid", "generation", "competition", "seed_repo", "seed_digest", "seed_repo_backend", "finalized_start_block", "last_finalized_block", "observed_at"],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
         "netuid": { "type": "integer", "minimum": 0 },
         "generation": { "type": "string", "minLength": 1 },
         "competition": { "type": "string", "minLength": 1 },
+        "seed_repo": { "$ref": "#/$defs/nullable_string" },
+        "seed_digest": { "$ref": "#/$defs/nullable_string" },
+        "seed_repo_backend": { "$ref": "#/$defs/nullable_string" },
         "finalized_start_block": { "$ref": "#/$defs/nullable_integer" },
         "last_finalized_block": { "$ref": "#/$defs/nullable_integer" },
         "observed_at": { "$ref": "#/$defs/nullable_timestamp" }

@@ -34,6 +34,10 @@
   }
   function datasetWeight(value) { var n = finite(value); if (n == null) return "--"; var pct = n * 100; return (Math.abs(pct - Math.round(pct)) < .05 ? String(Math.round(pct)) : pct.toFixed(1)) + "%"; }
   function smallPercent(value) { var n = finite(value); if (n == null) return "--"; if (n === 0) return "0%"; if (Math.abs(n) < .01) return n.toPrecision(2) + "%"; return (Math.abs(n) >= 10 ? n.toFixed(1) : n.toFixed(3)).replace(/0+$/, "").replace(/\.$/, "") + "%"; }
+  function revision(value) { var parts = String(value || "").split(":"); return parts.length === 2 ? parts[0] + ":" + parts[1].slice(0, 16) : short(value, 16, 0); }
+  function compactTimestamp(value) { if (!value) return "--"; var d = new Date(value); return Number.isNaN(d.getTime()) ? "--" : d.toISOString().replace(/:\d{2}\.\d{3}Z$/, "Z"); }
+  function setLink(id, label, href) { var node = el(id); node.textContent = label || "--"; node.href = href || "#"; if (href) { node.target = "_blank"; node.rel = "noopener"; } else { node.removeAttribute("target"); node.removeAttribute("rel"); } }
+  function huggingFaceUrl(repo, digest) { var base = repo ? "https://huggingface.co/" + repo : ""; var raw = String(digest || "").replace(/^hf:/, ""); return base && raw ? base + "/tree/" + raw : base; }
   function datasetCell(row, value, subtext, href) {
     var td = document.createElement("td"), main;
     if (href) { main = document.createElement("a"); main.href = href; main.target = "_blank"; main.rel = "noopener"; main.textContent = value || "--"; td.appendChild(main); }
@@ -85,10 +89,27 @@
   }
 
   function renderHeader(d) {
-    var chain = d.chain || {};
-    text("network-name", "3"); text("netuid", chain.netuid); text("finalized-block", number(chain.last_finalized_block));
-    text("chain-title", chain.name || "TEUTONIC"); text("competition", (chain.competition || "MODEL") + " COMPETITION");
-    text("generation", "GENERATION " + short(chain.generation, 17, 6)); text("published-at", "PUBLISHED " + age(d.generated_at));
+    var chain = d.chain || {}, king = d.king || {}, market = d.market || {};
+    text("tao-price", finite(market.tao_price_usd) == null ? "--" : usd(market.tao_price_usd));
+    var change = finite(market.tao_change_24h), changeNode = el("tao-change");
+    changeNode.textContent = change == null ? "" : (change > 0 ? "+" : "") + change.toFixed(1) + "%";
+    changeNode.className = change == null ? "" : (change >= 0 ? "is-up" : "is-down");
+    text("sn3-alpha", finite(market.sn3_alpha_price_tao) == null ? "--" : metric(market.sn3_alpha_price_tao, 4) + " τ");
+    text("sn3-reg", finite(market.sn3_reg_burn_tao) == null ? "--" : metric(market.sn3_reg_burn_tao, 6) + " τ");
+
+    var genesisRepo = chain.seed_repo, genesisDigest = chain.seed_digest;
+    var genesisUrl = chain.seed_repo_backend === "hf" ? huggingFaceUrl(genesisRepo, genesisDigest) : "";
+    setLink("genesis-link", genesisRepo, genesisUrl);
+    setLink("genesis-revision", revision(genesisDigest), genesisUrl);
+
+    var genesisKing = Number(king.reign_number) === 0 || !king.model_repo;
+    var kingRepo = genesisKing ? genesisRepo : king.model_repo;
+    var kingDigest = genesisKing ? genesisDigest : (king.king_digest || king.model_digest);
+    var kingUrl = genesisKing ? genesisUrl : (king.model_reference ? new URL(king.model_reference + "manifest.json", MODEL_STORAGE_BASE).href : "");
+    setLink("king-link", kingRepo, kingUrl);
+    setLink("king-revision", revision(kingDigest), kingUrl);
+    el("king-health").classList.toggle("is-live", !!d.king);
+    text("king-reign", "REIGN " + (d.king ? "#" + number(king.reign_number) + " — " + compactTimestamp(king.crowned_at) : "--"));
     text("source-watermark", "WATERMARK " + number(d.source_watermark));
     document.title = (chain.name || "Teutonic") + " — Dashboard";
   }

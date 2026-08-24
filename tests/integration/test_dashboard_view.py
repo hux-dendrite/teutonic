@@ -64,6 +64,9 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             chain_generation="test",
             competition="quasar",
             chain_name="Teutonic Testnet",
+            seed_repo="owner/genesis",
+            seed_digest="hf:" + "b" * 40,
+            seed_repo_backend="hf",
         )
         self.assertTrue(self.repository.acquire_lock())
 

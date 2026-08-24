@@ -10,20 +10,23 @@
 </head>
 <body>
   <main class="page">
-    <header class="utility-bar" aria-label="Network summary">
-      <span>NETWORK <b id="network-name">3</b></span>
-      <span>NETUID <b id="netuid">--</b></span>
-      <span>FINALIZED <b id="finalized-block">--</b></span>
+    <header id="top-bar" class="utility-bar" aria-label="Network summary">
+      <span>TAO <b id="tao-price">--</b> <span id="tao-change"></span></span>
+      <span>SN3 ALPHA <b id="sn3-alpha">--</b></span>
+      <span>SN3 REG <b id="sn3-reg">--</b></span>
       <button id="theme-toggle" type="button">DARK</button>
+      <a id="llms-link" href="https://teutonic.ai/llms.txt" title="Agent-readable guide: zero to mining on SN3">LLMS.TXT</a>
     </header>
 
     <section class="hero">
-      <img src="favicon.png" alt="" class="logo">
-      <p class="eyebrow" id="competition">DECENTRALIZED MODEL COMPETITION</p>
-      <h1 id="chain-title">TEUTONIC</h1>
-      <div class="hero-meta">
-        <span id="generation">GENERATION --</span>
-        <span id="published-at">PUBLISHED --</span>
+      <img src="favicon.png" alt="Teuton" class="logo">
+      <h1>Teutonic</h1>
+      <div class="hero-links" aria-label="Teutonic model and project links">
+        <span><i id="king-health" class="status-dot" aria-hidden="true"></i> KING: <a id="king-link" href="#">--</a> <span class="model-revision">@ <a id="king-revision" href="#">--</a></span></span>
+        <span>GENESIS: <a id="genesis-link" href="#">--</a> <span class="model-revision">@ <a id="genesis-revision" href="#">--</a></span></span>
+        <span>VALIDATOR: <a href="https://github.com/unarbos/teutonic">GitHub</a></span>
+        <span>PAPER: <a href="https://teutonic.ai/paper.html">Teutonic-I 10B Technical Report</a></span>
+        <span id="king-reign">REIGN --</span>
       </div>
       <div class="dataset-panel" id="dataset-panel">
         <div class="dataset-panel-head">

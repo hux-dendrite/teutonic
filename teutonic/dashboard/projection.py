@@ -124,12 +124,18 @@ class DashboardProjectionRepository:
         chain_generation: str,
         competition: str,
         chain_name: str = "Teutonic",
+        seed_repo: str | None = None,
+        seed_digest: str | None = None,
+        seed_repo_backend: str | None = None,
     ) -> None:
         self.connection = connection
         self.netuid = netuid
         self.chain_generation = chain_generation
         self.competition = competition
         self.chain_name = chain_name
+        self.seed_repo = seed_repo
+        self.seed_digest = seed_digest
+        self.seed_repo_backend = seed_repo_backend
         self._scope = (netuid, chain_generation, competition)
         self._lock_held = False
 
@@ -203,6 +209,9 @@ class DashboardProjectionRepository:
                 "netuid": self.netuid,
                 "generation": self.chain_generation,
                 "competition": self.competition,
+                "seed_repo": self.seed_repo,
+                "seed_digest": self.seed_digest,
+                "seed_repo_backend": self.seed_repo_backend,
                 "finalized_start_block": _int(chain["finalized_start_block"]) if chain else None,
                 "last_finalized_block": _int(chain["last_finalized_block"]) if chain else None,
                 "observed_at": _iso(chain["observed_at"]) if chain else None,
