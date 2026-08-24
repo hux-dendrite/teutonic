@@ -78,6 +78,12 @@
         };
     }
 
+    function taoMarketCapHotkeyUrl(hotkey) {
+        var address = String(hotkey || "").trim();
+        if (!address) return "";
+        return "https://taomarketcap.com/hotkey/" + encodeURIComponent(address) + "/metagraph";
+    }
+
     function datasetPresentation(manifest) {
         if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
             throw new Error("dataset manifest must be an object");
@@ -164,6 +170,7 @@
         validate: validate,
         presentation: presentation,
         historyPresentation: historyPresentation,
+        taoMarketCapHotkeyUrl: taoMarketCapHotkeyUrl,
         datasetPresentation: datasetPresentation
     };
 });

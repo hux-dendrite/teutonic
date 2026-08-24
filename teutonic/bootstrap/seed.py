@@ -510,7 +510,7 @@ def bootstrap_initial_weights(
                 weights,
                 payload_sha256,
                 finalized_block,
-                f"publish-genesis-weights:{row['current_reign_id']}",
+                f"publish-weights:{row['current_reign_id']}",
             ),
         ).fetchone()["weight_publication_id"]
         return InitialWeightRecord(str(publication_id), True)

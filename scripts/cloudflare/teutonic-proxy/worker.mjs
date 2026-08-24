@@ -11,7 +11,7 @@
 // drop Last-Modified on the way back, and disable caching so live dashboard
 // state is never hidden by stale browser or intermediary responses.
 
-const ORIGIN = "https://pub-e2009eec1ca9488699de6263f40bb7e7.r2.dev";
+const ORIGIN = "https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev";
 const DATASET_ORIGIN = "https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev";
 const DATASET_MANIFEST_PATH = "/datasets/manifest.json";
 

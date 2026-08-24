@@ -75,6 +75,16 @@ assert.deepStrictEqual(hiddenErrors.rows.map((row) => row.challenge_id), ["accep
 assert.strictEqual(hiddenErrors.errorCount, 1);
 assert.strictEqual(dashboard.historyPresentation(historyRows, true).rows.length, 3);
 
+assert.strictEqual(
+    dashboard.taoMarketCapHotkeyUrl("5MinerHotkey"),
+    "https://taomarketcap.com/hotkey/5MinerHotkey/metagraph"
+);
+assert.strictEqual(
+    dashboard.taoMarketCapHotkeyUrl("5Miner Hotkey"),
+    "https://taomarketcap.com/hotkey/5Miner%20Hotkey/metagraph"
+);
+assert.strictEqual(dashboard.taoMarketCapHotkeyUrl(""), "");
+
 const invalid = base();
 invalid.schema_version = 2;
 assert.throws(() => dashboard.presentation(invalid), /unsupported dashboard schema/);

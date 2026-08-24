@@ -125,7 +125,8 @@ class SeedBootstrapIntegrationTests(unittest.TestCase):
         row = self.connection.execute(
             """
             SELECT source_reign_id, policy_version, policy_hotkeys, target_hotkeys,
-                   target_uids, normalized_weights, mapping_finalized_block, state
+                   target_uids, normalized_weights, mapping_finalized_block,
+                   idempotency_key, state
               FROM control_plane.weight_publications
             """
         ).fetchone()
@@ -136,6 +137,7 @@ class SeedBootstrapIntegrationTests(unittest.TestCase):
         self.assertEqual(row["target_uids"], [110, 115, 143, 224, 226])
         self.assertEqual(row["normalized_weights"], [0.2] * 5)
         self.assertEqual(row["mapping_finalized_block"], 101)
+        self.assertEqual(row["idempotency_key"], f"publish-weights:{genesis.reign_id}")
         self.assertEqual(row["state"], "requested")
 
 
