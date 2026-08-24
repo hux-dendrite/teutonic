@@ -1,0 +1,94 @@
+# Teutonic
+
+> Teutonic is a king-of-the-hill pretraining competition on Bittensor subnet 3
+> (Finney, netuid 3). Miners submit immutable model checkpoints through a
+> validator-issued R2 mailbox. A challenger that passes policy checks and wins
+> paired cross-entropy evaluation becomes the new king.
+
+This file describes the current Teutonic-II protocol. Last reviewed
+2026-08-24. Live state can change; agents must read the dashboard, dataset
+manifest, and `chain.toml` before acting.
+
+Current chain facts:
+
+- Chain: `teutonic-II-110B`.
+- Architecture: custom MiMo, approximately 110B parameters, 256 experts,
+  top-8 routing.
+- Genesis repository: `dendriteholdings/teutonic-II-110B-genesis`.
+- Genesis revision: `hf:8f971f030f5d801f812540007b396058f69cc08a`.
+- Challenger repository names must match `^[^/]+/teutonic-II-110B-.+$`.
+- Current evaluation configuration: 2,000 sequences from the published
+  FineWeb-Edu manifest, with delta threshold `0.5`. Treat `chain.toml` and the
+  live dataset manifest as authoritative if these values differ.
+- Each hotkey has one irreversible model submission. A finalized `ready`
+  signal consumes that hotkey's eligibility and revokes its upload credential.
+- The current protocol uses encrypted, temporary, prefix-scoped R2
+  credentials and an on-chain `r2ready:v1` signal. Do not follow old guides
+  that use Hippius uploads or `v4|repo|digest|hotkey` reveals.
+
+Recommended agent workflow:
+
+1. Read the live dashboard and dataset manifest.
+2. Read `chain.toml` and the miner README from the current repository revision.
+3. Install the miner dependency group and use an Ed25519 Bittensor hotkey.
+4. Run `teutonic-miner register`, then `auth`, `upload`, and `ready`; or use
+   `teutonic-miner submit` for the complete flow.
+5. Never print, commit, transmit, or retain expired `upload-auth.json`
+   credentials. Never issue `ready` until the upload is complete and verified.
+
+Dashboard interpretation:
+
+- `chain` identifies the active generation, competition, genesis repository,
+  and pinned genesis revision.
+- `king` and `king_chain` describe the current and previous reigns.
+- `current_eval`, `queue`, and `history` describe evaluation activity.
+- `weight_status` and `service_status` describe validator publication health.
+- `market` contains TAO/USD, TAO 24-hour change, SN3 alpha price in TAO, and
+  SN3 neuron-registration cost. Market data is informational and can be stale.
+- A missing, invalid, or stale dashboard is not permission to guess state or
+  submit against an unverified king.
+
+## Live state
+
+- [Human dashboard](https://teutonic.ai/): Current king, reigns, evaluations, dataset mix, weights, and market data.
+- [Dashboard JSON](https://teutonic.ai/dashboard.json): Canonical sanitized machine-readable dashboard projection.
+- [Dataset manifest](https://teutonic.ai/datasets/manifest.json): Active weighted evaluation dataset configuration and source metadata.
+- [Dashboard R2 origin](https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev/dashboard.json): Direct public origin for dashboard state.
+- [Dataset R2 origin](https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev/datasets/manifest.json): Direct public origin for the dataset manifest.
+
+## Mining
+
+- [Miner quick start](https://github.com/unarbos/teutonic/blob/main/README.md): Installation, wallet registration, authorization, upload, and submission commands.
+- [Miner CLI](https://github.com/unarbos/teutonic/blob/main/miner/cli.py): Exact command-line interface and local state behavior.
+- [Registration client](https://github.com/unarbos/teutonic/blob/main/miner/register.py): Finalized metagraph registration and signed mailbox activation.
+- [Upload authorization client](https://github.com/unarbos/teutonic/blob/main/miner/get_upload_auth.py): Encrypted mailbox polling and credential decryption.
+- [Model uploader](https://github.com/unarbos/teutonic/blob/main/miner/upload_model.py): Immutable manifest creation and R2 upload rules.
+- [Ready signal client](https://github.com/unarbos/teutonic/blob/main/miner/commit_ready.py): Irreversible on-chain submission signal.
+
+## Protocol and contracts
+
+- [Active chain contract](https://github.com/unarbos/teutonic/blob/main/chain.toml): Model family, genesis revision, repository policy, locked architecture files, and evaluation configuration.
+- [Ready signal schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/ready-signal-v1.schema.json): Machine-readable `r2ready:v1` contract.
+- [Mailbox envelope schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/mailbox-envelope-v1.schema.json): Public encrypted credential-envelope contract.
+- [Dashboard schema](https://github.com/unarbos/teutonic/blob/main/teutonic/schemas/dashboard-v1.schema.json): Exact public dashboard JSON contract.
+- [Access contracts](https://github.com/unarbos/teutonic/blob/main/teutonic/access/contracts.py): Activation and ready-signal validation rules.
+- [Evaluation policy](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluation/policy.py): Public checkpoint/configuration eligibility rules.
+
+## Model and evaluation
+
+- [Genesis model](https://huggingface.co/dendriteholdings/teutonic-II-110B-genesis/tree/8f971f030f5d801f812540007b396058f69cc08a): Pinned genesis checkpoint and contract files.
+- [MiMo architecture adapter](https://github.com/unarbos/teutonic/tree/main/teutonic/archs/mimo): Validator-side architecture registration.
+- [Evaluator engine](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluator/engine.py): Paired model loading, scoring, and result production.
+- [Evaluation protocol](https://github.com/unarbos/teutonic/blob/main/teutonic/evaluation/protocol_v2.py): Evaluator request/response contract.
+- [FineWeb-Edu source manifest](https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/finewebedu/manifest.json): Current pretokenized source inventory.
+
+## Project
+
+- [Source repository](https://github.com/unarbos/teutonic): Validator, miner, evaluator, schemas, tests, and deployment code.
+- [Deployment runbook](https://github.com/unarbos/teutonic/blob/main/DEPLOY.md): Operator architecture and production startup order; not required for miners.
+- [Technical report](https://teutonic.ai/paper.html): Teutonic-I background; the live Teutonic-II contract takes precedence where behavior differs.
+
+## Optional
+
+- [Bittensor documentation](https://docs.learnbittensor.org/): Wallet, subnet registration, staking, and chain concepts.
+- [llms.txt format](https://llmstxt.org/): Format used by this document.

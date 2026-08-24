@@ -65,6 +65,16 @@ const staleMarketPayload = base();
 staleMarketPayload.market = { stale: true };
 assert.strictEqual(dashboard.presentation(staleMarketPayload).marketStale, true);
 
+const historyRows = [
+    { verdict: "accepted", challenge_id: "accepted" },
+    { verdict: "error", challenge_id: "failed" },
+    { verdict: "rejected", challenge_id: "rejected" }
+];
+const hiddenErrors = dashboard.historyPresentation(historyRows, false);
+assert.deepStrictEqual(hiddenErrors.rows.map((row) => row.challenge_id), ["accepted", "rejected"]);
+assert.strictEqual(hiddenErrors.errorCount, 1);
+assert.strictEqual(dashboard.historyPresentation(historyRows, true).rows.length, 3);
+
 const invalid = base();
 invalid.schema_version = 2;
 assert.throws(() => dashboard.presentation(invalid), /unsupported dashboard schema/);

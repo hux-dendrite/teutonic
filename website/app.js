@@ -6,6 +6,7 @@
   var POLL_MS = 15000;
   var DATASET_POLL_MS = 60000;
   var lastPayload = null;
+  var historyShowErrors = false;
   var smoothMode = localStorage.getItem("smoothMode") || "lowess";
   if (smoothMode !== "lowess" && smoothMode !== "normal") smoothMode = "lowess";
   function el(id) { return document.getElementById(id); }
@@ -124,7 +125,12 @@
     rows.forEach(function (item, index) { var tr = document.createElement("tr"); cell(tr, "#" + (item.queue_position || index + 1)); cell(tr, item.uid); cell(tr, item.challenge_id, "mono"); cell(tr, short(item.hotkey, 12, 6), "mono", item.hotkey); cell(tr, number(item.block)); cell(tr, String(item.state || "queued").toUpperCase()); cell(tr, date(item.submitted_at)); body.appendChild(tr); });
   }
   function renderHistory(d) {
-    var body = el("history-body"), rows = (d.history || []).slice().sort(function (a, b) { return new Date(b.timestamp || 0) - new Date(a.timestamp || 0); }); text("history-count", rows.length + (rows.length === 1 ? " RESULT" : " RESULTS")); if (!rows.length) return emptyRow(body, 9, "NO EVALUATIONS YET"); clear(body);
+    var body = el("history-body"), view = TeutonicDashboardV1.historyPresentation(d.history || [], historyShowErrors), rows = view.rows.slice().sort(function (a, b) { return new Date(b.timestamp || 0) - new Date(a.timestamp || 0); });
+    var countLabel = rows.length + (rows.length === 1 ? " RESULT" : " RESULTS");
+    if (!historyShowErrors && view.errorCount) countLabel += " · " + view.errorCount + (view.errorCount === 1 ? " ERROR HIDDEN" : " ERRORS HIDDEN");
+    text("history-count", countLabel);
+    var toggle = el("history-errors-toggle"); toggle.textContent = historyShowErrors ? "HIDE ERRORS" : "SHOW ERRORS"; toggle.setAttribute("aria-pressed", historyShowErrors ? "true" : "false");
+    if (!rows.length) return emptyRow(body, 9, view.errorCount && !historyShowErrors ? "NO NON-ERROR EVALUATIONS — ERRORS HIDDEN" : "NO EVALUATIONS YET"); clear(body);
     rows.forEach(function (item) { var tr = document.createElement("tr"); cell(tr, item.uid); cell(tr, identity(item), "", item.challenger_repo || item.challenge_id); cell(tr, short(item.hotkey, 12, 6), "mono", item.hotkey); cell(tr, String(item.verdict || "--").toUpperCase(), "verdict " + (item.verdict || ""), item.error_message); cell(tr, metric(item.mu_hat)); cell(tr, metric(item.lcb)); cell(tr, metric(item.avg_king_loss, 4)); cell(tr, metric(item.avg_challenger_loss, 4)); var when = age(item.timestamp) + (finite(item.wall_time_s) == null ? "" : " (" + metric(item.wall_time_s, 0) + "S)"); cell(tr, when, "", date(item.timestamp)); body.appendChild(tr); });
   }
   function renderReigns(d) {
@@ -181,6 +187,7 @@
   updateSmoothControls();
   smoothSlider.addEventListener("input", function () { localStorage.setItem("smoothing", smoothSlider.value); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
   el("smooth-mode-toggle").addEventListener("click", function () { smoothMode = smoothMode === "lowess" ? "normal" : "lowess"; localStorage.setItem("smoothMode", smoothMode); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
+  el("history-errors-toggle").addEventListener("click", function () { historyShowErrors = !historyShowErrors; if (lastPayload) renderHistory(lastPayload); });
   poll(); setInterval(poll, POLL_MS);
   loadDatasetManifest(); setInterval(loadDatasetManifest, DATASET_POLL_MS);
 })();

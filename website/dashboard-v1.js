@@ -65,6 +65,19 @@
         return Number.isFinite(number) ? number : fallback;
     }
 
+    function historyPresentation(history, showErrors) {
+        if (!Array.isArray(history)) throw new Error("dashboard history must be an array");
+        var errorCount = history.filter(function(item) {
+            return item && item.verdict === "error";
+        }).length;
+        return {
+            rows: showErrors ? history.slice() : history.filter(function(item) {
+                return !item || item.verdict !== "error";
+            }),
+            errorCount: errorCount
+        };
+    }
+
     function datasetPresentation(manifest) {
         if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
             throw new Error("dataset manifest must be an object");
@@ -150,6 +163,7 @@
         HIDDEN: HIDDEN,
         validate: validate,
         presentation: presentation,
+        historyPresentation: historyPresentation,
         datasetPresentation: datasetPresentation
     };
 });
