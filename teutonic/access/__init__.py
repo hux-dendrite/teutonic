@@ -30,7 +30,9 @@ _LAZY_EXPORTS = {
     "MailboxStore": (".service", "MailboxStore"),
     "ImmutableSnapshotResult": (".storage", "ImmutableSnapshotResult"),
     "GenesisContractMismatch": (".storage", "GenesisContractMismatch"),
+    "MAX_MINER_UPLOAD_BYTES": (".storage", "MAX_MINER_UPLOAD_BYTES"),
     "R2UploadController": (".storage", "R2UploadController"),
+    "UploadQuotaExceeded": (".storage", "UploadQuotaExceeded"),
 }
 
 
@@ -57,10 +59,12 @@ __all__ = [
     "MailboxStore",
     "Manifest",
     "ManifestFile",
+    "MAX_MINER_UPLOAD_BYTES",
     "MetagraphSnapshot",
     "R2UploadController",
     "ReadySignal",
     "UidAssignment",
+    "UploadQuotaExceeded",
     "decode_ss58_public_key",
     "encode_ss58_public_key",
     "ready_signal_payload",

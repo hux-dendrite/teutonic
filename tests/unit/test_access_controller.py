@@ -19,6 +19,7 @@ from teutonic.access import (
     R2UploadController,
     ReadySignal,
     UidAssignment,
+    UploadQuotaExceeded,
     encode_ss58_public_key,
     ready_signal_payload,
 )
@@ -68,6 +69,14 @@ class FakeS3:
     def list_multipart_uploads(self, *, Bucket, Prefix, **kwargs):
         uploads = [item for item in self.multipart if item["Key"].startswith(Prefix)]
         return {"Uploads": uploads, "IsTruncated": False}
+
+    def list_parts(self, *, Bucket, Key, UploadId, **kwargs):
+        upload = next(
+            item
+            for item in self.multipart
+            if item["Key"] == Key and item["UploadId"] == UploadId
+        )
+        return {"Parts": upload.get("Parts", []), "IsTruncated": False}
 
     def copy_object(self, *, Bucket, Key, CopySource, **kwargs):
         self.objects[(Bucket, Key)] = self.objects[(CopySource["Bucket"], CopySource["Key"])]
@@ -350,6 +359,75 @@ class AccessControllerContractTests(unittest.TestCase):
                 hotkey=self.hotkey,
                 expected_manifest_sha256=manifest.manifest_sha256,
             )
+
+    def test_upload_usage_counts_completed_objects_and_multipart_parts(self) -> None:
+        other_registration = "b" * 64
+        prefix = f"models/registrations/{self.registration}/"
+        s3 = FakeS3()
+        s3.put_object(Bucket="private", Key=f"{prefix}completed.bin", Body=b"123456")
+        s3.put_object(
+            Bucket="private",
+            Key=f"models/registrations/{other_registration}/ignored.bin",
+            Body=b"ignored",
+        )
+        s3.multipart.append(
+            {
+                "Key": f"{prefix}uploading.bin",
+                "UploadId": "upload-1",
+                "Parts": [{"PartNumber": 1, "Size": 4}, {"PartNumber": 2, "Size": 3}],
+            }
+        )
+        controller = R2UploadController(
+            s3,
+            private_model_bucket="private",
+            genesis_contract_files={"config.json": hashlib.sha256(b"{}").hexdigest()},
+        )
+        self.assertEqual(
+            controller.registration_upload_usage(
+                (self.registration, other_registration)
+            ),
+            {self.registration: 13, other_registration: 7},
+        )
+
+    def test_verifier_rejects_upload_above_hard_byte_limit_before_reading_objects(
+        self,
+    ) -> None:
+        files = {"config.json": b"{}", "model.bin": b"weights"}
+        manifest = signed_manifest(self.miner, self.registration, files)
+        prefix = f"models/registrations/{self.registration}/"
+        s3 = FakeS3()
+        for path, value in files.items():
+            s3.put_object(
+                Bucket="private",
+                Key=f"{prefix}{path}",
+                Body=value,
+                Metadata={"sha256": hashlib.sha256(value).hexdigest()},
+            )
+        s3.put_object(
+            Bucket="private",
+            Key=f"{prefix}manifest.json",
+            Body=manifest.as_bytes(),
+            Metadata={"sha256": manifest.manifest_sha256},
+        )
+        total_bytes = sum(len(value) for value in files.values()) + len(
+            manifest.as_bytes()
+        )
+        controller = R2UploadController(
+            s3,
+            private_model_bucket="private",
+            genesis_contract_files={
+                "config.json": hashlib.sha256(files["config.json"]).hexdigest()
+            },
+            max_upload_bytes=total_bytes - 1,
+        )
+        with self.assertRaises(UploadQuotaExceeded):
+            controller.verify_manifest(
+                model_prefix=prefix,
+                registration_id=self.registration,
+                hotkey=self.hotkey,
+                expected_manifest_sha256=manifest.manifest_sha256,
+            )
+        self.assertEqual(s3.get_keys, [])
 
     def test_verifier_rejects_missing_sha256_metadata_before_evaluation(self) -> None:
         files = {"model.bin": b"phase-four"}

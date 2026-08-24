@@ -200,6 +200,36 @@ class AccessControllerJobRunner:
             self.repository.revoked_mailbox_object_keys()
         )
 
+    def enforce_upload_quotas(self) -> int:
+        """Revoke active upload authorities whose R2 usage exceeds the hard limit."""
+        authorities = self.repository.active_upload_authorities()
+        for registration, prefix in authorities.items():
+            if prefix != f"models/registrations/{registration}/":
+                raise ControllerInvariantError(
+                    "active upload authority has a non-canonical model prefix"
+                )
+        usage = self.upload_controller.registration_upload_usage(authorities)
+        revoked = 0
+        for registration, observed_bytes in sorted(usage.items()):
+            if observed_bytes <= self.upload_controller.max_upload_bytes:
+                continue
+            requested = self.repository.request_upload_quota_revocation(
+                registration,
+                observed_bytes=observed_bytes,
+                limit_bytes=self.upload_controller.max_upload_bytes,
+                now=self.clock(),
+            )
+            if requested:
+                revoked += 1
+                log.warning(
+                    "upload quota exceeded registration=%s bytes=%d limit=%d "
+                    "action=revoke_abort_cleanup",
+                    registration,
+                    observed_bytes,
+                    self.upload_controller.max_upload_bytes,
+                )
+        return revoked
+
     def _dispatch(self, job: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         operation = job["operation"]
         if operation == "create_parent_token":

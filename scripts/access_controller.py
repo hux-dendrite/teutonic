@@ -35,6 +35,7 @@ from teutonic.config import BucketNames
 log = logging.getLogger("teutonic.access-controller")
 stopping = False
 STATUS_LOG_SECONDS = 60.0
+UPLOAD_QUOTA_SCAN_SECONDS = 5.0
 
 
 def required(name: str) -> str:
@@ -161,15 +162,18 @@ def main() -> int:
             ),
         )
         log.info(
-            "access controller active instance=%s network=%s netuid=%s private_bucket=%s mailbox_bucket=%s poll_seconds=%s",
+            "access controller active instance=%s network=%s netuid=%s "
+            "private_bucket=%s mailbox_bucket=%s poll_seconds=%s upload_limit_bytes=%d",
             instance,
             required("TEUTONIC_NETWORK"),
             required("TEUTONIC_NETUID"),
             buckets.private_models,
             buckets.dashboard,
             poll_seconds,
+            runner.upload_controller.max_upload_bytes,
         )
         next_chain_scan = 0.0
+        next_upload_quota_scan = 0.0
         next_status_log = 0.0
         mailboxes_reconciled = False
         while not stopping:
@@ -189,15 +193,23 @@ def main() -> int:
                 if time.monotonic() >= next_chain_scan:
                     next_chain_scan = time.monotonic() + 6.0
                     scanned, accepted = scanner.scan(repository)
+                quota_revocations = 0
+                if time.monotonic() >= next_upload_quota_scan:
+                    next_upload_quota_scan = (
+                        time.monotonic() + UPLOAD_QUOTA_SCAN_SECONDS
+                    )
+                    quota_revocations = runner.enforce_upload_quotas()
                 recovered = repository.recover_expired_jobs(
                     now=datetime.now(timezone.utc)
                 )
-                processed = runner.run_until_idle(maximum_jobs=100)
-                if scanned or accepted or recovered or processed:
+                processed = runner.run_until_idle(maximum_jobs=1000)
+                if scanned or accepted or quota_revocations or recovered or processed:
                     log.info(
-                        "controller chain_blocks=%d signals=%d jobs_recovered=%d jobs_processed=%d",
+                        "controller chain_blocks=%d signals=%d quota_revocations=%d "
+                        "jobs_recovered=%d jobs_processed=%d",
                         scanned,
                         accepted,
+                        quota_revocations,
                         recovered,
                         processed,
                     )

@@ -698,6 +698,84 @@ class AccessControllerRepository:
         ).fetchall()
         return tuple(str(row[0]) for row in rows)
 
+    def active_upload_authorities(self) -> dict[str, str]:
+        """Return registration prefixes whose parent upload token is active."""
+        self._require_lock()
+        rows = self.connection.execute(
+            """
+            SELECT registration.registration_id, registration.model_prefix
+              FROM control_plane.registrations registration
+              JOIN control_plane.r2_parent_tokens token USING (registration_id)
+             WHERE registration.state = 'active' AND token.state = 'active'
+             ORDER BY registration.registration_id
+            """
+        ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows}
+
+    def request_upload_quota_revocation(
+        self,
+        registration: str,
+        *,
+        observed_bytes: int,
+        limit_bytes: int,
+        now: datetime,
+    ) -> bool:
+        """Durably revoke and clean an active prefix that exceeded its byte quota."""
+        self._require_lock()
+        if observed_bytes <= limit_bytes or limit_bytes < 1 or now.tzinfo is None:
+            raise ValueError("upload quota revocation requires a valid over-limit observation")
+        payload = {
+            "reason": "upload_quota_exceeded",
+            "observed_bytes": observed_bytes,
+            "limit_bytes": limit_bytes,
+        }
+        with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:
+            token = cursor.execute(
+                """
+                SELECT token.parent_token_id, token.state
+                  FROM control_plane.r2_parent_tokens token
+                  JOIN control_plane.registrations registration USING (registration_id)
+                 WHERE token.registration_id = %s AND registration.state = 'active'
+                 FOR UPDATE OF token
+                """,
+                (registration,),
+            ).fetchone()
+            if token is None or token["state"] != "active":
+                return False
+            cursor.execute(
+                """
+                UPDATE control_plane.r2_parent_tokens
+                   SET state = 'pending_revoke',
+                       revocation_requested_at = COALESCE(revocation_requested_at, %s),
+                       revocation_reason = COALESCE(revocation_reason, 'operator_requested'),
+                       next_retry_at = %s, updated_at = %s
+                 WHERE parent_token_id = %s
+                """,
+                (now, now, now, token["parent_token_id"]),
+            )
+            cursor.execute(
+                """
+                UPDATE control_plane.credential_generations
+                   SET state = 'superseded'
+                 WHERE registration_id = %s
+                   AND state IN ('pending', 'publishing', 'published')
+                """,
+                (registration,),
+            )
+            for operation in (
+                "revoke_parent_token",
+                "abort_multipart",
+                "cleanup_upload",
+            ):
+                self._enqueue_job(
+                    cursor,
+                    registration_id=registration,
+                    operation=operation,
+                    idempotency_key=f"{operation}-after-upload-quota:{registration}",
+                    payload=payload,
+                )
+        return True
+
     def accept_ready_signal(self, signal: ReadySignal, *, now: datetime) -> str:
         self._require_lock()
         with self.connection.transaction(), self.connection.cursor(row_factory=dict_row) as cursor:

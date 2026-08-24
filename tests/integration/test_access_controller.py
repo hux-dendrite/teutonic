@@ -101,6 +101,14 @@ class FakeS3:
             "IsTruncated": False,
         }
 
+    def list_parts(self, *, Bucket, Key, UploadId, **kwargs):
+        upload = next(
+            item
+            for item in self.multipart
+            if item["Key"] == Key and item["UploadId"] == UploadId
+        )
+        return {"Parts": upload.get("Parts", []), "IsTruncated": False}
+
     def copy_object(self, *, Bucket, Key, CopySource, **kwargs):
         value = self.objects[(CopySource["Bucket"], CopySource["Key"])]
         self.objects[(Bucket, Key)] = value
@@ -408,6 +416,71 @@ class AccessControllerIntegrationTests(unittest.TestCase):
             ([row[0] for row in job_ids],),
         ).fetchall()
         self.assertEqual(states, [("completed",), ("completed",)])
+
+    def test_upload_quota_revokes_credentials_and_cleans_completed_and_multipart_bytes(
+        self,
+    ) -> None:
+        registration = self.activate()
+        prefix = f"models/registrations/{registration}/"
+        self.runner.upload_controller.max_upload_bytes = 10
+        self.s3.put_object(
+            Bucket="private",
+            Key=f"{prefix}completed.bin",
+            Body=b"123456",
+        )
+        self.s3.multipart.append(
+            {
+                "Key": f"{prefix}uploading.bin",
+                "UploadId": "multipart-1",
+                "Parts": [{"PartNumber": 1, "Size": 4}, {"PartNumber": 2, "Size": 3}],
+            }
+        )
+
+        self.assertEqual(self.runner.enforce_upload_quotas(), 1)
+        token = self.connection.execute(
+            """
+            SELECT state, revocation_reason
+              FROM control_plane.r2_parent_tokens
+             WHERE registration_id = %s
+            """,
+            (registration,),
+        ).fetchone()
+        self.assertEqual(token, ("pending_revoke", "operator_requested"))
+        jobs = self.connection.execute(
+            """
+            SELECT operation, payload ->> 'reason',
+                   (payload ->> 'observed_bytes')::bigint,
+                   (payload ->> 'limit_bytes')::bigint
+              FROM control_plane.controller_jobs
+             WHERE registration_id = %s
+               AND idempotency_key LIKE '%%-after-upload-quota:%%'
+             ORDER BY created_at
+            """,
+            (registration,),
+        ).fetchall()
+        self.assertEqual(
+            jobs,
+            [
+                ("revoke_parent_token", "upload_quota_exceeded", 13, 10),
+                ("abort_multipart", "upload_quota_exceeded", 13, 10),
+                ("cleanup_upload", "upload_quota_exceeded", 13, 10),
+            ],
+        )
+
+        self.runner.run_until_idle(propagate=True)
+        self.assertEqual(
+            self.connection.execute(
+                "SELECT state FROM control_plane.r2_parent_tokens WHERE registration_id = %s",
+                (registration,),
+            ).fetchone()[0],
+            "revoked",
+        )
+        self.assertEqual(self.gateway.revoked, ["parent-1"])
+        self.assertFalse(
+            any(key.startswith(prefix) for bucket, key in self.s3.objects if bucket == "private")
+        )
+        self.assertEqual(self.s3.multipart, [])
+        self.assertEqual(self.runner.enforce_upload_quotas(), 0)
 
     def test_advisory_lock_allows_only_one_controller(self) -> None:
         with psycopg.connect(DATABASE_URL, autocommit=True) as second_connection:

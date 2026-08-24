@@ -4,7 +4,9 @@ import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
+
+from botocore.exceptions import ClientError
 
 from teutonic.storage.artifacts import ArtifactIntegrityError
 
@@ -14,6 +16,17 @@ from .crypto import verify_hotkey_signature
 
 class GenesisContractMismatch(ArtifactIntegrityError):
     """A submitted model differs from the immutable genesis contract files."""
+
+
+class UploadQuotaExceeded(ArtifactIntegrityError):
+    """A private registration prefix exceeds the model upload limit."""
+
+
+MAX_MINER_UPLOAD_BYTES = 250_000_000_000
+_REGISTRATION_ROOT = "models/registrations/"
+_REGISTRATION_KEY = re.compile(
+    r"^models/registrations/(?P<registration>[0-9a-f]{64})/.+"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,11 +56,14 @@ class R2UploadController:
         private_model_bucket: str,
         genesis_contract_files: Mapping[str, str],
         chunk_size: int = 1024 * 1024,
+        max_upload_bytes: int = MAX_MINER_UPLOAD_BYTES,
     ) -> None:
         if not private_model_bucket:
             raise ValueError("private model bucket is required")
         if chunk_size < 1:
             raise ValueError("chunk_size must be positive")
+        if max_upload_bytes < 1:
+            raise ValueError("max_upload_bytes must be positive")
         if not genesis_contract_files:
             raise ValueError("genesis contract files are required")
         if any(
@@ -64,6 +80,100 @@ class R2UploadController:
         self.private_model_bucket = private_model_bucket
         self.genesis_contract_files = dict(genesis_contract_files)
         self.chunk_size = chunk_size
+        self.max_upload_bytes = max_upload_bytes
+
+    @staticmethod
+    def _registration_from_key(key: str) -> str | None:
+        match = _REGISTRATION_KEY.fullmatch(key)
+        return None if match is None else match.group("registration")
+
+    def _multipart_uploads(self, prefix: str) -> tuple[dict[str, Any], ...]:
+        uploads: list[dict[str, Any]] = []
+        key_marker: str | None = None
+        upload_marker: str | None = None
+        while True:
+            request: dict[str, Any] = {
+                "Bucket": self.private_model_bucket,
+                "Prefix": prefix,
+            }
+            if key_marker:
+                request["KeyMarker"] = key_marker
+            if upload_marker:
+                request["UploadIdMarker"] = upload_marker
+            response = self.s3.list_multipart_uploads(**request)
+            uploads.extend(dict(item) for item in response.get("Uploads", ()))
+            if not response.get("IsTruncated"):
+                return tuple(uploads)
+            key_marker = response.get("NextKeyMarker")
+            upload_marker = response.get("NextUploadIdMarker")
+            if not key_marker:
+                raise ArtifactIntegrityError(
+                    "truncated multipart listing omitted its continuation marker"
+                )
+
+    def _multipart_size(self, *, key: str, upload_id: str) -> int:
+        total = 0
+        marker: int | None = None
+        while True:
+            request: dict[str, Any] = {
+                "Bucket": self.private_model_bucket,
+                "Key": key,
+                "UploadId": upload_id,
+            }
+            if marker is not None:
+                request["PartNumberMarker"] = marker
+            try:
+                response = self.s3.list_parts(**request)
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") == "NoSuchUpload":
+                    return 0
+                raise
+            for part in response.get("Parts", ()):
+                size = int(part["Size"])
+                if size < 0:
+                    raise ArtifactIntegrityError("R2 multipart part reported a negative size")
+                total += size
+            if not response.get("IsTruncated"):
+                return total
+            next_marker = response.get("NextPartNumberMarker")
+            if next_marker is None:
+                raise ArtifactIntegrityError(
+                    "truncated R2 part listing omitted its continuation marker"
+                )
+            marker = int(next_marker)
+
+    def registration_upload_usage(
+        self, registrations: Iterable[str]
+    ) -> dict[str, int]:
+        """Return completed plus in-progress bytes for active registration prefixes."""
+        selected = set(registrations)
+        if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in selected):
+            raise ValueError("registration upload usage requires canonical identifiers")
+        usage = {registration: 0 for registration in selected}
+        if not selected:
+            return usage
+
+        for key, item in self._list_objects(
+            self.private_model_bucket, _REGISTRATION_ROOT
+        ).items():
+            registration = self._registration_from_key(key)
+            if registration not in selected:
+                continue
+            size = int(item["Size"])
+            if size < 0:
+                raise ArtifactIntegrityError("R2 object reported a negative size")
+            usage[registration] += size
+
+        for upload in self._multipart_uploads(_REGISTRATION_ROOT):
+            key = str(upload["Key"])
+            registration = self._registration_from_key(key)
+            if registration not in selected:
+                continue
+            usage[registration] += self._multipart_size(
+                key=key,
+                upload_id=str(upload["UploadId"]),
+            )
+        return usage
 
     def _validate_genesis_contract(self, manifest: Manifest) -> None:
         submitted = {item.path: item.sha256 for item in manifest.files}
@@ -173,6 +283,12 @@ class R2UploadController:
             raise ArtifactIntegrityError("registration model prefix is not canonical")
         self._assert_no_multipart_uploads(model_prefix)
         objects = self._list_objects(self.private_model_bucket, model_prefix)
+        total_uploaded_bytes = sum(int(item["Size"]) for item in objects.values())
+        if total_uploaded_bytes > self.max_upload_bytes:
+            raise UploadQuotaExceeded(
+                f"private model upload is {total_uploaded_bytes} bytes; "
+                f"limit is {self.max_upload_bytes} bytes"
+            )
         manifest_key = f"{model_prefix}manifest.json"
         if manifest_key not in objects:
             raise ArtifactIntegrityError("private model prefix does not contain manifest.json")
