@@ -86,25 +86,29 @@
       </div>
     </section>
 
-    <!-- Remove the hidden attribute below to restore the benchmark panel. -->
-    <section class="bench-panel" aria-labelledby="benchmark-heading" hidden>
+    <section class="bench-panel" aria-labelledby="benchmark-heading">
       <div class="bench-head">
-        <h2 id="benchmark-heading">BENCHMARK PANEL</h2>
-        <span class="bench-meta"><b>MOCK DATA</b> · 12 / 12 COMPLETE</span>
+        <h2 id="benchmark-heading">KING BENCHMARKS</h2>
+        <span class="bench-actions">
+          <span id="benchmark-meta" class="bench-meta">LOADING RESULTS</span>
+          <button id="benchmark-history-toggle" type="button" aria-pressed="false">SHOW HISTORY</button>
+        </span>
       </div>
-      <div class="bench-grid">
-        <article class="bench-card" data-status="completed"><div class="bench-name">MMLU</div><div class="bench-score">61.4%</div><div class="bench-status"><span>COMPLETED</span><span>0-SHOT</span></div></article>
-        <article class="bench-card" data-status="completed"><div class="bench-name">BBH</div><div class="bench-score">48.7%</div><div class="bench-status"><span>COMPLETED</span><span>3-SHOT</span></div></article>
-        <article class="bench-card" data-status="completed"><div class="bench-name">ARC-C</div><div class="bench-score">56.2%</div><div class="bench-status"><span>COMPLETED</span><span>0-SHOT</span></div></article>
-        <article class="bench-card" data-status="completed"><div class="bench-name">TRUTHFULQA</div><div class="bench-score">51.9%</div><div class="bench-status"><span>COMPLETED</span><span>0-SHOT</span></div></article>
-        <article class="bench-card" data-status="completed"><div class="bench-name">WINOGRANDE</div><div class="bench-score">68.3%</div><div class="bench-status"><span>COMPLETED</span><span>0-SHOT</span></div></article>
-        <article class="bench-card" data-status="completed"><div class="bench-name">GPQA</div><div class="bench-score">32.6%</div><div class="bench-status"><span>COMPLETED</span><span>0-SHOT</span></div></article>
-        <article class="bench-card" data-status="completed"><div class="bench-name">ARC-E</div><div class="bench-score">73.8%</div><div class="bench-status"><span>COMPLETED</span><span>0-SHOT</span></div></article>
-        <article class="bench-card" data-status="completed"><div class="bench-name">PIQA</div><div class="bench-score">76.1%</div><div class="bench-status"><span>COMPLETED</span><span>0-SHOT</span></div></article>
-        <article class="bench-card" data-status="completed"><div class="bench-name">HELLASWAG</div><div class="bench-score">65.4%</div><div class="bench-status"><span>COMPLETED</span><span>0-SHOT</span></div></article>
-        <article class="bench-card" data-status="completed"><div class="bench-name">OPENBOOKQA</div><div class="bench-score">49.2%</div><div class="bench-status"><span>COMPLETED</span><span>0-SHOT</span></div></article>
-        <article class="bench-card" data-status="completed"><div class="bench-name">MATH-500</div><div class="bench-score">28.4%</div><div class="bench-status"><span>COMPLETED</span><span>4-SHOT</span></div></article>
-        <article class="bench-card" data-status="completed"><div class="bench-name">MMLU-PRO</div><div class="bench-score">35.7%</div><div class="bench-status"><span>COMPLETED</span><span>5-SHOT</span></div></article>
+      <div class="bench-selected">
+        <div><strong id="benchmark-model">WAITING FOR BENCHMARK DATA</strong><span id="benchmark-identity">ALL-KINGS DAILY RESULTS</span></div>
+        <a id="benchmark-results-link" href="/benchmarks/results.json" target="_blank" rel="noopener">RESULTS.JSON</a>
+      </div>
+      <div id="benchmark-grid" class="bench-grid" aria-live="polite">
+        <p class="bench-empty">LOADING LIVE KING BENCHMARKS</p>
+      </div>
+      <div id="benchmark-history" class="bench-history" hidden>
+        <div id="benchmark-history-graphs" class="bench-history-graphs" aria-label="Benchmark score history graphs"></div>
+        <div class="table-wrap">
+          <table class="bench-history-table">
+            <thead><tr><th>REIGN</th><th>UID</th><th>MODEL</th><th>BBH</th><th>MMLU</th><th>HELLASWAG</th><th>WINOGRANDE</th><th>GSM8K</th><th>PIQA</th><th>ARC-C</th><th>ARC-E</th></tr></thead>
+            <tbody id="benchmark-history-body"></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
