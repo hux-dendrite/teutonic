@@ -12,6 +12,7 @@ class MarketDataError(ValueError):
 
 
 KEYLESS_MARKET_SOURCE = "coingecko-keyless+bittensor-chain-v1"
+BITTENSOR_BLOCK_TIME_SECONDS = 12.0
 COINGECKO_PRICE_URL = (
     "https://api.coingecko.com/api/v3/simple/price"
     "?ids=bittensor&vs_currencies=usd"
@@ -124,6 +125,7 @@ class KeylessMarketClient:
         refresh_interval: timedelta = timedelta(minutes=1),
         connect_timeout: float = 2.0,
         response_timeout: float = 4.0,
+        block_time_seconds: float = BITTENSOR_BLOCK_TIME_SECONDS,
         transport=None,
         subtensor=None,
     ) -> None:
@@ -131,15 +133,20 @@ class KeylessMarketClient:
             raise MarketDataError("market netuid cannot be negative")
         if refresh_interval < timedelta(seconds=20):
             raise MarketDataError("keyless market refresh interval cannot be below 20 seconds")
+        if not math.isfinite(block_time_seconds) or block_time_seconds <= 0:
+            raise MarketDataError("Bittensor block time must be positive")
         self.netuid = netuid
         self.network = network
         self.refresh_interval = refresh_interval
         self.timeout = httpx.Timeout(response_timeout, connect=connect_timeout)
+        self.block_time_seconds = float(block_time_seconds)
         self.transport = transport
         self._subtensor = subtensor
         self._owns_subtensor = subtensor is None
         self._cached: dict[str, Any] | None = None
         self._cached_at: datetime | None = None
+        self._payouts_cached: dict[str, float] | None = None
+        self._payouts_cached_at: datetime | None = None
 
     def _chain(self):
         if self._subtensor is None:
@@ -217,6 +224,43 @@ class KeylessMarketClient:
         self._cached = payload
         self._cached_at = current
         return dict(payload)
+
+    def fetch_payouts(self, hotkeys: list[str], *, now: datetime) -> dict[str, float]:
+        """Estimate hourly alpha earnings from each hotkey's last tempo emission."""
+        current = now.astimezone(timezone.utc)
+        if (
+            self._payouts_cached is not None
+            and self._payouts_cached_at is not None
+            and current - self._payouts_cached_at < self.refresh_interval
+        ):
+            return {
+                hotkey: self._payouts_cached[hotkey]
+                for hotkey in hotkeys
+                if hotkey in self._payouts_cached
+            }
+
+        try:
+            info = self._chain().get_metagraph_info(self.netuid)
+            tempo = int(getattr(info, "tempo", 0))
+            chain_hotkeys = list(getattr(info, "hotkeys", ()))
+            emissions = list(getattr(info, "emission", ()))
+        except Exception:
+            if self._owns_subtensor:
+                self._subtensor = None
+            raise
+        if tempo <= 0:
+            raise MarketDataError("SN3 tempo is unavailable")
+        if len(chain_hotkeys) != len(emissions):
+            raise MarketDataError("SN3 hotkey and emission counts do not match")
+
+        hours_per_tempo = tempo * self.block_time_seconds / 3600.0
+        payouts = {
+            str(hotkey): self._tao(emission, "uid_alpha_emission") / hours_per_tempo
+            for hotkey, emission in zip(chain_hotkeys, emissions, strict=True)
+        }
+        self._payouts_cached = payouts
+        self._payouts_cached_at = current
+        return {hotkey: payouts[hotkey] for hotkey in hotkeys if hotkey in payouts}
 
 
 def select_market(

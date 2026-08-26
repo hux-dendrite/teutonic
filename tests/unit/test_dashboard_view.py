@@ -388,6 +388,34 @@ class MarketTests(unittest.TestCase):
         with self.assertRaisesRegex(MarketDataError, "already stale"):
             client.fetch(now=NOW)
 
+    def test_keyless_client_converts_last_tempo_emission_to_alpha_per_hour(self):
+        class Balance:
+            def __init__(self, tao):
+                self.tao = tao
+
+        class MetagraphInfo:
+            tempo = 360
+            hotkeys = ["king-hotkey", "prior-hotkey"]
+            emission = [Balance(29.520164689), Balance(0)]
+
+        class Subtensor:
+            def __init__(self):
+                self.calls = []
+
+            def get_metagraph_info(self, netuid):
+                self.calls.append(netuid)
+                return MetagraphInfo()
+
+        subtensor = Subtensor()
+        client = KeylessMarketClient(netuid=3, subtensor=subtensor)
+        first = client.fetch_payouts(["king-hotkey", "missing"], now=NOW)
+        cached = client.fetch_payouts(["king-hotkey"], now=NOW + timedelta(seconds=30))
+
+        self.assertEqual(subtensor.calls, [3])
+        self.assertAlmostEqual(first["king-hotkey"], 24.600137240833333)
+        self.assertNotIn("missing", first)
+        self.assertEqual(first, cached)
+
     def test_failure_reuses_bounded_stale_market_then_expires_it(self):
         previous = market(fetched_at="2026-08-18T11:30:00Z")
         selected = select_market(None, previous, now=NOW, maximum_stale=timedelta(hours=1))
@@ -440,6 +468,47 @@ class DashboardStorageTests(unittest.TestCase):
 
 
 class DashboardServiceTests(unittest.TestCase):
+    def test_chain_emissions_populate_hourly_alpha_and_usd_payouts(self):
+        class PayoutMarket:
+            def fetch_payouts(self, hotkeys, *, now):
+                self.hotkeys = hotkeys
+                self.now = now
+                return {"king-hotkey": 24.6}
+
+        candidate = {
+            "market": market(),
+            "king": {"hotkey": "king-hotkey"},
+            "king_payout": {
+                "weight": 0.2,
+                "alpha_per_hour": None,
+                "usd_per_hour": None,
+            },
+            "king_chain": [
+                {
+                    "hotkey": "king-hotkey",
+                    "alpha_per_hour": None,
+                    "usd_per_hour": None,
+                },
+                {
+                    "hotkey": "deregistered-hotkey",
+                    "alpha_per_hour": None,
+                    "usd_per_hour": None,
+                },
+            ],
+        }
+        client = PayoutMarket()
+        service = DashboardViewService(None, None, market_client=client)
+        service._apply_payouts(candidate, now=NOW)
+
+        expected_usd = 24.6 * market()["sn3_alpha_price_tao"] * market()["tao_price_usd"]
+        self.assertEqual(client.hotkeys, ["king-hotkey", "deregistered-hotkey"])
+        self.assertEqual(candidate["king_payout"]["alpha_per_hour"], 24.6)
+        self.assertAlmostEqual(candidate["king_payout"]["usd_per_hour"], expected_usd)
+        self.assertEqual(candidate["king_chain"][0]["alpha_per_hour"], 24.6)
+        self.assertAlmostEqual(candidate["king_chain"][0]["usd_per_hour"], expected_usd)
+        self.assertIsNone(candidate["king_chain"][1]["alpha_per_hour"])
+        self.assertIsNone(candidate["king_chain"][1]["usd_per_hour"])
+
     def test_market_only_refresh_preserves_existing_dashboard_snapshot(self):
         previous = payload()
 
