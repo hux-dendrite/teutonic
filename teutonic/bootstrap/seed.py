@@ -391,6 +391,14 @@ def bootstrap_genesis(
             if int(row["next_reign_number"]) != 1:
                 raise SeedBootstrapError("empty competition has an invalid next reign number")
             competition_id = row["competition_id"]
+        connection.execute(
+            """
+            INSERT INTO control_plane.evaluation_early_stopping_policies (competition_id)
+            VALUES (%s)
+            ON CONFLICT (competition_id) DO NOTHING
+            """,
+            (competition_id,),
+        )
         reign_id = connection.execute(
             """
             INSERT INTO control_plane.king_reigns (

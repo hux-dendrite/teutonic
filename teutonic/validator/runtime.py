@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from teutonic.evaluation.configuration import EvaluationSettings
+from teutonic.evaluation.early_stopping import EarlyStoppingPolicy
 
 from .contracts import EvaluationPolicyConfig
 
@@ -35,6 +36,7 @@ def evaluation_policy_from_env(
     source: Mapping[str, str] | None = None,
     *,
     settings: EvaluationSettings | None = None,
+    early_stopping: EarlyStoppingPolicy | None = None,
 ) -> EvaluationPolicyConfig:
     env = os.environ if source is None else source
     if settings is None:
@@ -54,6 +56,7 @@ def evaluation_policy_from_env(
         dataset_source="pretokenized_npy",
         dataset_label=settings.dataset_label,
         dataset_manifests=settings.manifests,
+        early_stopping=early_stopping or EarlyStoppingPolicy(),
         lease=timedelta(seconds=int(env.get("TEUTONIC_EVALUATION_LEASE_SECONDS", "120"))),
         retry_base_delay=timedelta(
             seconds=int(env.get("TEUTONIC_EVALUATION_RETRY_SECONDS", "30"))

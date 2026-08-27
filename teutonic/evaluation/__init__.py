@@ -6,6 +6,7 @@ from .client import (
     EvaluatorJobNotFoundError,
     HttpEvaluatorClient,
 )
+from .early_stopping import EarlyStoppingPolicy, challenger_futility_decision
 from .policy import (
     build_failure_history_entry,
     build_verdict_history_entry,
@@ -29,6 +30,7 @@ from .protocol_v2 import (
 )
 
 __all__ = [
+    "EarlyStoppingPolicy",
     "EvaluatorBusyError",
     "EvaluatorConflictError",
     "EvaluatorJobNotFoundError",
@@ -36,6 +38,7 @@ __all__ = [
     "build_failure_history_entry",
     "build_verdict_history_entry",
     "classify_eval_error",
+    "challenger_futility_decision",
     "decide_model_copy",
     "normalize_verdict",
     "paired_bootstrap_verdict",

@@ -30,12 +30,14 @@ class ValidatorScheduler:
         evaluator: Any,
         *,
         policy: EvaluationPolicyConfig,
+        policy_loader: Callable[[], EvaluationPolicyConfig] | None = None,
         preflight: Preflight,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository = repository
         self.evaluator = evaluator
         self.policy = policy
+        self.policy_loader = policy_loader
         self.preflight = preflight
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
@@ -44,6 +46,13 @@ class ValidatorScheduler:
             health = await self.evaluator.health()
             if health.get("status") != "ok":
                 raise RuntimeError("evaluator health response is not ready")
+            if self.policy.early_stopping.enabled and (
+                health.get("request_features", {}).get(
+                    "challenger_futility_early_stopping"
+                )
+                != "observed-quantile-v1"
+            ):
+                raise RuntimeError("evaluator does not advertise early-stopping support")
         except Exception as exc:
             log.warning(
                 "evaluator unavailable; queue claiming paused error=%s",
@@ -53,6 +62,8 @@ class ValidatorScheduler:
         return True
 
     async def run_once(self) -> bool:
+        if self.policy_loader is not None:
+            self.policy = self.policy_loader()
         if not await self.evaluator_available():
             return False
         claim = self.repository.claim_next(now=self.clock(), policy=self.policy)

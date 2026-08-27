@@ -16,7 +16,7 @@ psql --dbname=postgres --set=ON_ERROR_STOP=1 \
 sh /app/scripts/db/backup_control_plane.sh
 sh /app/scripts/db/restore_control_plane.sh
 
-for table_name in registrations uploads r2_parent_tokens evaluations king_reigns; do
+for table_name in registrations uploads r2_parent_tokens evaluations king_reigns evaluation_early_stopping_policies; do
     source_count=$(psql "$TEUTONIC_DATABASE_URL" --no-psqlrc --tuples-only --no-align \
         --command="SELECT count(*) FROM control_plane.$table_name")
     restore_count=$(psql "$TEUTONIC_RESTORE_DATABASE_URL" --no-psqlrc --tuples-only --no-align \

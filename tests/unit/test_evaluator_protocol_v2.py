@@ -69,6 +69,13 @@ def request_payload(king_digest: str = "a" * 64, challenger_digest: str = "b" * 
             "delta_threshold": 0.0015,
             "batch_size": 1,
         },
+        "early_stopping": {
+            "enabled": True,
+            "min_fraction": 0.4,
+            "advantage_quantile": 0.95,
+            "margin": 0.0,
+            "check_interval": 100,
+        },
         "dataset": {
             "source": "pretokenized_npy",
             "label": "fineweb-edu-10bt",
@@ -170,6 +177,8 @@ class EvaluatorProtocolV2ContractTests(unittest.TestCase):
         self.assertEqual(request.eval_id, "evaluation-001:1")
         self.assertEqual(len(request.request_sha256), 64)
         self.assertNotIn("credential", str(request.request_payload).lower())
+        self.assertTrue(request.early_stopping["enabled"])
+        self.assertEqual(request.early_stopping["check_interval"], 100)
 
         forbidden = request_payload()
         forbidden["challenger"]["secret_access_key"] = "must-not-cross-boundary"
@@ -184,11 +193,28 @@ class EvaluatorProtocolV2ContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ProtocolValidationError, "32-byte"):
             EvaluationRequestV2.from_mapping(invalid_hash)
 
+        invalid_early_stop = request_payload()
+        invalid_early_stop["early_stopping"]["min_fraction"] = 0
+        with self.assertRaisesRegex(ProtocolValidationError, "min_fraction"):
+            EvaluationRequestV2.from_mapping(invalid_early_stop)
+
+        interval_too_large = request_payload()
+        interval_too_large["early_stopping"]["check_interval"] = 25001
+        with self.assertRaisesRegex(ProtocolValidationError, "cannot exceed"):
+            EvaluationRequestV2.from_mapping(interval_too_large)
+
     def test_production_adapter_binds_sampling_to_block_hash(self) -> None:
         source = (
             Path(__file__).parents[2] / "teutonic" / "evaluator" / "engine.py"
         ).read_text()
         self.assertIn('block_hash=str(request.sampling["block_hash"])', source)
+
+    def test_pre_early_stop_requests_remain_hash_stable_and_disabled(self) -> None:
+        payload = request_payload()
+        payload.pop("early_stopping")
+        request = EvaluationRequestV2.from_mapping(payload)
+        self.assertFalse(request.early_stopping["enabled"])
+        self.assertNotIn("early_stopping", request.request_payload)
 
     def test_duplicate_conflicting_and_busy_attempts(self) -> None:
         registry = EvaluationAttemptRegistry()
@@ -256,6 +282,9 @@ class EvaluatorProtocolV2ContractTests(unittest.TestCase):
         self.assertEqual(provenance["challenger_artifact_digest"], "b" * 64)
         self.assertEqual(provenance["sampling"]["completed_sequences"], 25000)
         self.assertEqual(provenance["versions"], request.versions)
+        self.assertEqual(
+            provenance["configured_early_stopping"], request.early_stopping
+        )
         result = {
             **provenance,
             "accepted": True,
@@ -272,6 +301,21 @@ class EvaluatorProtocolV2ContractTests(unittest.TestCase):
         conflicting = {**result, "attempt_number": 2}
         with self.assertRaisesRegex(ProtocolValidationError, "attempt_number"):
             validate_result_v2(conflicting, request)
+        wrong_early_stop = {
+            **result,
+            "configured_early_stopping": {
+                **result["configured_early_stopping"],
+                "enabled": False,
+            },
+        }
+        with self.assertRaisesRegex(ProtocolValidationError, "early-stopping"):
+            validate_result_v2(wrong_early_stop, request)
+        invalid_early_accept = {
+            **result,
+            "sampling": {**result["sampling"], "early_stopped": True},
+        }
+        with self.assertRaisesRegex(ProtocolValidationError, "only reject"):
+            validate_result_v2(invalid_early_accept, request)
 
     def test_v2_and_phase_two_baseline_verdicts_are_equivalent(self) -> None:
         request = EvaluationRequestV2.from_mapping(request_payload())

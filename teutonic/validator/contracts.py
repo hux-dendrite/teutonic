@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Mapping
 
@@ -9,6 +9,7 @@ from teutonic.evaluation.configuration import (
     EvaluationSettings,
     pretokenized_dataset_request,
 )
+from teutonic.evaluation.early_stopping import EarlyStoppingPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +28,7 @@ class EvaluationPolicyConfig:
     dataset_source: str
     dataset_label: str
     dataset_manifests: tuple[DatasetManifestSnapshot, ...] = ()
+    early_stopping: EarlyStoppingPolicy = field(default_factory=EarlyStoppingPolicy)
     lease: timedelta = timedelta(minutes=2)
     retry_base_delay: timedelta = timedelta(seconds=30)
     max_attempts: int = 3
@@ -46,6 +48,8 @@ class EvaluationPolicyConfig:
             raise ValueError("lease must be positive and retry delay cannot be negative")
         if self.max_attempts < 1:
             raise ValueError("max_attempts must be positive")
+        if self.early_stopping.enabled and self.early_stopping.check_interval > self.n:
+            raise ValueError("early stopping check_interval cannot exceed evaluation n")
         if self.dataset_source != "pretokenized_npy" or not self.dataset_manifests:
             raise ValueError("evaluation needs database-backed pre-tokenized manifests")
 
@@ -58,6 +62,13 @@ class EvaluationPolicyConfig:
             "alpha": self.alpha,
             "delta_threshold": self.delta_threshold,
             "batch_size": 1,
+        }
+
+    @property
+    def persisted_thresholds(self) -> dict[str, Any]:
+        return {
+            **self.thresholds,
+            "early_stopping": self.early_stopping.request_dict(),
         }
 
     def dataset_request(self, *, block_hash: str, hotkey: str) -> dict[str, Any]:

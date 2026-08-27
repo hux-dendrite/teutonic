@@ -11,7 +11,12 @@ try:
 except ImportError:
     psycopg = None
 
-from teutonic.evaluation import EvaluatorJobNotFoundError, EvaluationRequestV2, result_provenance
+from teutonic.evaluation import (
+    EarlyStoppingPolicy,
+    EvaluatorJobNotFoundError,
+    EvaluationRequestV2,
+    result_provenance,
+)
 from teutonic.evaluation.configuration import DatasetManifestSnapshot, canonical_manifest_bytes
 from teutonic.validator import (
     EvaluationPolicyConfig,
@@ -249,6 +254,15 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             (king, competition),
         )
         self.competition_id = competition
+        self.connection.execute(
+            """
+            INSERT INTO control_plane.evaluation_early_stopping_policies (
+                competition_id, enabled, min_fraction, advantage_quantile,
+                margin, check_interval
+            ) VALUES (%s, true, 0.4, 0.95, 0.0, 100)
+            """,
+            (competition,),
+        )
         self.genesis_reign_id = king
         self.uploads = [
             self._seed_upload(uid=uid, block=block, extrinsic=extrinsic, event=event)
@@ -286,6 +300,7 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             """,
             (registration_id, uid, f"hotkey-{uid}", f"models/registrations/{registration_id}/"),
         )
+
         self.connection.execute(
             """
             INSERT INTO control_plane.r2_parent_tokens (
@@ -333,6 +348,31 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             ),
         )
         return upload
+
+    def test_early_stopping_policy_is_loaded_and_bound_to_claim(self):
+        loaded = self.repository.load_early_stopping_policy()
+        self.assertEqual(
+            loaded,
+            EarlyStoppingPolicy(
+                enabled=True,
+                min_fraction=0.4,
+                advantage_quantile=0.95,
+                margin=0.0,
+                check_interval=100,
+            ),
+        )
+        claim = self.repository.claim_next(
+            now=NOW,
+            policy=policy(early_stopping=loaded),
+        )
+        self.assertIsNotNone(claim)
+        parsed = EvaluationRequestV2.from_mapping(claim.request)
+        self.assertEqual(parsed.early_stopping, loaded.request_dict())
+        row = self.connection.execute(
+            "SELECT thresholds FROM control_plane.evaluations WHERE evaluation_id = %s",
+            (claim.evaluation_id,),
+        ).fetchone()
+        self.assertEqual(row[0]["early_stopping"], loaded.request_dict())
 
     def _accept_and_promote(self, claim):
         self.repository.complete_verdict(

@@ -21,6 +21,7 @@ import inspect
 import io
 import json
 import logging
+import math
 import multiprocessing as mp
 import os
 import shutil
@@ -54,9 +55,11 @@ from teutonic.evaluation import (
     PROTOCOL_VERSION,
     AttemptBusyError,
     AttemptConflictError,
+    EarlyStoppingPolicy,
     EvaluationAttemptRegistry,
     EvaluationRequestV2,
     ProtocolValidationError,
+    challenger_futility_decision,
     paired_bootstrap_verdict,
     provisional_paired_bootstrap,
     result_provenance,
@@ -148,6 +151,11 @@ class EvalRequest(BaseModel):
     n_bootstrap: int = DEFAULT_BOOTSTRAP_B
     seed: int = 0xE1A
     bootstrap_seed: int = 0xB007
+    early_stop_enabled: bool = False
+    early_stop_min_fraction: float = 0.4
+    early_stop_advantage_quantile: float = 0.95
+    early_stop_margin: float = 0.0
+    early_stop_check_interval: int = 100
     lm_head_chunk: int = DEFAULT_LM_HEAD_CHUNK
     log_every_batches: int = DEFAULT_LOG_EVERY_BATCHES
     model_device_map: str = DEFAULT_MODEL_DEVICE_MAP
@@ -178,6 +186,13 @@ def internal_request_from_v2(
         seed=int(request.sampling["seed"]),
         bootstrap_seed=int(request.sampling["bootstrap_seed"]),
         block_hash=str(request.sampling["block_hash"]),
+        early_stop_enabled=bool(request.early_stopping["enabled"]),
+        early_stop_min_fraction=float(request.early_stopping["min_fraction"]),
+        early_stop_advantage_quantile=float(
+            request.early_stopping["advantage_quantile"]
+        ),
+        early_stop_margin=float(request.early_stopping["margin"]),
+        early_stop_check_interval=int(request.early_stopping["check_interval"]),
     )
 
 
@@ -1573,6 +1588,16 @@ class PersistentModelWorkerPool:
         paired_done = 0
         progress_log_interval = max(1, (len(sequences) + 9) // 10)
         provisional: dict[str, Any] = {}
+        early_policy = EarlyStoppingPolicy(
+            enabled=req.early_stop_enabled,
+            min_fraction=req.early_stop_min_fraction,
+            advantage_quantile=req.early_stop_advantage_quantile,
+            margin=req.early_stop_margin,
+            check_interval=req.early_stop_check_interval,
+        )
+        next_early_check = max(1, math.ceil(len(sequences) * early_policy.min_fraction))
+        early_stop_at: int | None = None
+        early_stop_decision: dict[str, float] | None = None
 
         def fill_worker(worker_id: str, role: str) -> None:
             depth = int(self.ready[worker_id].get("pipeline_depth", 1))
@@ -1591,7 +1616,9 @@ class PersistentModelWorkerPool:
             fill_worker(spec["worker_id"], spec["role"])
 
         started = time.time()
-        while paired_done < len(sequences):
+        while paired_done < len(sequences) and (
+            early_stop_at is None or any(in_flight.values())
+        ):
             try:
                 message = self.result_queue.get(timeout=30)
             except Empty:
@@ -1622,16 +1649,16 @@ class PersistentModelWorkerPool:
             if target[index] is not None:
                 raise RuntimeError(f"duplicate {role} result for sequence {index}")
             target[index] = float(message["loss"])
-            fill_worker(worker_id, role)
 
             previous_done = paired_done
-            while (
-                paired_done < len(sequences)
-                and king_losses[paired_done] is not None
-                and challenger_losses[paired_done] is not None
-            ):
-                paired_done += 1
-            if paired_done != previous_done:
+            if early_stop_at is None:
+                while (
+                    paired_done < len(sequences)
+                    and king_losses[paired_done] is not None
+                    and challenger_losses[paired_done] is not None
+                ):
+                    paired_done += 1
+            if paired_done != previous_done and early_stop_at is None:
                 paired_king = np.asarray(king_losses[:paired_done], dtype=np.float64)
                 paired_challenger = np.asarray(challenger_losses[:paired_done], dtype=np.float64)
                 elapsed = max(time.time() - started, 1e-9)
@@ -1674,10 +1701,60 @@ class PersistentModelWorkerPool:
                         float(provisional["provisional_lcb"]),
                         seq_per_s,
                     )
+                if (
+                    early_stop_at is None
+                    and paired_done < len(sequences)
+                    and paired_done >= next_early_check
+                ):
+                    early_stop_decision = challenger_futility_decision(
+                        [float(value) for value in king_losses[:paired_done]],
+                        [float(value) for value in challenger_losses[:paired_done]],
+                        total_sequences=len(sequences),
+                        delta_threshold=req.delta_threshold,
+                        policy=early_policy,
+                    )
+                    while next_early_check <= paired_done:
+                        next_early_check += early_policy.check_interval
+                    if early_stop_decision is not None:
+                        early_stop_at = paired_done
+                        on_progress({
+                            "phase": "eval_early_stopping",
+                            "done": paired_done,
+                            "total": len(sequences),
+                            "early_stopped": True,
+                            "mu_hat": round(early_stop_decision["mu_hat"], 6),
+                            "mu_hat_upper_bound": round(
+                                early_stop_decision["mu_hat_upper_bound"], 6
+                            ),
+                        })
+                        eval_log.info(
+                            "early stop | paired=%d/%d mu_upper=%.6f stop_threshold=%.6f "
+                            "advantage_quantile=%.4f",
+                            paired_done,
+                            len(sequences),
+                            early_stop_decision["mu_hat_upper_bound"],
+                            early_stop_decision["stop_threshold"],
+                            early_policy.advantage_quantile,
+                        )
+            if early_stop_at is None:
+                fill_worker(worker_id, role)
+
+        completed = early_stop_at or len(sequences)
         return (
-            [float(value) for value in king_losses],
-            [float(value) for value in challenger_losses],
-            {"workers": [self.ready[spec["worker_id"]] for spec in self.specs]},
+            [float(value) for value in king_losses[:completed]],
+            [float(value) for value in challenger_losses[:completed]],
+            {
+                "workers": [self.ready[spec["worker_id"]] for spec in self.specs],
+                "early_stop": (
+                    {
+                        **early_stop_decision,
+                        "completed_sequences": completed,
+                        **early_policy.request_dict(),
+                    }
+                    if early_stop_decision is not None
+                    else None
+                ),
+            },
         )
 
     def close(self, *, force: bool = False) -> None:
@@ -2106,11 +2183,37 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
         )
 
         verdict = bootstrap_verdict(king_losses, challenger_losses, req)
+        early_stop = worker_meta.get("early_stop")
+        if early_stop is not None:
+            verdict.update({
+                "accepted": False,
+                "verdict": "king",
+                "early_stopped": True,
+                "n_sequences": len(sequences),
+                "n_sequences_evaluated": len(king_losses),
+                "mu_hat_upper_bound": round(
+                    float(early_stop["mu_hat_upper_bound"]), 6
+                ),
+                "early_stop_reason": (
+                    f"projected_upper_mean={early_stop['mu_hat_upper_bound']:.6f} "
+                    f"< stop_threshold={early_stop['stop_threshold']:.6f} "
+                    f"after {len(king_losses)}/{len(sequences)} sequences"
+                ),
+                "early_stop_min_fraction": float(early_stop["min_fraction"]),
+                "early_stop_advantage_quantile": float(
+                    early_stop["advantage_quantile"]
+                ),
+                "early_stop_assumed_remaining_advantage": round(
+                    float(early_stop["assumed_remaining_advantage"]), 6
+                ),
+                "early_stop_margin": float(early_stop["margin"]),
+                "early_stop_check_interval": int(early_stop["check_interval"]),
+            })
         eval_log.info(
             "loss verdict | eval_id=%s paired=%d king=%.6f challenger=%.6f "
             "king_minus_challenger=%.6f lcb=%.6f threshold=%.6f accepted=%s",
             eval_id,
-            int(verdict["n_sequences"]),
+            int(verdict.get("n_sequences_evaluated", verdict["n_sequences"])),
             float(verdict["avg_king_loss"]),
             float(verdict["avg_challenger_loss"]),
             float(verdict["mu_hat"]),
@@ -2119,7 +2222,9 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
             bool(verdict["accepted"]),
         )
         verdict["source_scores"] = _compute_source_scores(
-            king_losses, challenger_losses, source_labels
+            king_losses,
+            challenger_losses,
+            source_labels[: len(king_losses)] if source_labels else None,
         )
         completed_at = datetime.now(timezone.utc).isoformat()
         verdict.update({
@@ -2240,6 +2345,9 @@ async def health():
             "evaluator": EVALUATOR_VERSION,
             "evaluation_policy": EVALUATION_POLICY_VERSION,
             "code": EVALUATOR_CODE_VERSION or None,
+        },
+        "request_features": {
+            "challenger_futility_early_stopping": "observed-quantile-v1",
         },
         "active_evals": _attempts.active_count(),
         "cache_dir": str(MODEL_CACHE_DIR),

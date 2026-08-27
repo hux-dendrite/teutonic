@@ -10,6 +10,8 @@ from queue import Queue
 from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
+from .early_stopping import EarlyStoppingPolicy
+
 
 PROTOCOL_VERSION = "teutonic-evaluator-v2"
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -121,6 +123,7 @@ class EvaluationRequestV2:
     versions: Mapping[str, str]
     sampling: Mapping[str, int | str]
     limits: Mapping[str, int | float]
+    early_stopping: Mapping[str, bool | float | int]
     dataset: Mapping[str, Any]
     request_payload: Mapping[str, Any]
 
@@ -151,6 +154,7 @@ class EvaluationRequestV2:
                 "versions",
                 "sampling",
                 "limits",
+                "early_stopping",
                 "dataset",
             },
             "request",
@@ -225,6 +229,36 @@ class EvaluationRequestV2:
             normalized_limits[key] = float(number)
         if not 0 < normalized_limits["alpha"] < 1:
             raise ProtocolValidationError("limits.alpha must be between 0 and 1")
+
+        raw_early_stopping = data.get("early_stopping")
+        if raw_early_stopping is None:
+            early_stopping = EarlyStoppingPolicy()
+            normalized_early_stopping = early_stopping.request_dict()
+        else:
+            early_stopping_data = _required_mapping(raw_early_stopping, "early_stopping")
+            _exact_keys(
+                early_stopping_data,
+                {
+                    "enabled",
+                    "min_fraction",
+                    "advantage_quantile",
+                    "margin",
+                    "check_interval",
+                },
+                "early_stopping",
+            )
+            try:
+                early_stopping = EarlyStoppingPolicy.from_mapping(early_stopping_data)
+            except ValueError as exc:
+                raise ProtocolValidationError(str(exc)) from exc
+            if (
+                early_stopping.enabled
+                and early_stopping.check_interval > normalized_limits["n"]
+            ):
+                raise ProtocolValidationError(
+                    "early stopping check_interval cannot exceed limits.n"
+                )
+            normalized_early_stopping = early_stopping.request_dict()
 
         dataset = _required_mapping(data.get("dataset"), "dataset")
         _exact_keys(dataset, {"source", "label", "sources"}, "dataset")
@@ -314,6 +348,8 @@ class EvaluationRequestV2:
             "limits": normalized_limits,
             "dataset": normalized_dataset,
         }
+        if raw_early_stopping is not None:
+            normalized_payload["early_stopping"] = normalized_early_stopping
         return cls(
             evaluation_id=evaluation_id,
             attempt_number=attempt_number,
@@ -323,6 +359,7 @@ class EvaluationRequestV2:
             versions=normalized_versions,
             sampling=normalized_sampling,
             limits=normalized_limits,
+            early_stopping=normalized_early_stopping,
             dataset=normalized_dataset,
             request_payload=normalized_payload,
         )
@@ -438,6 +475,7 @@ def result_provenance(
             "early_stopped": early_stopped,
         },
         "configured_limits": dict(request.limits),
+        "configured_early_stopping": dict(request.early_stopping),
         "started_at": started_at,
         "completed_at": completed_at,
         "hardware": dict(hardware),
@@ -471,6 +509,8 @@ def validate_result_v2(result: Mapping[str, Any], request: EvaluationRequestV2) 
         "wall_time_s",
         "result_artifact_sha256",
     }
+    if "early_stopping" in request.request_payload:
+        required.add("configured_early_stopping")
     missing = sorted(required - set(result))
     if missing:
         raise ProtocolValidationError(f"protocol v2 result is missing fields: {missing}")
@@ -489,6 +529,22 @@ def validate_result_v2(result: Mapping[str, Any], request: EvaluationRequestV2) 
             )
     if result.get("versions") != dict(request.versions):
         raise ProtocolValidationError("protocol v2 result versions do not match its request")
+    if "early_stopping" in request.request_payload and result.get(
+        "configured_early_stopping"
+    ) != dict(request.early_stopping):
+        raise ProtocolValidationError(
+            "protocol v2 result early-stopping policy does not match its request"
+        )
+    result_sampling = result.get("sampling")
+    if isinstance(result_sampling, Mapping) and result_sampling.get("early_stopped"):
+        if result.get("accepted") is not False or result.get("verdict") != "king":
+            raise ProtocolValidationError(
+                "protocol v2 early stopping may only reject a challenger"
+            )
+        if not request.early_stopping.get("enabled"):
+            raise ProtocolValidationError(
+                "protocol v2 result stopped early when the request disabled it"
+            )
     artifact_digest = result.get("result_artifact_sha256")
     if not isinstance(artifact_digest, str) or not _DIGEST_RE.fullmatch(artifact_digest):
         raise ProtocolValidationError("result_artifact_sha256 must be a lowercase SHA-256 digest")

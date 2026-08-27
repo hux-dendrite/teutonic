@@ -174,7 +174,8 @@ docker compose exec postgres sh -lc 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRE
 
 PostgreSQL is bound to `127.0.0.1:${POSTGRES_PORT}` and is not exposed publicly.
 The complete start-state schema is installed automatically only when the
-`postgres-data` volume is empty. There is no migration step.
+`postgres-data` volume is empty. Existing volumes are never migrated
+automatically; apply any documented additive setup scripts explicitly.
 
 Do not run `docker compose down -v` during ordinary deployment or competition
 startup. It destroys the PostgreSQL volume. A new chain generation can coexist
@@ -194,6 +195,46 @@ scripts/db/backup_control_plane.sh
 The helper creates a custom-format dump, validates it with `pg_restore`, and
 writes a SHA-256 checksum beside it. Copy both files to protected off-host
 storage.
+
+### Configure evaluation early stopping
+
+Existing PostgreSQL volumes need the one-time additive schema setup before a
+validator running this revision is started:
+
+```bash
+psql "$TEUTONIC_DATABASE_URL" \
+  --no-psqlrc \
+  --set=ON_ERROR_STOP=1 \
+  --file=scripts/db/add_evaluation_early_stopping.sql
+```
+
+The setup creates one competition-scoped policy row with early stopping
+enabled, a `0.4` minimum fraction, `0.95` observed-advantage quantile, zero
+margin, and a 100-sequence check interval. It is idempotent and preserves an
+existing row.
+
+Inspect or update the current competition through the validated helper:
+
+```bash
+.venv/bin/python scripts/configure_early_stopping.py \
+  --enabled \
+  --min-fraction 0.4 \
+  --advantage-quantile 0.95 \
+  --margin 0.0 \
+  --check-interval 100
+```
+
+Arguments that are omitted retain their current PostgreSQL values. The
+validator reads the row before claiming each new evaluation, so a change does
+not require a validator restart and never changes an evaluation already in
+progress. Every claim snapshots the complete policy in its signed request and
+durable `evaluations.thresholds` record.
+
+Early stopping is rejection-only: it can retain the king when the configured
+futility projection is below `delta_threshold - margin`, but it never crowns a
+challenger before the full evaluation. The observed advantage quantile is a
+heuristic for unseen sequences, not a mathematical bound; lower fractions and
+lower quantiles stop more aggressively.
 
 ## Publish genesis and start the competition
 

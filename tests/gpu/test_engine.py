@@ -17,6 +17,7 @@ from teutonic.evaluator.engine import (
     EvalRequest,
     MODEL_INSTANCES_PER_SIDE,
     MODEL_WORKER_PROCESSES,
+    PersistentModelWorkerPool,
     TwoGpuSequencePipeline,
     checkpoint_load_key,
     kernel_cache_identity,
@@ -26,6 +27,62 @@ from teutonic.evaluator.engine import (
     resolved_attention_types,
     snapshot_safetensor_keys,
 )
+
+
+class ImmediateScoreQueue:
+    def __init__(self, result_queue, worker_id, role, loss):
+        self.result_queue = result_queue
+        self.worker_id = worker_id
+        self.role = role
+        self.loss = loss
+
+    def put(self, command):
+        assert command["type"] == "score"
+        self.result_queue.put({
+            "type": "result",
+            "generation": command["generation"],
+            "worker_id": self.worker_id,
+            "role": self.role,
+            "sequence_index": command["sequence_index"],
+            "loss": self.loss,
+        })
+
+
+def test_worker_pool_early_stop_drains_dispatched_results():
+    pool = object.__new__(PersistentModelWorkerPool)
+    pool.specs = [
+        {"worker_id": "king-0", "role": "king"},
+        {"worker_id": "challenger-0", "role": "challenger"},
+    ]
+    pool.ready = {
+        "king-0": {"pipeline_depth": 1},
+        "challenger-0": {"pipeline_depth": 1},
+    }
+    pool.result_queue = Queue()
+    pool.command_queues = {
+        "king-0": ImmediateScoreQueue(pool.result_queue, "king-0", "king", 1.0),
+        "challenger-0": ImmediateScoreQueue(
+            pool.result_queue, "challenger-0", "challenger", 2.0
+        ),
+    }
+    request = EvalRequest(
+        king_repo="king",
+        challenger_repo="challenger",
+        delta_threshold=0.5,
+        early_stop_enabled=True,
+        early_stop_min_fraction=0.4,
+        early_stop_advantage_quantile=0.95,
+        early_stop_margin=0.0,
+        early_stop_check_interval=2,
+    )
+
+    king, challenger, metadata = pool.score(
+        [[index] for index in range(10)], "generation-1", request, lambda _event: None
+    )
+
+    assert len(king) == len(challenger) == 4
+    assert metadata["early_stop"]["completed_sequences"] == 4
+    assert pool.result_queue.empty()
 
 
 def mimo_config(**overrides):

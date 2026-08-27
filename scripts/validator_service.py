@@ -7,6 +7,7 @@ import contextlib
 import logging
 import os
 import signal
+from dataclasses import replace
 import socket
 from datetime import datetime, timezone
 
@@ -120,13 +121,23 @@ async def run(*, once: bool) -> int:
             public_model_bucket=buckets.public_models,
         )
         repository.acquire_lock()
-        policy = evaluation_policy_from_env(settings=repository.load_evaluation_settings())
+        policy = evaluation_policy_from_env(
+            settings=repository.load_evaluation_settings(),
+            early_stopping=repository.load_early_stopping_policy(),
+        )
         log.info(
-            "loaded evaluation config dataset=%s n=%d delta=%s manifests=%d",
+            "loaded evaluation config dataset=%s n=%d delta=%s manifests=%d "
+            "early_stop=%s min_fraction=%s advantage_quantile=%s margin=%s "
+            "check_interval=%d",
             policy.dataset_version,
             policy.n,
             policy.delta_threshold,
             len(policy.dataset_manifests),
+            policy.early_stopping.enabled,
+            policy.early_stopping.min_fraction,
+            policy.early_stopping.advantage_quantile,
+            policy.early_stopping.margin,
+            policy.early_stopping.check_interval,
         )
         chain = BittensorFinalizedMetagraphReader(network=network, netuid=netuid)
         coordinator = CrownCoordinator(
@@ -143,6 +154,10 @@ async def run(*, once: bool) -> int:
                 repository,
                 evaluator,
                 policy=policy,
+                policy_loader=lambda: replace(
+                    policy,
+                    early_stopping=repository.load_early_stopping_policy(),
+                ),
                 preflight=contract_preflight,
             )
             heartbeat_task = asyncio.create_task(

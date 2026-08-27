@@ -248,6 +248,27 @@ CREATE TABLE control_plane.competitions (
 ALTER TABLE control_plane.competitions OWNER TO teutonic_schema_owner;
 
 --
+-- Name: evaluation_early_stopping_policies; Type: TABLE; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+CREATE TABLE control_plane.evaluation_early_stopping_policies (
+    competition_id uuid NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    min_fraction double precision DEFAULT 0.4 NOT NULL,
+    advantage_quantile double precision DEFAULT 0.95 NOT NULL,
+    margin double precision DEFAULT 0.0 NOT NULL,
+    check_interval integer DEFAULT 100 NOT NULL,
+    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT evaluation_early_stopping_check_interval_check CHECK ((check_interval > 0)),
+    CONSTRAINT evaluation_early_stopping_min_fraction_check CHECK (((min_fraction > (0)::double precision) AND (min_fraction <= (1)::double precision))),
+    CONSTRAINT evaluation_early_stopping_advantage_quantile_check CHECK (((advantage_quantile > (0)::double precision) AND (advantage_quantile <= (1)::double precision))),
+    CONSTRAINT evaluation_early_stopping_margin_check CHECK ((margin >= (0)::double precision))
+);
+
+
+ALTER TABLE control_plane.evaluation_early_stopping_policies OWNER TO teutonic_schema_owner;
+
+--
 -- Name: evaluation_configs; Type: TABLE; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -1350,6 +1371,14 @@ ALTER TABLE ONLY control_plane.competitions
 
 
 --
+-- Name: evaluation_early_stopping_policies evaluation_early_stopping_policies_pkey; Type: CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+ALTER TABLE ONLY control_plane.evaluation_early_stopping_policies
+    ADD CONSTRAINT evaluation_early_stopping_policies_pkey PRIMARY KEY (competition_id);
+
+
+--
 -- Name: evaluation_configs evaluation_configs_competition_id_config_version_key; Type: CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -1929,6 +1958,14 @@ ALTER TABLE ONLY control_plane.evaluation_configs
 
 
 --
+-- Name: evaluation_early_stopping_policies evaluation_early_stopping_policies_competition_id_fkey; Type: FK CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+ALTER TABLE ONLY control_plane.evaluation_early_stopping_policies
+    ADD CONSTRAINT evaluation_early_stopping_policies_competition_id_fkey FOREIGN KEY (competition_id) REFERENCES control_plane.competitions(competition_id) ON DELETE RESTRICT;
+
+
+--
 -- Name: dataset_manifests dataset_manifests_evaluation_config_id_fkey; Type: FK CONSTRAINT; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -2138,6 +2175,14 @@ GRANT SELECT ON TABLE control_plane.chain_cursors TO teutonic_auditor;
 GRANT SELECT,INSERT,UPDATE ON TABLE control_plane.competitions TO teutonic_validator;
 GRANT SELECT ON TABLE control_plane.competitions TO teutonic_auditor;
 GRANT SELECT ON TABLE control_plane.competitions TO teutonic_weight_publisher;
+
+
+--
+-- Name: TABLE evaluation_early_stopping_policies; Type: ACL; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+GRANT SELECT ON TABLE control_plane.evaluation_early_stopping_policies TO teutonic_validator;
+GRANT SELECT ON TABLE control_plane.evaluation_early_stopping_policies TO teutonic_auditor;
 
 
 --

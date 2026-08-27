@@ -238,6 +238,7 @@ class PostgresFoundationTests(unittest.TestCase):
                 "credential_generations",
                 "dataset_manifests",
                 "evaluation_configs",
+                "evaluation_early_stopping_policies",
                 "evaluations",
                 "king_reigns",
                 "metagraph_snapshots",

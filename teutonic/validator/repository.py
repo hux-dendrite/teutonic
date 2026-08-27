@@ -9,7 +9,7 @@ from typing import Any, Mapping, Sequence
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from teutonic.evaluation import EvaluationRequestV2
+from teutonic.evaluation import EarlyStoppingPolicy, EvaluationRequestV2
 from teutonic.evaluation.configuration import DatasetManifestSnapshot, EvaluationSettings
 
 from .contracts import ClaimedEvaluation, EvaluationPolicyConfig, RecoveryCandidate
@@ -113,6 +113,35 @@ class ValidatorRepository:
             n=int(first["eval_n"]),
             delta_threshold=float(first["delta_threshold"]),
             manifests=manifests,
+        )
+
+    def load_early_stopping_policy(self) -> EarlyStoppingPolicy:
+        with self.connection.cursor(row_factory=dict_row) as cursor:
+            cursor.execute(
+                """
+                SELECT policy.enabled, policy.min_fraction,
+                       policy.advantage_quantile, policy.margin,
+                       policy.check_interval
+                  FROM control_plane.competitions competition
+                  JOIN control_plane.evaluation_early_stopping_policies policy
+                    ON policy.competition_id = competition.competition_id
+                 WHERE competition.netuid = %s
+                   AND competition.chain_generation = %s
+                   AND competition.name = %s
+                """,
+                (self.netuid, self.chain_generation, self.competition),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            raise SchedulerInvariantError(
+                "competition has no early-stopping policy; apply the database setup script"
+            )
+        return EarlyStoppingPolicy(
+            enabled=bool(row["enabled"]),
+            min_fraction=float(row["min_fraction"]),
+            advantage_quantile=float(row["advantage_quantile"]),
+            margin=float(row["margin"]),
+            check_interval=int(row["check_interval"]),
         )
 
     def claim_next(
@@ -304,6 +333,7 @@ class ValidatorRepository:
                         "block_hash": row["ready_finalized_block_hash"],
                     },
                     "limits": policy.thresholds,
+                    "early_stopping": policy.early_stopping.request_dict(),
                     "dataset": policy.dataset_request(
                         block_hash=str(row["ready_finalized_block_hash"]),
                         hotkey=str(row["hotkey"]),
@@ -338,7 +368,7 @@ class ValidatorRepository:
                     policy.evaluator_version,
                     policy.sampling_seed,
                     policy.bootstrap_seed,
-                    Jsonb(policy.thresholds),
+                    Jsonb(policy.persisted_thresholds),
                     request.request_sha256,
                     Jsonb(dict(request.request_payload)),
                 ),

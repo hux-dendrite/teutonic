@@ -11,6 +11,7 @@ import httpx
 import numpy as np
 
 from teutonic.evaluation import (
+    EarlyStoppingPolicy,
     EvaluatorBusyError,
     EvaluatorConflictError,
     EvaluatorJobNotFoundError,
@@ -18,6 +19,7 @@ from teutonic.evaluation import (
     build_failure_history_entry,
     build_verdict_history_entry,
     classify_eval_error,
+    challenger_futility_decision,
     decide_model_copy,
     normalize_verdict,
     paired_bootstrap_verdict,
@@ -163,6 +165,56 @@ class EvaluationPolicyRegressionTests(unittest.TestCase):
             provisional_paired_bootstrap([], [], **parameters)
         with self.assertRaises(ValueError):
             provisional_paired_bootstrap([1.0], [1.0, 2.0], **parameters)
+
+    def test_early_stopping_is_one_sided_challenger_futility(self) -> None:
+        policy = EarlyStoppingPolicy(
+            enabled=True,
+            min_fraction=0.4,
+            advantage_quantile=0.95,
+            margin=0.0,
+            check_interval=100,
+        )
+        decision = challenger_futility_decision(
+            [1.0] * 8,
+            [2.0] * 8,
+            total_sequences=20,
+            delta_threshold=0.5,
+            policy=policy,
+        )
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision["mu_hat_upper_bound"], -1.0)
+
+        # A clearly winning challenger never triggers this rejection-only rule.
+        self.assertIsNone(
+            challenger_futility_decision(
+                [2.0] * 8,
+                [1.0] * 8,
+                total_sequences=20,
+                delta_threshold=0.5,
+                policy=policy,
+            )
+        )
+
+    def test_early_stopping_margin_makes_rejection_more_conservative(self) -> None:
+        losses = ([1.0] * 8, [1.4] * 8)
+        aggressive = EarlyStoppingPolicy(enabled=True, margin=0.0)
+        conservative = EarlyStoppingPolicy(enabled=True, margin=1.0)
+        self.assertIsNotNone(
+            challenger_futility_decision(
+                *losses,
+                total_sequences=20,
+                delta_threshold=0.5,
+                policy=aggressive,
+            )
+        )
+        self.assertIsNone(
+            challenger_futility_decision(
+                *losses,
+                total_sequences=20,
+                delta_threshold=0.5,
+                policy=conservative,
+            )
+        )
 
     def test_empty_message_transport_errors_are_retryable(self) -> None:
         cases = (

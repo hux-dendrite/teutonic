@@ -4,6 +4,7 @@ import unittest
 import hashlib
 from datetime import timedelta
 
+from teutonic.evaluation import EarlyStoppingPolicy
 from teutonic.evaluation.configuration import DatasetManifestSnapshot, canonical_manifest_bytes
 from teutonic.promotion import promotion_worker_lock_key
 from teutonic.validator import EvaluationPolicyConfig, scheduler_lock_key
@@ -92,3 +93,8 @@ class ValidatorSchedulerPolicyTests(unittest.TestCase):
             self._policy(max_attempts=0)
         with self.assertRaises(ValueError):
             self._policy(dataset_source="unknown")
+        with self.assertRaisesRegex(ValueError, "check_interval"):
+            self._policy(
+                n=32,
+                early_stopping=EarlyStoppingPolicy(enabled=True, check_interval=100),
+            )
