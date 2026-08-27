@@ -69,23 +69,6 @@
       <div class="chart-footer"><span>OLDER</span><span><span id="chart-count">0 EVALUATIONS</span> · <span id="smooth-status">SMOOTH LOWESS 0.35</span></span><span>NEWER</span></div>
     </section>
 
-    <section aria-labelledby="evaluation-heading">
-      <div class="section-heading"><h2 id="evaluation-heading">EVALUATION FLOOR</h2><span id="validator-phase">VALIDATOR --</span></div>
-      <div id="eval-card" class="eval-card" data-active="false">
-        <div class="eval-copy">
-          <div><strong id="eval-title">NO ACTIVE CHALLENGE</strong><p id="eval-meta" class="muted">THE VALIDATOR IS READY FOR THE NEXT MODEL</p></div>
-        </div>
-        <div id="eval-provisional" class="eval-provisional" hidden>
-          <span><small>PROVISIONAL MU_HAT</small><strong id="eval-mu-hat">--</strong></span>
-          <span><small>PROVISIONAL LCB</small><strong id="eval-lcb">--</strong></span>
-          <span><small>REQUIRED LCB</small><strong id="eval-delta">--</strong></span>
-          <span id="eval-lcb-meta" class="eval-provisional-meta">WAITING FOR FIRST 10% CHECKPOINT</span>
-        </div>
-        <div class="progress-track" aria-hidden="true"><div id="eval-progress"></div></div>
-        <div class="progress-meta"><span id="eval-stage">WAITING</span><span id="eval-percent">0%</span></div>
-      </div>
-    </section>
-
     <section class="bench-panel" aria-labelledby="benchmark-heading">
       <div class="bench-head">
         <h2 id="benchmark-heading">KING BENCHMARKS</h2>
@@ -109,6 +92,23 @@
             <tbody id="benchmark-history-body"></tbody>
           </table>
         </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="evaluation-heading">
+      <div class="section-heading"><h2 id="evaluation-heading">EVALUATION FLOOR</h2><span id="validator-phase">VALIDATOR --</span></div>
+      <div id="eval-card" class="eval-card" data-active="false">
+        <div class="eval-copy">
+          <div><strong id="eval-title">NO ACTIVE CHALLENGE</strong><p id="eval-meta" class="muted">THE VALIDATOR IS READY FOR THE NEXT MODEL</p></div>
+        </div>
+        <div id="eval-provisional" class="eval-provisional" hidden>
+          <span><small>PROVISIONAL MU_HAT</small><strong id="eval-mu-hat">--</strong></span>
+          <span><small>PROVISIONAL LCB</small><strong id="eval-lcb">--</strong></span>
+          <span><small>REQUIRED LCB</small><strong id="eval-delta">--</strong></span>
+          <span id="eval-lcb-meta" class="eval-provisional-meta">WAITING FOR FIRST 10% CHECKPOINT</span>
+        </div>
+        <div class="progress-track" aria-hidden="true"><div id="eval-progress"></div></div>
+        <div class="progress-meta"><span id="eval-stage">WAITING</span><span id="eval-percent">0%</span></div>
       </div>
     </section>
 
