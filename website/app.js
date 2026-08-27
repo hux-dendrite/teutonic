@@ -2,11 +2,16 @@
   "use strict";
   var ENDPOINT = "/dashboard.json";
   var DATASET_MANIFEST_URL = "https://pub-fedac496355c4edc9aed57189e6e190f.r2.dev/datasets/manifest.json";
+  var BENCHMARK_RESULTS_URL = "https://pub-c982d552b8044578b4a79e653700ec73.r2.dev/king-benchmark-daily/all-kings/results.json";
   var MODEL_STORAGE_BASE = "https://pub-0821d4e196224864af220294345fd141.r2.dev/";
   var POLL_MS = 15000;
   var DATASET_POLL_MS = 60000;
+  var BENCHMARK_POLL_MS = 60000;
   var lastPayload = null;
+  var benchmarkPayload = null;
+  var benchmarkHistoryVisible = false;
   var historyShowErrors = false;
+  var historyExpandedDetails = new Set();
   var smoothMode = localStorage.getItem("smoothMode") || "lowess";
   if (smoothMode !== "lowess" && smoothMode !== "normal") smoothMode = "lowess";
   function el(id) { return document.getElementById(id); }
@@ -26,9 +31,10 @@
   function hotkeyCell(row, hotkey) { var td = cell(row, "", "mono", hotkey); td.appendChild(hotkeyLink(hotkey, 12, 6)); return td; }
   function hotkeyText(id, prefix, hotkey, head, tail) { var node = el(id); clear(node); node.title = hotkey || ""; node.appendChild(document.createTextNode(prefix)); node.appendChild(hotkeyLink(hotkey, head, tail)); }
   function emptyRow(body, columns, message) { clear(body); var row = document.createElement("tr"); var td = cell(row, message, "empty-cell"); td.colSpan = columns; body.appendChild(row); }
-  function historyShardRow(item, index) {
+  function historyDetailKey(item, index) { return String(item.challenge_id || item.upload_id || item.timestamp || "evaluation-" + index); }
+  function historyShardRow(item, index, detailKey) {
     var view = TeutonicDashboardV1.shardPresentation(item), uploadFailure = TeutonicDashboardV1.uploadFailurePresentation(item), decision = TeutonicDashboardV1.decisionPresentation(item), row = document.createElement("tr"), td = cell(row, "", "history-shards-cell"), panel = document.createElement("div"), reason = document.createElement("div"), reasonLabel = document.createElement("strong"), reasonCopy = document.createElement("div"), reasonSummary = document.createElement("p"), reasonDetail = document.createElement("span"), heading = document.createElement("strong"), detailType = uploadFailure ? "Upload failure" : "Evaluation";
-    row.className = "history-shards-row"; row.id = "history-shards-" + String(item.challenge_id || "evaluation").replace(/[^a-zA-Z0-9_-]/g, "") + "-" + index; row.hidden = true; row.setAttribute("role", "region"); row.setAttribute("aria-label", detailType + " details for " + (item.challenge_id || index + 1)); td.colSpan = 9; panel.className = "history-shards-panel";
+    row.className = "history-shards-row"; row.id = "history-shards-" + detailKey.replace(/[^a-zA-Z0-9_-]/g, "") + "-" + index; row.hidden = !historyExpandedDetails.has(detailKey); row.setAttribute("role", "region"); row.setAttribute("aria-label", detailType + " details for " + (item.challenge_id || item.upload_id || index + 1)); td.colSpan = 9; panel.className = "history-shards-panel";
     reason.className = "history-decision " + decision.kind; reasonLabel.textContent = decision.label; reasonSummary.textContent = decision.summary; reasonDetail.textContent = decision.detail; reasonCopy.appendChild(reasonSummary); if (decision.detail) reasonCopy.appendChild(reasonDetail); reason.appendChild(reasonLabel); reason.appendChild(reasonCopy); panel.appendChild(reason);
     if (uploadFailure) {
       var metadata = document.createElement("dl"); metadata.className = "history-error-metadata";
@@ -40,9 +46,9 @@
     view.groups.forEach(function (group) { var section = document.createElement("section"), label = document.createElement("h3"), list = document.createElement("ul"); label.textContent = group.source + " · " + group.names.length; group.names.forEach(function (name) { var entry = document.createElement("li"), code = document.createElement("code"); code.textContent = name; entry.appendChild(code); list.appendChild(entry); }); section.appendChild(label); section.appendChild(list); panel.appendChild(section); });
     td.appendChild(panel); return row;
   }
-  function makeHistoryRowExpandable(row, details, item) {
-    var detailType = item.upload_id ? "upload failure" : "evaluation"; row.classList.add("history-row"); row.tabIndex = 0; row.setAttribute("aria-expanded", "false"); row.setAttribute("aria-controls", details.id); row.setAttribute("aria-label", "Show details for " + detailType + " " + (item.challenge_id || "")); row.title = "Click to show " + detailType + " details";
-    function toggle(event) { if (event.type === "click" && event.target.closest("a,button")) return; if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return; if (event.type === "keydown") event.preventDefault(); var expanded = row.getAttribute("aria-expanded") === "true"; row.setAttribute("aria-expanded", expanded ? "false" : "true"); row.setAttribute("aria-label", (expanded ? "Show" : "Hide") + " details for " + detailType + " " + (item.challenge_id || "")); row.title = expanded ? "Click to show " + detailType + " details" : "Click to hide " + detailType + " details"; details.hidden = expanded; }
+  function makeHistoryRowExpandable(row, details, item, detailKey) {
+    var detailType = item.upload_id ? "upload failure" : "evaluation", labelId = item.challenge_id || item.upload_id || "", initiallyExpanded = historyExpandedDetails.has(detailKey); row.classList.add("history-row"); row.tabIndex = 0; row.setAttribute("aria-expanded", initiallyExpanded ? "true" : "false"); row.setAttribute("aria-controls", details.id); row.setAttribute("aria-label", (initiallyExpanded ? "Hide" : "Show") + " details for " + detailType + " " + labelId); row.title = "Click to " + (initiallyExpanded ? "hide" : "show") + " " + detailType + " details";
+    function toggle(event) { if (event.type === "click" && event.target.closest("a,button")) return; if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return; if (event.type === "keydown") event.preventDefault(); var expanded = row.getAttribute("aria-expanded") === "true"; if (expanded) historyExpandedDetails.delete(detailKey); else historyExpandedDetails.add(detailKey); row.setAttribute("aria-expanded", expanded ? "false" : "true"); row.setAttribute("aria-label", (expanded ? "Show" : "Hide") + " details for " + detailType + " " + labelId); row.title = expanded ? "Click to show " + detailType + " details" : "Click to hide " + detailType + " details"; details.hidden = expanded; }
     row.addEventListener("click", toggle); row.addEventListener("keydown", toggle);
   }
   function ema(values, alpha) { if (alpha >= 1 || !values.length) return values.slice(); var output = [values[0]]; for (var i = 1; i < values.length; i++) output.push(alpha * values[i] + (1 - alpha) * output[i - 1]); return output; }
@@ -77,7 +83,45 @@
   async function fetchFirstJson(urls) {
     var lastError;
     for (var i = 0; i < urls.length; i++) { try { return await fetchJson(urls[i]); } catch (error) { lastError = error; } }
-    throw lastError || new Error("no manifest endpoint available");
+    throw lastError || new Error("no JSON endpoint available");
+  }
+  function benchmarkSparkline(series) {
+    var namespace = "http://www.w3.org/2000/svg", svg = document.createElementNS(namespace, "svg"), points = series.points || [], W = 220, H = 50, left = 8, right = 8, top = 5, bottom = 14;
+    function node(name, attributes) { var item = document.createElementNS(namespace, name); Object.keys(attributes || {}).forEach(function(key) { item.setAttribute(key, attributes[key]); }); return item; }
+    svg.classList.add("bench-sparkline"); svg.setAttribute("viewBox", "0 0 " + W + " " + H); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", series.name + " score history across " + points.length + (points.length === 1 ? " reign" : " reigns"));
+    svg.appendChild(node("line", { x1: left, y1: H - bottom, x2: W - right, y2: H - bottom, class: "bench-sparkline-axis" }));
+    if (!points.length) { var empty = node("text", { x: W / 2, y: H / 2, class: "bench-sparkline-empty", "text-anchor": "middle" }); empty.textContent = "NO SCORES"; svg.appendChild(empty); return svg; }
+    var values = points.map(function(point) { return point.score; }), min = Math.min.apply(null, values), max = Math.max.apply(null, values), spread = max - min, padding = spread ? spread * .18 : Math.max(Math.abs(max) * .05, .01); min -= padding; max += padding;
+    function x(index) { return points.length === 1 ? W / 2 : left + index / (points.length - 1) * (W - left - right); }
+    function y(value) { return top + (max - value) / (max - min) * (H - top - bottom); }
+    if (points.length > 1) svg.appendChild(node("polyline", { points: points.map(function(point, index) { return x(index).toFixed(1) + "," + y(point.score).toFixed(1); }).join(" "), class: "bench-sparkline-line" }));
+    points.forEach(function(point, index) { var dot = node("circle", { cx: x(index).toFixed(1), cy: y(point.score).toFixed(1), r: point.current ? 3.5 : 2.7, class: point.current ? "bench-sparkline-point current" : "bench-sparkline-point" }), title = node("title"); title.textContent = "REIGN #" + point.reignNumber + " · " + percent(point.score); dot.appendChild(title); svg.appendChild(dot); });
+    var first = node("text", { x: left, y: H - 3, class: "bench-sparkline-label", "text-anchor": "start" }); first.textContent = "R" + points[0].reignNumber; svg.appendChild(first);
+    if (points.length > 1) { var last = node("text", { x: W - right, y: H - 3, class: "bench-sparkline-label", "text-anchor": "end" }); last.textContent = "R" + points[points.length - 1].reignNumber; svg.appendChild(last); }
+    return svg;
+  }
+  function renderBenchmarkHistory(view) {
+    var panel = el("benchmark-history"), graphs = el("benchmark-history-graphs"), body = el("benchmark-history-body"), toggle = el("benchmark-history-toggle");
+    panel.hidden = !benchmarkHistoryVisible; toggle.textContent = benchmarkHistoryVisible ? "HIDE HISTORY" : "SHOW HISTORY"; toggle.setAttribute("aria-pressed", benchmarkHistoryVisible ? "true" : "false");
+    clear(graphs); clear(body); if (!benchmarkHistoryVisible) return;
+    view.series.forEach(function(series) { var tile = document.createElement("article"), heading = document.createElement("div"), name = document.createElement("strong"), latest = document.createElement("span"), lastPoint = series.points.length ? series.points[series.points.length - 1] : null; tile.className = "bench-history-graph"; heading.className = "bench-history-graph-head"; name.textContent = series.name; latest.textContent = lastPoint ? "LATEST " + percent(lastPoint.score) : "NO SCORES"; heading.appendChild(name); heading.appendChild(latest); tile.appendChild(heading); tile.appendChild(benchmarkSparkline(series)); graphs.appendChild(tile); });
+    if (!view.kings.length) return emptyRow(body, 11, "NO BENCHMARK HISTORY YET");
+    view.kings.forEach(function(king) { var row = document.createElement("tr"), byName = {}; if (king.current) row.className = "bench-history-current"; king.benchmarks.forEach(function(benchmark) { byName[benchmark.name] = benchmark; }); cell(row, "#" + king.reignNumber); cell(row, king.uid); cell(row, king.modelRepo, "", king.hotkey); ["BBH", "MMLU", "HellaSwag", "WinoGrande", "GSM8K", "PIQA", "ARC-C", "ARC-E"].forEach(function(name) { var benchmark = byName[name]; cell(row, benchmark && benchmark.score != null ? percent(benchmark.score) : "--", "mono", benchmark ? benchmark.status.toUpperCase() : "PENDING"); }); body.appendChild(row); });
+  }
+  function renderBenchmarks(payload) {
+    var view = TeutonicDashboardV1.benchmarkPresentation(payload), selected = view.selected, meta = el("benchmark-meta"), grid = el("benchmark-grid");
+    benchmarkPayload = payload;
+    meta.textContent = view.kingCount + (view.kingCount === 1 ? " KING" : " KINGS") + " · " + view.benchmarkResultCount + " RESULTS · " + age(view.generatedAt);
+    renderBenchmarkHistory(view);
+    if (!selected) { text("benchmark-model", "NO KING BENCHMARK RESULTS YET"); text("benchmark-identity", "THE DAILY BENCHMARK QUEUE HAS NOT PUBLISHED A RESULT"); clear(grid); var none = document.createElement("p"); none.className = "bench-empty"; none.textContent = "WAITING FOR THE FIRST KING RESULT"; grid.appendChild(none); return; }
+    text("benchmark-model", selected.modelRepo);
+    var identityNode = el("benchmark-identity"); clear(identityNode); identityNode.appendChild(document.createTextNode("REIGN #" + selected.reignNumber + " · UID " + selected.uid + " · ")); identityNode.appendChild(hotkeyLink(selected.hotkey, 12, 6)); identityNode.appendChild(document.createTextNode(" · " + selected.completed + "/" + view.benchmarkCount + " COMPLETE · UPDATED " + age(selected.updatedAt)));
+    clear(grid);
+    selected.benchmarks.forEach(function (benchmark) { var card = document.createElement("article"), name = document.createElement("div"), score = document.createElement("div"), status = document.createElement("div"), state = document.createElement("span"), shots = document.createElement("span"); card.className = "bench-card"; card.dataset.status = benchmark.status; name.className = "bench-name"; name.textContent = benchmark.name; score.className = "bench-score"; score.textContent = benchmark.score == null ? "--" : percent(benchmark.score); score.title = [benchmark.metric, finite(benchmark.wallTimeSeconds) == null ? "" : metric(benchmark.wallTimeSeconds, 0) + " seconds"].filter(Boolean).join(" · "); status.className = "bench-status"; state.textContent = benchmark.status.replaceAll("_", " "); shots.textContent = benchmark.fewshot + "-SHOT"; status.appendChild(state); status.appendChild(shots); card.appendChild(name); card.appendChild(score); card.appendChild(status); grid.appendChild(card); });
+  }
+  async function loadBenchmarks() {
+    try { renderBenchmarks(await fetchFirstJson(["/benchmarks/results.json", BENCHMARK_RESULTS_URL])); }
+    catch (error) { if (!benchmarkPayload) { text("benchmark-meta", "BENCHMARK RESULTS UNAVAILABLE"); clear(el("benchmark-grid")); var empty = document.createElement("p"); empty.className = "bench-empty"; empty.textContent = "LIVE BENCHMARK RESULTS COULD NOT BE LOADED"; el("benchmark-grid").appendChild(empty); } }
   }
   function renderDatasetManifest(manifest) {
     var view = TeutonicDashboardV1.datasetPresentation(manifest), summary = [view.rows.length + (view.rows.length === 1 ? " DATASET" : " DATASETS")];
@@ -154,7 +198,7 @@
     text("history-count", countLabel);
     var toggle = el("history-errors-toggle"); toggle.textContent = historyShowErrors ? "HIDE ERRORS" : "SHOW ERRORS"; toggle.setAttribute("aria-pressed", historyShowErrors ? "true" : "false");
     if (!rows.length) return emptyRow(body, 9, view.errorCount && !historyShowErrors ? "NO NON-ERROR EVALUATIONS — ERRORS HIDDEN" : "NO EVALUATIONS YET"); clear(body);
-    rows.forEach(function (item, index) { var tr = document.createElement("tr"), details = historyShardRow(item, index); cell(tr, item.uid); cell(tr, identity(item), "", item.challenger_repo || item.challenge_id); hotkeyCell(tr, item.hotkey); cell(tr, String(item.verdict || "--").toUpperCase(), "verdict " + (item.verdict || ""), item.error_message); cell(tr, metric(item.mu_hat)); cell(tr, metric(item.lcb)); cell(tr, metric(item.avg_king_loss, 4)); cell(tr, metric(item.avg_challenger_loss, 4)); var when = age(item.timestamp) + (finite(item.wall_time_s) == null ? "" : " (" + metric(item.wall_time_s, 0) + "S)"); cell(tr, when, "", date(item.timestamp)); makeHistoryRowExpandable(tr, details, item); body.appendChild(tr); body.appendChild(details); });
+    rows.forEach(function (item, index) { var detailKey = historyDetailKey(item, index), tr = document.createElement("tr"), details = historyShardRow(item, index, detailKey); cell(tr, item.uid); cell(tr, identity(item), "", item.challenger_repo || item.challenge_id); hotkeyCell(tr, item.hotkey); cell(tr, String(item.verdict || "--").toUpperCase(), "verdict " + (item.verdict || ""), item.error_message); cell(tr, metric(item.mu_hat)); cell(tr, metric(item.lcb)); cell(tr, metric(item.avg_king_loss, 4)); cell(tr, metric(item.avg_challenger_loss, 4)); var when = age(item.timestamp) + (finite(item.wall_time_s) == null ? "" : " (" + metric(item.wall_time_s, 0) + "S)"); cell(tr, when, "", date(item.timestamp)); makeHistoryRowExpandable(tr, details, item, detailKey); body.appendChild(tr); body.appendChild(details); });
   }
   function renderReigns(d) {
     var body = el("reigns-body"), allRows = (d.king_chain || []).slice().sort(function (a, b) { return (b.reign_number || 0) - (a.reign_number || 0); }), seenHotkeys = {}, rows = [];
@@ -196,8 +240,8 @@
     if (amount > 0 && kingPoints.length > 1) markup += '<polyline points="' + kingLine(rawKings) + '" fill="none" stroke="' + ink + '" stroke-width="1" opacity=".2" stroke-dasharray="2 5"/>';
     if (points.length > 1) markup += '<polyline points="' + challengerLine(challengers) + '" fill="none" stroke="' + muted + '" stroke-width="1.5" stroke-dasharray="6 5"/>';
     if (kingPoints.length > 1) markup += '<polyline points="' + kingLine(kings) + '" fill="none" stroke="' + ink + '" stroke-width="2"/>';
-    rawChallengers.forEach(function (value, i) { markup += '<circle cx="' + x(i) + '" cy="' + y(value) + '" r="2.5" fill="' + paper + '" stroke="' + muted + '"/>'; });
-    kingPoints.forEach(function (p) { markup += '<circle cx="' + x(p.index) + '" cy="' + y(p.loss) + '" r="3" fill="' + ink + '"/>'; });
+    challengers.forEach(function (value, i) { markup += '<circle cx="' + x(i) + '" cy="' + y(value) + '" r="2.5" fill="' + paper + '" stroke="' + muted + '"/>'; });
+    kings.forEach(function (value, i) { markup += '<circle cx="' + x(kingPoints[i].index) + '" cy="' + y(value) + '" r="3" fill="' + ink + '"/>'; });
     svg.setAttribute("viewBox", "0 0 " + W + " " + H); svg.innerHTML = markup;
   }
   function render(d) { TeutonicDashboardV1.validate(d); lastPayload = d; renderHeader(d); renderReigns(d); renderEvaluation(d); renderChart(d); renderQueue(d); renderHistory(d); renderWeightStatus(d); text("last-refresh", "LAST REFRESH " + new Date().toLocaleTimeString()); el("error-banner").hidden = true; }
@@ -211,6 +255,8 @@
   smoothSlider.addEventListener("input", function () { localStorage.setItem("smoothing", smoothSlider.value); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
   el("smooth-mode-toggle").addEventListener("click", function () { smoothMode = smoothMode === "lowess" ? "normal" : "lowess"; localStorage.setItem("smoothMode", smoothMode); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
   el("history-errors-toggle").addEventListener("click", function () { historyShowErrors = !historyShowErrors; if (lastPayload) renderHistory(lastPayload); });
+  el("benchmark-history-toggle").addEventListener("click", function () { benchmarkHistoryVisible = !benchmarkHistoryVisible; if (benchmarkPayload) renderBenchmarks(benchmarkPayload); });
   poll(); setInterval(poll, POLL_MS);
   loadDatasetManifest(); setInterval(loadDatasetManifest, DATASET_POLL_MS);
+  loadBenchmarks(); setInterval(loadBenchmarks, BENCHMARK_POLL_MS);
 })();

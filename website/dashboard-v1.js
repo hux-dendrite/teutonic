@@ -6,6 +6,16 @@
     "use strict";
 
     var HIDDEN = "Hidden until promotion";
+    var BENCHMARK_SPECS = [
+        { name: "BBH", fewshot: 3 },
+        { name: "MMLU", fewshot: 0 },
+        { name: "HellaSwag", fewshot: 0 },
+        { name: "WinoGrande", fewshot: 0 },
+        { name: "GSM8K", fewshot: 4 },
+        { name: "PIQA", fewshot: 0 },
+        { name: "ARC-C", fewshot: 0 },
+        { name: "ARC-E", fewshot: 0 }
+    ];
 
     function walkFinite(value, path) {
         if (typeof value === "number" && !Number.isFinite(value)) {
@@ -266,6 +276,82 @@
         };
     }
 
+    function benchmarkPresentation(payload, selectedKingId) {
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+            throw new Error("benchmark results must be an object");
+        }
+        if ([
+            "teutonic-king-benchmark-all-results.v1",
+            "teutonic-king-benchmark-all-results.v2"
+        ].indexOf(payload.schema_version) === -1) {
+            throw new Error("unsupported benchmark results schema");
+        }
+        if (!Array.isArray(payload.kings)) throw new Error("benchmark kings must be an array");
+        var kings = payload.kings.map(function(item) {
+            item = item || {};
+            var result = item.result || {};
+            var model = result.model || {};
+            var byName = {};
+            (Array.isArray(result.benchmarks) ? result.benchmarks : []).forEach(function(row) {
+                if (row && typeof row.name === "string") byName[row.name.toLowerCase()] = row;
+            });
+            var benchmarks = BENCHMARK_SPECS.map(function(spec) {
+                var row = byName[spec.name.toLowerCase()] || {};
+                var metric = row.metric || {};
+                var score = metric.value == null ? null : finiteNumber(metric.value, null);
+                return {
+                    name: spec.name,
+                    status: String(row.status || "pending").toLowerCase(),
+                    score: score,
+                    metric: typeof metric.name === "string" ? metric.name : null,
+                    fewshot: row.fewshot == null ? spec.fewshot : Math.max(0, Math.floor(finiteNumber(row.fewshot, spec.fewshot))),
+                    wallTimeSeconds: row.wall_time_s == null ? null : finiteNumber(row.wall_time_s, null)
+                };
+            });
+            return {
+                kingId: String(item.king_id || model.king_id || ""),
+                reignNumber: Math.max(0, Math.floor(finiteNumber(model.reign_number, 0))),
+                uid: Math.max(0, Math.floor(finiteNumber(model.uid, 0))),
+                hotkey: String(model.hotkey || ""),
+                modelRepo: String(model.model_repo || "Public king model"),
+                crownedAt: model.crowned_at || null,
+                current: model.is_current === true,
+                status: String(item.status || result.status || "pending").toLowerCase(),
+                updatedAt: item.updated_at || result.generated_at || null,
+                completed: benchmarks.filter(function(row) { return row.status === "completed"; }).length,
+                benchmarks: benchmarks
+            };
+        }).filter(function(king) { return king.kingId; }).sort(function(a, b) {
+            return b.reignNumber - a.reignNumber || String(b.crownedAt || "").localeCompare(String(a.crownedAt || ""));
+        });
+        var selected = kings.find(function(king) { return king.kingId === selectedKingId; })
+            || kings.find(function(king) { return king.current; }) || kings[0] || null;
+        var series = BENCHMARK_SPECS.map(function(spec) {
+            return {
+                name: spec.name,
+                points: kings.slice().reverse().map(function(king) {
+                    var benchmark = king.benchmarks.find(function(row) { return row.name === spec.name; });
+                    return {
+                        kingId: king.kingId,
+                        reignNumber: king.reignNumber,
+                        score: benchmark ? benchmark.score : null,
+                        status: benchmark ? benchmark.status : "pending",
+                        current: king.current
+                    };
+                }).filter(function(point) { return point.score != null; })
+            };
+        });
+        return {
+            generatedAt: payload.generated_at || null,
+            kingCount: kings.length,
+            benchmarkResultCount: Math.max(0, Math.floor(finiteNumber(payload.benchmark_result_count, 0))),
+            kings: kings,
+            selected: selected,
+            benchmarkCount: BENCHMARK_SPECS.length,
+            series: series
+        };
+    }
+
     return {
         HIDDEN: HIDDEN,
         validate: validate,
@@ -276,6 +362,7 @@
         shardPresentation: shardPresentation,
         uploadFailurePresentation: uploadFailurePresentation,
         decisionPresentation: decisionPresentation,
-        datasetPresentation: datasetPresentation
+        datasetPresentation: datasetPresentation,
+        benchmarkPresentation: benchmarkPresentation
     };
 });

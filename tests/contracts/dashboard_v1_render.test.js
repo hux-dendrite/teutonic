@@ -191,4 +191,57 @@ assert.strictEqual(dataset.rows[0].normalizedWeight, 1);
 assert.strictEqual(dataset.rows[0].source, "owner/dataset");
 assert.strictEqual(dataset.rows[0].metadataLoaded, true);
 assert.throws(() => dashboard.datasetPresentation({}, {}), /sources must be an array/);
+
+const benchmarkResults = dashboard.benchmarkPresentation({
+    schema_version: "teutonic-king-benchmark-all-results.v2",
+    generated_at: "2026-08-26T10:30:39Z",
+    benchmark_result_count: 3,
+    kings: [
+        {
+            king_id: "reign-6",
+            status: "partial",
+            updated_at: "2026-08-26T09:00:00Z",
+            result: {
+                model: { reign_number: 6, uid: 22, hotkey: "prior", model_repo: "owner/prior" },
+                benchmarks: [
+                    { name: "BBH", fewshot: 3, status: "completed", metric: { name: "acc_norm,none", value: 0.25 } },
+                    { name: "MMLU", fewshot: 0, status: "completed", metric: { name: "acc,none", value: 0.2 } }
+                ]
+            }
+        },
+        {
+            king_id: "reign-7",
+            status: "completed",
+            updated_at: "2026-08-26T10:29:18Z",
+            result: {
+                model: { reign_number: 7, uid: 226, hotkey: "current", model_repo: "owner/current", is_current: true },
+                benchmarks: [
+                    { name: "BBH", fewshot: 3, status: "completed", metric: { name: "acc_norm,none", value: 0.297344 } },
+                    { name: "GSM8K", fewshot: 4, status: "completed", metric: { name: "exact_match,strict-match", value: 0 } }
+                ]
+            }
+        }
+    ]
+});
+assert.deepStrictEqual(benchmarkResults.kings.map((king) => king.kingId), ["reign-7", "reign-6"]);
+assert.strictEqual(benchmarkResults.selected.kingId, "reign-7");
+assert.strictEqual(benchmarkResults.selected.benchmarks.length, 8);
+assert.strictEqual(benchmarkResults.selected.benchmarks[0].name, "BBH");
+assert.strictEqual(benchmarkResults.selected.benchmarks[0].score, 0.297344);
+assert.strictEqual(benchmarkResults.selected.benchmarks[4].name, "GSM8K");
+assert.strictEqual(benchmarkResults.selected.benchmarks[4].score, 0);
+assert.strictEqual(benchmarkResults.selected.benchmarks[1].status, "pending");
+assert.deepStrictEqual(
+    benchmarkResults.series[0].points.map((point) => [point.reignNumber, point.score]),
+    [[6, 0.25], [7, 0.297344]]
+);
+assert.strictEqual(benchmarkResults.series[4].points[0].score, 0);
+assert.doesNotThrow(() => dashboard.benchmarkPresentation({
+    schema_version: "teutonic-king-benchmark-all-results.v1",
+    kings: []
+}));
+assert.throws(
+    () => dashboard.benchmarkPresentation({ schema_version: "wrong", kings: [] }),
+    /unsupported benchmark results schema/
+);
 console.log("dashboard-v1 representative render states passed");
