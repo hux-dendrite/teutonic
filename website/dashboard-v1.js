@@ -109,6 +109,27 @@
         };
     }
 
+    function evaluationHistoryMetricsPresentation(record) {
+        record = record || {};
+        function optionalCount(value) {
+            if (value == null || value === "") return null;
+            var count = finiteNumber(value, null);
+            return count == null ? null : Math.max(0, Math.floor(count));
+        }
+        var evaluated = optionalCount(record.n_sequences_evaluated);
+        var planned = optionalCount(record.n_sequences);
+        var completed = evaluated == null ? planned : evaluated;
+        var hasSamples = completed != null;
+        return {
+            samples: !hasSamples ? "--" : evaluated != null && planned != null && evaluated !== planned
+                ? evaluated + " / " + planned : String(completed),
+            samplesTitle: !hasSamples ? "Sample count unavailable" : evaluated != null && planned != null
+                ? evaluated + " of " + planned + " samples evaluated" : completed + " samples evaluated",
+            earlyStopped: record.early_stopped === true,
+            earlyStopLabel: record.early_stopped === true ? "YES" : hasSamples ? "NO" : "--"
+        };
+    }
+
     function taoMarketCapHotkeyUrl(hotkey) {
         var address = String(hotkey || "").trim();
         if (!address) return "";
@@ -358,6 +379,7 @@
         presentation: presentation,
         currentEvaluationPresentation: currentEvaluationPresentation,
         historyPresentation: historyPresentation,
+        evaluationHistoryMetricsPresentation: evaluationHistoryMetricsPresentation,
         taoMarketCapHotkeyUrl: taoMarketCapHotkeyUrl,
         shardPresentation: shardPresentation,
         uploadFailurePresentation: uploadFailurePresentation,

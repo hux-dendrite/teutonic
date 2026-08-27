@@ -97,6 +97,32 @@ const hiddenErrors = dashboard.historyPresentation(historyRows, false);
 assert.deepStrictEqual(hiddenErrors.rows.map((row) => row.challenge_id), ["accepted", "rejected"]);
 assert.strictEqual(hiddenErrors.errorCount, 1);
 assert.strictEqual(dashboard.historyPresentation(historyRows, true).rows.length, 3);
+assert.deepStrictEqual(
+    dashboard.evaluationHistoryMetricsPresentation({
+        n_sequences_evaluated: 600,
+        n_sequences: 2000,
+        early_stopped: true
+    }),
+    {
+        samples: "600 / 2000",
+        samplesTitle: "600 of 2000 samples evaluated",
+        earlyStopped: true,
+        earlyStopLabel: "YES"
+    }
+);
+assert.strictEqual(
+    dashboard.evaluationHistoryMetricsPresentation({ n_sequences: 2000 }).samples,
+    "2000"
+);
+assert.deepStrictEqual(
+    dashboard.evaluationHistoryMetricsPresentation({}),
+    {
+        samples: "--",
+        samplesTitle: "Sample count unavailable",
+        earlyStopped: false,
+        earlyStopLabel: "--"
+    }
+);
 
 assert.strictEqual(
     dashboard.taoMarketCapHotkeyUrl("5MinerHotkey"),
