@@ -206,12 +206,18 @@ psql "$TEUTONIC_DATABASE_URL" \
   --no-psqlrc \
   --set=ON_ERROR_STOP=1 \
   --file=scripts/db/add_evaluation_early_stopping.sql
+
+psql "$TEUTONIC_DATABASE_URL" \
+  --no-psqlrc \
+  --set=ON_ERROR_STOP=1 \
+  --file=scripts/db/add_safetensors_reuse_limit_error.sql
 ```
 
-The setup creates one competition-scoped policy row with early stopping
+The first setup creates one competition-scoped policy row with early stopping
 enabled, a `0.4` minimum fraction, `0.95` observed-advantage quantile, zero
-margin, and a 100-sequence check interval. It is idempotent and preserves an
-existing row.
+margin, and a 100-sequence check interval. The second exposes the evaluator's
+safetensors reuse-limit code through the dashboard view. Both are idempotent;
+the policy setup preserves an existing row.
 
 Inspect or update the current competition through the validated helper:
 

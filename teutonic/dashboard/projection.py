@@ -21,6 +21,9 @@ PUBLIC_ERROR_MESSAGES = {
     "evaluator_busy": "Evaluation capacity was temporarily unavailable.",
     "evaluator_job_lost": "The evaluation worker restarted before the result was durable.",
     "evaluation_failed": "The evaluation could not be completed.",
+    "safetensors_reuse_limit": (
+        "This model checkpoint has reached the allowed evaluation reuse limit."
+    ),
     "protocol_invalid": "The evaluator returned an invalid result contract.",
     "retry_exhausted": "The evaluation could not be completed after retries.",
 }

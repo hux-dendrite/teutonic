@@ -23,6 +23,21 @@ Preflight = Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any] | None]]
 log = logging.getLogger("teutonic.validator.scheduler")
 
 
+def _evaluator_error_code(payload: Mapping[str, Any]) -> str:
+    code = payload.get("code") or payload.get("error_code")
+    if isinstance(code, str) and code:
+        return code
+    reason = str(payload.get("error") or payload.get("reason") or "").lower()
+    if (
+        "safetensors sha-256" in reason
+        and "already completed" in reason
+        and "maximum allowed" in reason
+    ):
+        # Support an evaluator rolling upgrade without persisting its detailed message.
+        return "safetensors_reuse_limit"
+    return "evaluation_failed"
+
+
 class ValidatorScheduler:
     def __init__(
         self,
@@ -169,12 +184,12 @@ class ValidatorScheduler:
             elif event_type == "verdict":
                 return data
             elif event_type == "error":
-                raise RuntimeError(f"eval server error: {data.get('code', 'evaluation_failed')}")
+                raise RuntimeError(f"eval server error: {_evaluator_error_code(data)}")
         status = await self.evaluator.status(eval_id)
         if status.get("state") == "completed" and isinstance(status.get("verdict"), Mapping):
             return status["verdict"]
         if status.get("state") == "failed":
-            raise RuntimeError(f"eval server error: {status.get('error', 'evaluation_failed')}")
+            raise RuntimeError(f"eval server error: {_evaluator_error_code(status)}")
         raise RuntimeError("evaluator stream closed before a terminal result")
 
     def _persist_terminal(self, claim: ClaimedEvaluation, result: Mapping[str, Any]) -> None:
@@ -215,6 +230,7 @@ class ValidatorScheduler:
             if transient
             else "policy"
             if isinstance(exc, (EvaluatorConflictError, ProtocolValidationError))
+            or marker == "safetensors_reuse_limit"
             else "unknown"
         )
         self.repository.fail_attempt(
@@ -311,7 +327,8 @@ class ValidatorScheduler:
                 self._persist_terminal(claim, status["verdict"])
             elif status.get("state") == "failed":
                 self._persist_error(
-                    claim, RuntimeError(f"eval server error: {status.get('error', 'failed')}")
+                    claim,
+                    RuntimeError(f"eval server error: {_evaluator_error_code(status)}"),
                 )
             else:
                 try:

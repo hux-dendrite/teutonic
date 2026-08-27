@@ -26,6 +26,7 @@ from teutonic.evaluation import (
     provisional_paired_bootstrap,
     validate_config_lock,
 )
+from teutonic.validator.service import _evaluator_error_code
 
 
 FIXTURE = json.loads(
@@ -125,6 +126,29 @@ def legacy_bootstrap_verdict(policy_input, now):
 
 
 class EvaluationPolicyRegressionTests(unittest.TestCase):
+    def test_evaluator_reuse_limit_code_supports_rolling_upgrade(self) -> None:
+        self.assertEqual(
+            _evaluator_error_code({"code": "safetensors_reuse_limit"}),
+            "safetensors_reuse_limit",
+        )
+        self.assertEqual(
+            _evaluator_error_code(
+                {
+                    "error": (
+                        "challenger safetensors SHA-256 digest has already completed 3 evals; "
+                        "maximum allowed is 3"
+                    )
+                }
+            ),
+            "safetensors_reuse_limit",
+        )
+
+    def test_safetensors_reuse_limit_has_a_stable_public_error_code(self) -> None:
+        self.assertEqual(
+            classify_eval_error("eval server error: safetensors_reuse_limit"),
+            (False, "safetensors_reuse_limit"),
+        )
+
     def test_provisional_bootstrap_uses_configured_count_and_marks_its_sample(self) -> None:
         king = [1.2, 1.1, 1.3, 1.25]
         challenger = [1.0, 1.05, 1.1, 1.15]

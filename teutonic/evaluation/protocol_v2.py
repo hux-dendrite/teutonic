@@ -373,6 +373,7 @@ class EvaluationAttempt:
     verdict: dict[str, Any] | None = None
     error: str | None = None
     reason: str | None = None
+    error_code: str | None = None
     created_at: float = 0.0
     events: Queue = field(default_factory=Queue)
 
@@ -390,7 +391,9 @@ class EvaluationAttempt:
         if self.state == "completed":
             response["verdict"] = self.verdict
         elif self.state == "failed":
-            response.update({"error": self.error, "reason": self.reason})
+            response.update(
+                {"error": self.error, "reason": self.reason, "error_code": self.error_code}
+            )
         return response
 
     def event(self, event_type: str, data: Mapping[str, Any]) -> dict[str, Any]:

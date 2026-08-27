@@ -872,7 +872,7 @@ CREATE VIEW control_plane.dashboard_evaluation_history WITH (security_barrier='t
     (e.verdict_summary ->> 'n_sequences'::text) AS n_sequences,
     (e.verdict_summary ->> 'early_stopped'::text) AS early_stopped,
         CASE
-            WHEN (e.public_error_code = ANY (ARRAY['invalid_evaluation_input'::text, 'config_rejected'::text, 'model_copy'::text, 'evaluator_busy'::text, 'evaluator_job_lost'::text, 'evaluation_failed'::text, 'protocol_invalid'::text, 'retry_exhausted'::text])) THEN e.public_error_code
+            WHEN (e.public_error_code = ANY (ARRAY['invalid_evaluation_input'::text, 'config_rejected'::text, 'model_copy'::text, 'evaluator_busy'::text, 'evaluator_job_lost'::text, 'evaluation_failed'::text, 'protocol_invalid'::text, 'retry_exhausted'::text, 'safetensors_reuse_limit'::text])) THEN e.public_error_code
             WHEN (e.public_error_code IS NULL) THEN NULL::text
             ELSE 'evaluation_failed'::text
         END AS public_error_code,

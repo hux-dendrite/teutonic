@@ -108,6 +108,12 @@ EVAL_BOOTSTRAP_B_CAP = int(os.environ.get("EVAL_BOOTSTRAP_B_CAP", "999999"))
 EVAL_MAX_RUNTIME_S = int(os.environ.get("EVAL_MAX_RUNTIME_S", "0"))
 DEFAULT_LM_HEAD_CHUNK = int(os.environ.get("TEUTONIC_LM_HEAD_CHUNK", "1024"))
 DEFAULT_LOG_EVERY_BATCHES = int(os.environ.get("EVAL_LOG_EVERY_BATCHES", "1"))
+
+
+class SafetensorsReuseLimitError(RuntimeError):
+    """A challenger checkpoint has exhausted its allowed completed evaluations."""
+
+
 DEFAULT_MODEL_DEVICE_MAP = os.environ.get("TEUTONIC_MODEL_DEVICE_MAP", "auto")
 DEFAULT_GPU_MEMORY_FRACTION = float(os.environ.get("TEUTONIC_GPU_MEMORY_FRACTION", "0.45"))
 GPUS_PER_MODEL_INSTANCE = 2
@@ -439,7 +445,7 @@ def completed_safetensors_sha_uses(digest: str) -> int:
 def reject_reused_safetensors(digest: str, on_phase=None) -> dict:
     uses = completed_safetensors_sha_uses(digest)
     if uses >= MAX_COMPLETED_EVALS_PER_SAFETENSORS_SHA:
-        raise RuntimeError(
+        raise SafetensorsReuseLimitError(
             f"challenger safetensors SHA-256 {digest} has already completed {uses} evals; "
             f"maximum allowed is {MAX_COMPLETED_EVALS_PER_SAFETENSORS_SHA}"
         )
@@ -2292,10 +2298,20 @@ def run_eval(eval_id: str, protocol_request: EvaluationRequestV2) -> None:
     except Exception as exc:
         log.exception("eval %s failed", eval_id)
         reason = str(exc)
+        error_code = (
+            "safetensors_reuse_limit"
+            if isinstance(exc, SafetensorsReuseLimitError)
+            else "evaluation_failed"
+        )
         record.state = "failed"
         record.error = reason
         record.reason = reason
-        events.put(record.event("error", {"error": reason, "reason": reason}))
+        record.error_code = error_code
+        events.put(
+            record.event(
+                "error", {"code": error_code, "error": reason, "reason": reason}
+            )
+        )
     finally:
         heartbeat_stop.set()
         cleanup_model_cache()
@@ -2435,6 +2451,7 @@ async def get_eval(eval_id: str):
         "verdict": rec.verdict,
         "error": rec.error,
         "reason": rec.reason,
+        "error_code": rec.error_code,
     }
 
 
@@ -2453,6 +2470,7 @@ async def stream_eval(eval_id: str):
                 await asyncio.sleep(0.5)
                 if rec.state in ("completed", "failed") and event_q.empty():
                     final = rec.verdict or {
+                        "code": rec.error_code or "evaluation_failed",
                         "error": rec.error,
                         "reason": rec.reason or rec.error,
                     }

@@ -59,11 +59,21 @@ initial_weight_uids = [110, 115, 143, 224, 226]
 "tokenizer_config.json" = "2cb1d781e7d20a1386d6a6c2c89fdc9b18a9c6f277071488f39dbfc02829589e"
 
 [evaluation]
-dataset_label = "finewebedu"
+dataset_label = "finewebedu-automathtext-v2-dclm-baseline-1.0"
 n = 2000
-delta_threshold = 0.5
+delta_threshold = 0.1
 
 [[evaluation.datasets]]
 name = "finewebedu"
 manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/finewebedu/manifest.json"
-proportion = 1
+proportion = 0.22
+
+[[evaluation.datasets]]
+name = "automathtext-v2"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/automathtext-v2/manifest.json"
+proportion = 0.26
+
+[[evaluation.datasets]]
+name = "dclm-baseline-1.0"
+manifest_url = "https://pub-d923bc4e8fcb45f6b703bc750bcf8aa6.r2.dev/dclm-baseline-1.0/manifest.json"
+proportion = 0.52

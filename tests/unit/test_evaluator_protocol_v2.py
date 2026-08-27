@@ -260,8 +260,10 @@ class EvaluatorProtocolV2ContractTests(unittest.TestCase):
         failed.state = "failed"
         failed.error = "sanitized failure"
         failed.reason = "sanitized failure"
+        failed.error_code = "safetensors_reuse_limit"
         self.assertEqual(failed.response()["state"], "failed")
         self.assertEqual(failed.response()["error"], "sanitized failure")
+        self.assertEqual(failed.response()["error_code"], "safetensors_reuse_limit")
 
         restarted_registry = EvaluationAttemptRegistry()
         self.assertIsNone(restarted_registry.get(request.eval_id))

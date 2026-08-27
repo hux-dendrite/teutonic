@@ -160,6 +160,22 @@ class UnavailableEvaluator:
         raise ConnectionError("GPU tunnel unavailable")
 
 
+class ReuseLimitEvaluator(FakeEvaluator):
+    async def events(self, eval_id):
+        request = EvaluationRequestV2.from_mapping(self.started[-1])
+        yield {
+            "evaluation_id": request.evaluation_id,
+            "attempt_number": request.attempt_number,
+            "type": "error",
+            "data": {
+                "error": (
+                    "challenger safetensors SHA-256 private-digest has already completed "
+                    "3 evals; maximum allowed is 3"
+                ),
+            },
+        }
+
+
 class DispatchOutageEvaluator(FakeEvaluator):
     def __init__(self, result):
         super().__init__(result)
@@ -624,6 +640,34 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
             ).fetchone()[0],
             3,
         )
+
+    def test_reuse_limit_failure_persists_stable_public_reason(self) -> None:
+        async def preflight(_request):
+            return None
+
+        scheduler = ValidatorScheduler(
+            self.repository,
+            ReuseLimitEvaluator(lambda request: terminal_result(request, accepted=False)),
+            policy=policy(),
+            preflight=preflight,
+            clock=lambda: NOW,
+        )
+        self.assertTrue(asyncio.run(scheduler.run_once()))
+        row = self.connection.execute(
+            """
+            SELECT e.evaluation_id, e.state, e.failure_class, e.public_error_code,
+                   e.private_diagnostic_reference, u.state, u.failure_code
+              FROM control_plane.evaluations e
+              JOIN control_plane.uploads u USING (upload_id)
+             WHERE e.attempt_number = 1
+             ORDER BY e.created_at
+             LIMIT 1
+            """
+        ).fetchone()
+        self.assertEqual(row[1:4], ("terminal_failure", "policy", "safetensors_reuse_limit"))
+        self.assertEqual(row[4], f"diagnostic:{row[0]}:RuntimeError")
+        self.assertEqual(row[5:], ("evaluation_failed", "safetensors_reuse_limit"))
+        self.assertNotIn("private-digest", str(row))
 
     def test_dispatch_outage_reuses_attempt_without_spending_retry_budget(self) -> None:
         current = [NOW]

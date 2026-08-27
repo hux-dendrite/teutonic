@@ -279,6 +279,28 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         ):
             self.assertNotIn(marker.lower(), text.lower())
 
+    def test_reuse_limit_failure_is_projected_with_public_reason(self):
+        self.owner.execute(
+            """
+            UPDATE control_plane.evaluations
+               SET state = 'terminal_failure', verdict = 'failed',
+                   failure_class = 'unknown',
+                   public_error_code = 'safetensors_reuse_limit',
+                   verdict_summary = '{"error_code":"safetensors_reuse_limit"}'::jsonb,
+                   completed_at = %s
+             WHERE evaluation_id = %s
+            """,
+            (NOW, self.ids["evaluation"]),
+        )
+
+        entry = self.repository.project(now=NOW)["history"][0]
+        self.assertEqual(entry["verdict"], "error")
+        self.assertEqual(entry["error_code"], "safetensors_reuse_limit")
+        self.assertEqual(
+            entry["error_message"],
+            "This model checkpoint has reached the allowed evaluation reuse limit.",
+        )
+
     def test_upload_verification_failure_is_projected_as_hidden_history_error(self):
         registration = "a" * 64
         hotkey = "5" + "F" * 47

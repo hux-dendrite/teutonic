@@ -354,6 +354,8 @@ def classify_eval_error(exc: BaseException | str) -> tuple[bool, str]:
         text = f"{type(exc).__name__.lower()} {text}"
     if ("stuck cdn" in text) or ("prefetch" in text and "exceeded" in text):
         return False, "prefetch_exhausted"
+    if "safetensors_reuse_limit" in text:
+        return False, "safetensors_reuse_limit"
     if (
         "failed to download shard" in text
         or "s3 shard download failed" in text
