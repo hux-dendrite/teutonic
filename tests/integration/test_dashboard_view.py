@@ -221,6 +221,8 @@ class DashboardViewIntegrationTests(unittest.TestCase):
                 reign,
                 '{"mu_hat":0.01,"lcb":0.005,"delta_threshold":0.02,"avg_king_loss":2.1,'
                 '"avg_challenger_loss":2.09,"wall_time_s":42,"n_sequences":64,'
+                '"source_scores":{"fixture":{"n_sequences":64,"avg_king_loss":2.1,'
+                '"avg_challenger_loss":2.09,"mu_hat":0.01}},'
                 '"shards_used":[{"source":"fixture","refs":['
                 '"https://datasets.example/private/path/part-000.npy?secret=never"]}]}',
                 NOW,
@@ -264,6 +266,10 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             payload["history"][0]["shards_used"],
             [{"source": "fixture", "names": ["part-000.npy"]}],
         )
+        self.assertEqual(
+            payload["history"][0]["source_scores"],
+            [],
+        )
         self.assertEqual(payload["history"][0]["model_identity"], "hidden_until_promotion")
         self.assertIsNone(payload["history"][0]["challenger_repo"])
         self.assertEqual(payload["king"]["coldkey"], "5" + "G" * 47)
@@ -278,6 +284,35 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             "secret=never",
         ):
             self.assertNotIn(marker.lower(), text.lower())
+
+    def test_privileged_dashboard_process_projects_sanitized_source_scores(self):
+        self.repository.release_lock()
+        privileged = DashboardProjectionRepository(
+            self.owner,
+            netuid=306,
+            chain_generation="test",
+            competition="quasar",
+            chain_name="Teutonic Testnet",
+            seed_repo="owner/genesis",
+            seed_digest="hf:" + "b" * 40,
+            seed_repo_backend="hf",
+        )
+        try:
+            self.assertTrue(privileged.acquire_lock())
+            scores = privileged.project(now=NOW)["history"][0]["source_scores"]
+        finally:
+            privileged.release_lock()
+            self.assertTrue(self.repository.acquire_lock())
+        self.assertEqual(
+            scores,
+            [{
+                "source": "fixture",
+                "n_sequences": 64,
+                "avg_king_loss": 2.1,
+                "avg_challenger_loss": 2.09,
+                "mu_hat": 0.01,
+            }],
+        )
 
     def test_reuse_limit_failure_is_projected_with_public_reason(self):
         self.owner.execute(

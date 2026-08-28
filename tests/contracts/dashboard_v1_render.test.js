@@ -126,6 +126,18 @@ assert.deepStrictEqual(
         earlyStopLabel: "--"
     }
 );
+assert.deepStrictEqual(
+    dashboard.sourceScoresPresentation({
+        source_scores: [
+            { source: "finewebedu", n_sequences: 600, avg_king_loss: 2.1, avg_challenger_loss: 2.09, mu_hat: 0.01 },
+            { source: "broken", n_sequences: null, avg_king_loss: 1, avg_challenger_loss: 1, mu_hat: 0 }
+        ]
+    }),
+    {
+        count: 1,
+        rows: [{ source: "finewebedu", nSequences: 600, kingLoss: 2.1, challengerLoss: 2.09, muHat: 0.01 }]
+    }
+);
 
 assert.strictEqual(
     dashboard.taoMarketCapHotkeyUrl("5MinerHotkey"),

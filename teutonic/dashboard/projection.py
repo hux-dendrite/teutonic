@@ -102,6 +102,33 @@ def _shards_used(value: Any) -> list[dict[str, Any]]:
     return groups
 
 
+def _source_scores(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, Mapping):
+        return []
+    scores: list[dict[str, Any]] = []
+    for raw_source, raw_score in sorted(value.items(), key=lambda item: str(item[0])):
+        if not isinstance(raw_source, str) or not raw_source.strip():
+            continue
+        if not isinstance(raw_score, Mapping):
+            continue
+        n_sequences = _int(raw_score.get("n_sequences"))
+        avg_king_loss = _float(raw_score.get("avg_king_loss"))
+        avg_challenger_loss = _float(raw_score.get("avg_challenger_loss"))
+        mu_hat = _float(raw_score.get("mu_hat"))
+        if None in (n_sequences, avg_king_loss, avg_challenger_loss, mu_hat):
+            continue
+        scores.append(
+            {
+                "source": raw_source.strip()[:128],
+                "n_sequences": n_sequences,
+                "avg_king_loss": avg_king_loss,
+                "avg_challenger_loss": avg_challenger_loss,
+                "mu_hat": mu_hat,
+            }
+        )
+    return scores
+
+
 def _dataset_source(row: Mapping[str, Any]) -> dict[str, Any]:
     manifest = row.get("manifest_json")
     if not isinstance(manifest, Mapping):
@@ -228,6 +255,30 @@ class DashboardProjectionRepository:
                 + " ORDER BY completed_at ASC NULLS LAST, challenge_id ASC",
                 self._scope,
             ).fetchall()
+            source_score_rows = []
+            source_score_access = cursor.execute(
+                "SELECT has_table_privilege(current_user, "
+                "'control_plane.evaluations', 'SELECT') AS allowed"
+            ).fetchone()
+            if source_score_access and source_score_access["allowed"]:
+                source_score_rows = cursor.execute(
+                    """
+                    SELECT SUBSTRING(
+                               encode(public.digest(e.upload_id::text, 'sha256'), 'hex')
+                               FROM 1 FOR 16
+                           ) AS challenge_id,
+                           e.verdict_summary -> 'source_scores' AS source_scores
+                      FROM control_plane.evaluations e
+                      JOIN control_plane.competitions c
+                        ON c.competition_id = e.competition_id
+                     WHERE c.netuid = %s
+                       AND c.chain_generation = %s
+                       AND c.name = %s
+                       AND e.state IN ('completed', 'terminal_failure')
+                       AND jsonb_typeof(e.verdict_summary -> 'source_scores') = 'object'
+                    """,
+                    self._scope,
+                ).fetchall()
             upload_failures = cursor.execute(
                 _scope_sql("dashboard_upload_failures")
                 + " ORDER BY failed_at ASC, challenge_id ASC",
@@ -244,7 +295,14 @@ class DashboardProjectionRepository:
         service_status = self._services(services, current, weight_status, generated)
         king = self._king(king_rows[0]) if king_rows else None
         current_weight = _float(king_rows[0].get("current_weight")) if king_rows else None
-        history_entries = [self._history(row) for row in history]
+        source_scores_by_challenge = {
+            row["challenge_id"]: _source_scores(row["source_scores"])
+            for row in source_score_rows
+        }
+        history_entries = [
+            self._history(row, source_scores_by_challenge.get(row["challenge_id"], []))
+            for row in history
+        ]
         history_entries.extend(self._upload_failure(row) for row in upload_failures)
         history_entries.sort(key=lambda item: (item["timestamp"] or "", item["challenge_id"]))
         payload = {
@@ -397,7 +455,7 @@ class DashboardProjectionRepository:
             "delta_threshold": _float(row["delta_threshold"]),
         }
 
-    def _history(self, row) -> dict[str, Any]:
+    def _history(self, row, source_scores: list[dict[str, Any]]) -> dict[str, Any]:
         public = row["public_model_digest"] is not None
         failed = row["verdict"] == "failed"
         error_code = row["public_error_code"] if failed else None
@@ -419,6 +477,7 @@ class DashboardProjectionRepository:
             "n_sequences": _int(row["n_sequences"]),
             "early_stopped": _bool(row["early_stopped"]),
             "shards_used": _shards_used(row.get("shards_used")),
+            "source_scores": source_scores,
             "error_code": error_code,
             "error_message": PUBLIC_ERROR_MESSAGES.get(error_code) if error_code else None,
             "policy_version": row["policy_version"],
@@ -451,6 +510,7 @@ class DashboardProjectionRepository:
             "n_sequences": None,
             "early_stopped": False,
             "shards_used": [],
+            "source_scores": [],
             "error_code": error_code,
             "error_message": PUBLIC_ERROR_MESSAGES[error_code],
             "policy_version": None,

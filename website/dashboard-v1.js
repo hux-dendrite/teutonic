@@ -137,6 +137,27 @@
         };
     }
 
+    function sourceScoresPresentation(record) {
+        var rawScores = record && Array.isArray(record.source_scores) ? record.source_scores : [];
+        var rows = rawScores.map(function(raw) {
+            raw = raw || {};
+            var source = typeof raw.source === "string" ? raw.source.trim() : "";
+            var nSequences = raw.n_sequences == null ? null : finiteNumber(raw.n_sequences, null);
+            var kingLoss = raw.avg_king_loss == null ? null : finiteNumber(raw.avg_king_loss, null);
+            var challengerLoss = raw.avg_challenger_loss == null ? null : finiteNumber(raw.avg_challenger_loss, null);
+            var muHat = raw.mu_hat == null ? null : finiteNumber(raw.mu_hat, null);
+            if (!source || nSequences == null || kingLoss == null || challengerLoss == null || muHat == null) return null;
+            return {
+                source: source,
+                nSequences: Math.max(0, Math.floor(nSequences)),
+                kingLoss: kingLoss,
+                challengerLoss: challengerLoss,
+                muHat: muHat
+            };
+        }).filter(Boolean).sort(function(a, b) { return a.source.localeCompare(b.source); });
+        return { rows: rows, count: rows.length };
+    }
+
     function taoMarketCapHotkeyUrl(hotkey) {
         var address = String(hotkey || "").trim();
         if (!address) return "";
@@ -388,6 +409,7 @@
         historyPresentation: historyPresentation,
         verdictLabel: verdictLabel,
         evaluationHistoryMetricsPresentation: evaluationHistoryMetricsPresentation,
+        sourceScoresPresentation: sourceScoresPresentation,
         taoMarketCapHotkeyUrl: taoMarketCapHotkeyUrl,
         shardPresentation: shardPresentation,
         uploadFailurePresentation: uploadFailurePresentation,
