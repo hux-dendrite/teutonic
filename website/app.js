@@ -28,21 +28,24 @@
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
   function cell(row, value, className, title) { var td = document.createElement("td"); td.textContent = value == null ? "--" : value; if (className) td.className = className; if (title) td.title = title; row.appendChild(td); return td; }
   function hotkeyLink(hotkey, head, tail) { var value = String(hotkey || ""), href = TeutonicDashboardV1.taoMarketCapHotkeyUrl(value), node = document.createElement(href ? "a" : "span"); node.textContent = short(value, head, tail); node.title = value ? "Open " + value + " on Tao Market Cap" : ""; if (href) { node.href = href; node.target = "_blank"; node.rel = "noopener"; } return node; }
-  function hotkeyCell(row, hotkey) { var td = cell(row, "", "mono", hotkey); td.appendChild(hotkeyLink(hotkey, 12, 6)); return td; }
+  function hotkeyCell(row, hotkey) { var td = cell(row, "", "mono", hotkey); td.appendChild(hotkeyLink(hotkey, 4, 4)); return td; }
+  function coldkeyCell(row, coldkey) { var value = String(coldkey || ""), href = TeutonicDashboardV1.taoMarketCapColdkeyUrl(value), td = cell(row, "", "mono", value), node = document.createElement(href ? "a" : "span"); node.textContent = short(value, 4, 4); node.title = value ? "Open " + value + " on Tao Market Cap" : ""; if (href) { node.href = href; node.target = "_blank"; node.rel = "noopener"; } td.appendChild(node); return td; }
   function hotkeyText(id, prefix, hotkey, head, tail) { var node = el(id); clear(node); node.title = hotkey || ""; node.appendChild(document.createTextNode(prefix)); node.appendChild(hotkeyLink(hotkey, head, tail)); }
   function emptyRow(body, columns, message) { clear(body); var row = document.createElement("tr"); var td = cell(row, message, "empty-cell"); td.colSpan = columns; body.appendChild(row); }
   function historyDetailKey(item, index) { return String(item.challenge_id || item.upload_id || item.timestamp || "evaluation-" + index); }
   function historySourceScores(item) {
-    var view = TeutonicDashboardV1.sourceScoresPresentation(item), section = document.createElement("section"), heading = document.createElement("h3"), grid = document.createElement("div");
+    var view = TeutonicDashboardV1.sourceScoresPresentation(item), section = document.createElement("section"), heading = document.createElement("h3"), wrap = document.createElement("div"), table = document.createElement("table"), head = document.createElement("thead"), headRow = document.createElement("tr"), body = document.createElement("tbody");
     section.className = "history-source-scores"; heading.textContent = "LOSS BY DATASET · " + view.count; section.appendChild(heading);
     if (!view.count) { var empty = document.createElement("p"); empty.className = "history-shards-empty"; empty.textContent = "PER-DATASET LOSS UNAVAILABLE FOR THIS EVALUATION"; section.appendChild(empty); return section; }
-    grid.className = "history-source-score-grid";
-    view.rows.forEach(function(score) { var card = document.createElement("article"), head = document.createElement("div"), name = document.createElement("strong"), samples = document.createElement("span"), values = document.createElement("dl"); name.textContent = score.source; samples.textContent = number(score.nSequences) + " SAMPLES"; head.className = "history-source-score-head"; head.appendChild(name); head.appendChild(samples); [["KING LOSS", metric(score.kingLoss)], ["CHALL LOSS", metric(score.challengerLoss)], ["MU_HAT", metric(score.muHat)]].forEach(function(entry) { var group = document.createElement("div"), label = document.createElement("dt"), value = document.createElement("dd"); label.textContent = entry[0]; value.textContent = entry[1]; group.appendChild(label); group.appendChild(value); values.appendChild(group); }); card.appendChild(head); card.appendChild(values); grid.appendChild(card); });
-    section.appendChild(grid); return section;
+    wrap.className = "history-source-score-wrap"; table.className = "history-source-score-table";
+    ["DATASET", "KING LOSS", "CHALL LOSS", "Δ", "N"].forEach(function(label) { var th = document.createElement("th"); th.textContent = label; headRow.appendChild(th); });
+    head.appendChild(headRow); table.appendChild(head);
+    view.rows.forEach(function(score) { var row = document.createElement("tr"), delta = finite(score.muHat); cell(row, score.source, "history-source-name", score.source); cell(row, metric(score.kingLoss, 5), "mono"); cell(row, metric(score.challengerLoss, 5), "mono"); cell(row, delta == null ? "--" : (delta > 0 ? "+" : "") + delta.toFixed(5), "mono history-source-delta " + (delta > 0 ? "positive" : delta < 0 ? "negative" : "neutral")); cell(row, number(score.nSequences), "mono"); body.appendChild(row); });
+    table.appendChild(body); wrap.appendChild(table); section.appendChild(wrap); return section;
   }
   function historyShardRow(item, index, detailKey) {
     var view = TeutonicDashboardV1.shardPresentation(item), uploadFailure = TeutonicDashboardV1.uploadFailurePresentation(item), run = TeutonicDashboardV1.evaluationHistoryMetricsPresentation(item), decision = TeutonicDashboardV1.decisionPresentation(item), row = document.createElement("tr"), td = cell(row, "", "history-shards-cell"), panel = document.createElement("div"), reason = document.createElement("div"), reasonLabel = document.createElement("strong"), reasonCopy = document.createElement("div"), reasonSummary = document.createElement("p"), reasonDetail = document.createElement("span"), heading = document.createElement("strong"), detailType = uploadFailure ? "Upload failure" : "Evaluation";
-    row.className = "history-shards-row"; row.id = "history-shards-" + detailKey.replace(/[^a-zA-Z0-9_-]/g, "") + "-" + index; row.hidden = !historyExpandedDetails.has(detailKey); row.setAttribute("role", "region"); row.setAttribute("aria-label", detailType + " details for " + (item.challenge_id || item.upload_id || index + 1)); td.colSpan = 9; panel.className = "history-shards-panel";
+    row.className = "history-shards-row"; row.id = "history-shards-" + detailKey.replace(/[^a-zA-Z0-9_-]/g, "") + "-" + index; row.hidden = !historyExpandedDetails.has(detailKey); row.setAttribute("role", "region"); row.setAttribute("aria-label", detailType + " details for " + (item.challenge_id || item.upload_id || index + 1)); td.colSpan = 10; panel.className = "history-shards-panel";
     reason.className = "history-decision " + decision.kind; reasonLabel.textContent = decision.label; reasonSummary.textContent = decision.summary; reasonDetail.textContent = decision.detail; reasonCopy.appendChild(reasonSummary); if (decision.detail) reasonCopy.appendChild(reasonDetail); reason.appendChild(reasonLabel); reason.appendChild(reasonCopy); panel.appendChild(reason);
     if (uploadFailure) {
       var metadata = document.createElement("dl"); metadata.className = "history-error-metadata";
@@ -53,9 +56,9 @@
     [["SAMPLES", run.samples, run.samplesTitle], ["EARLY STOP", run.earlyStopLabel, "Whether evaluation stopped before all planned samples"]].forEach(function(entry) { var group = document.createElement("div"), label = document.createElement("dt"), value = document.createElement("dd"); label.textContent = entry[0]; value.textContent = entry[1]; value.title = entry[2]; group.appendChild(label); group.appendChild(value); evaluationMetadata.appendChild(group); });
     panel.appendChild(evaluationMetadata);
     panel.appendChild(historySourceScores(item));
-    heading.textContent = "SHARDS USED · " + view.count; panel.appendChild(heading);
+    heading.className = "history-shards-heading"; heading.textContent = "SHARDS USED · " + view.count; panel.appendChild(heading);
     if (!view.count) { var empty = document.createElement("p"); empty.className = "history-shards-empty"; empty.textContent = "SHARD DATA UNAVAILABLE FOR THIS EVALUATION"; panel.appendChild(empty); }
-    view.groups.forEach(function (group) { var section = document.createElement("section"), label = document.createElement("h3"), list = document.createElement("ul"); label.textContent = group.source + " · " + group.names.length; group.names.forEach(function (name) { var entry = document.createElement("li"), code = document.createElement("code"); code.textContent = name; entry.appendChild(code); list.appendChild(entry); }); section.appendChild(label); section.appendChild(list); panel.appendChild(section); });
+    view.groups.forEach(function (group) { var section = document.createElement("section"), label = document.createElement("h3"), list = document.createElement("ul"); section.className = "history-shard-group"; label.textContent = group.source + " · " + group.names.length; group.names.forEach(function (name) { var entry = document.createElement("li"), code = document.createElement("code"); code.textContent = name; entry.appendChild(code); list.appendChild(entry); }); section.appendChild(label); section.appendChild(list); panel.appendChild(section); });
     td.appendChild(panel); return row;
   }
   function makeHistoryRowExpandable(row, details, item, detailKey) {
@@ -200,8 +203,8 @@
     card.dataset.active = "true"; hotkeyText("eval-title", "HOTKEY ", ev.hotkey, 16, 8); text("eval-meta", "UID " + ev.uid + " · CHALLENGE " + ev.challenge_id + " · " + number(ev.elapsed_seconds) + "S ELAPSED"); text("eval-stage", String(ev.stage || "PROCESSING").replaceAll("_", " ")); text("eval-percent", pct.toFixed(0) + "% · " + number(ev.progress) + "/" + number(ev.total)); el("eval-progress").style.width = pct + "%";
   }
   function renderQueue(d) {
-    var body = el("queue-body"), rows = d.queue || []; text("queue-count", rows.length + (rows.length === 1 ? " MODEL" : " MODELS")); if (!rows.length) return emptyRow(body, 7, "QUEUE EMPTY — VALIDATOR READY"); clear(body);
-    rows.forEach(function (item, index) { var tr = document.createElement("tr"); cell(tr, "#" + (item.queue_position || index + 1)); cell(tr, item.uid); cell(tr, item.challenge_id, "mono"); hotkeyCell(tr, item.hotkey); cell(tr, number(item.block)); cell(tr, String(item.state || "queued").toUpperCase()); cell(tr, date(item.submitted_at)); body.appendChild(tr); });
+    var body = el("queue-body"), rows = d.queue || []; text("queue-count", rows.length + (rows.length === 1 ? " MODEL" : " MODELS")); if (!rows.length) return emptyRow(body, 8, "QUEUE EMPTY — VALIDATOR READY"); clear(body);
+    rows.forEach(function (item, index) { var tr = document.createElement("tr"); cell(tr, "#" + (item.queue_position || index + 1)); cell(tr, item.uid); cell(tr, item.challenge_id, "mono"); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); cell(tr, number(item.block)); cell(tr, String(item.state || "queued").toUpperCase()); cell(tr, date(item.submitted_at)); body.appendChild(tr); });
   }
   function renderHistory(d) {
     var body = el("history-body"), view = TeutonicDashboardV1.historyPresentation(d.history || [], historyShowErrors), rows = view.rows.slice().sort(function (a, b) { return new Date(b.timestamp || 0) - new Date(a.timestamp || 0); });
@@ -209,14 +212,14 @@
     if (!historyShowErrors && view.errorCount) countLabel += " · " + view.errorCount + (view.errorCount === 1 ? " ERROR HIDDEN" : " ERRORS HIDDEN");
     text("history-count", countLabel);
     var toggle = el("history-errors-toggle"); toggle.textContent = historyShowErrors ? "HIDE ERRORS" : "SHOW ERRORS"; toggle.setAttribute("aria-pressed", historyShowErrors ? "true" : "false");
-    if (!rows.length) return emptyRow(body, 9, view.errorCount && !historyShowErrors ? "NO NON-ERROR EVALUATIONS — ERRORS HIDDEN" : "NO EVALUATIONS YET"); clear(body);
-    rows.forEach(function (item, index) { var detailKey = historyDetailKey(item, index), tr = document.createElement("tr"), details = historyShardRow(item, index, detailKey); cell(tr, item.uid); cell(tr, identity(item), "", item.challenger_repo || item.challenge_id); hotkeyCell(tr, item.hotkey); cell(tr, TeutonicDashboardV1.verdictLabel(item.verdict), "verdict " + (item.verdict || ""), item.error_message); cell(tr, metric(item.mu_hat)); cell(tr, metric(item.lcb)); cell(tr, metric(item.avg_king_loss, 4)); cell(tr, metric(item.avg_challenger_loss, 4)); var when = age(item.timestamp) + (finite(item.wall_time_s) == null ? "" : " (" + metric(item.wall_time_s, 0) + "S)"); cell(tr, when, "", date(item.timestamp)); makeHistoryRowExpandable(tr, details, item, detailKey); body.appendChild(tr); body.appendChild(details); });
+    if (!rows.length) return emptyRow(body, 10, view.errorCount && !historyShowErrors ? "NO NON-ERROR EVALUATIONS — ERRORS HIDDEN" : "NO EVALUATIONS YET"); clear(body);
+    rows.forEach(function (item, index) { var detailKey = historyDetailKey(item, index), tr = document.createElement("tr"), details = historyShardRow(item, index, detailKey); cell(tr, item.uid); cell(tr, identity(item), "", item.challenger_repo || item.challenge_id); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); cell(tr, TeutonicDashboardV1.verdictLabel(item.verdict), "verdict " + (item.verdict || ""), item.error_message); cell(tr, metric(item.mu_hat)); cell(tr, metric(item.lcb)); cell(tr, metric(item.avg_king_loss, 4)); cell(tr, metric(item.avg_challenger_loss, 4)); var when = age(item.timestamp) + (finite(item.wall_time_s) == null ? "" : " (" + metric(item.wall_time_s, 0) + "S)"); cell(tr, when, "", date(item.timestamp)); makeHistoryRowExpandable(tr, details, item, detailKey); body.appendChild(tr); body.appendChild(details); });
   }
   function renderReigns(d) {
     var body = el("reigns-body"), allRows = (d.king_chain || []).slice().sort(function (a, b) { return (b.reign_number || 0) - (a.reign_number || 0); }), seenHotkeys = {}, rows = [];
     allRows.forEach(function (item) { var key = item.hotkey || "reign:" + item.reign_number; if (rows.length < 5 && !seenHotkeys[key]) { seenHotkeys[key] = true; rows.push(item); } });
-    text("reign-count", rows.length + " / 5 KINGS · " + allRows.length + " TOTAL REIGNS"); if (!rows.length) return emptyRow(body, 9, "NO REIGNS YET"); clear(body);
-    rows.forEach(function (item, index) { var tr = document.createElement("tr"); cell(tr, index + 1); cell(tr, "#" + number(item.reign_number)); cell(tr, item.uid); hotkeyCell(tr, item.hotkey); var modelCell = cell(tr, identity(item), "", item.model_digest); if (item.model_reference) { var link = document.createElement("a"); link.href = new URL(item.model_reference + "manifest.json", MODEL_STORAGE_BASE).href; link.target = "_blank"; link.rel = "noopener"; link.textContent = identity(item); link.title = "Open model manifest"; modelCell.textContent = ""; modelCell.appendChild(link); } cell(tr, percent(item.weight)); cell(tr, metric(item.alpha_per_hour, 3)); cell(tr, usd(item.usd_per_hour)); cell(tr, date(item.crowned_at)); body.appendChild(tr); });
+    text("reign-count", rows.length + " / 5 KINGS · " + allRows.length + " TOTAL REIGNS"); if (!rows.length) return emptyRow(body, 10, "NO REIGNS YET"); clear(body);
+    rows.forEach(function (item, index) { var tr = document.createElement("tr"); cell(tr, index + 1); cell(tr, "#" + number(item.reign_number)); cell(tr, item.uid); hotkeyCell(tr, item.hotkey); coldkeyCell(tr, item.coldkey); var modelCell = cell(tr, identity(item), "", item.model_digest); if (item.model_reference) { var link = document.createElement("a"); link.href = new URL(item.model_reference + "manifest.json", MODEL_STORAGE_BASE).href; link.target = "_blank"; link.rel = "noopener"; link.textContent = identity(item); link.title = "Open model manifest"; modelCell.textContent = ""; modelCell.appendChild(link); } cell(tr, percent(item.weight)); cell(tr, metric(item.alpha_per_hour, 3)); cell(tr, usd(item.usd_per_hour)); cell(tr, date(item.crowned_at)); body.appendChild(tr); });
   }
   function renderWeightStatus(d) {
     var weight = d.weight_status || {}; text("weight-state", String(weight.state || weight.latest_attempt_state || "NOT SCHEDULED").toUpperCase()); text("weight-block", number(weight.latest_finalized_block || weight.last_attempted_block)); text("weight-next", number(weight.next_due_block)); text("weight-finalized", date(weight.finalized_at));
@@ -231,7 +234,8 @@
     el("chart-empty").hidden = points.length > 0;
     if (!points.length) { svg.innerHTML = ""; return; }
 
-    var W = 1000, H = 280, left = 55, right = 15, top = 15, bottom = 30;
+    var bounds = svg.getBoundingClientRect();
+    var W = Math.max(320, Math.round(bounds.width || 1000)), H = Math.max(180, Math.round(bounds.height || 280)), left = 48, right = 8, top = 16, bottom = 42, plotBottom = H - bottom;
     var kingPoints = [];
     var rawChallengers = points.map(function (p) { return finite(p.avg_challenger_loss); });
     points.forEach(function (p, i) { if (p.accepted && p.publication_disposition === "winner" && p.model_identity === "public") kingPoints.push({ index: i, loss: finite(p.avg_challenger_loss) }); });
@@ -245,9 +249,13 @@
     function y(v) { return top + (max - v) / (max - min) * (H - top - bottom); }
     function challengerLine(series) { return series.map(function (value, i) { return x(i).toFixed(1) + "," + y(value).toFixed(1); }).join(" "); }
     function kingLine(series) { return series.map(function (value, i) { return x(kingPoints[i].index).toFixed(1) + "," + y(value).toFixed(1); }).join(" "); }
-
     var styles = getComputedStyle(document.documentElement), ink = styles.getPropertyValue("--ink").trim(), muted = styles.getPropertyValue("--muted").trim(), paper = styles.getPropertyValue("--paper").trim(), markup = "";
-    for (var tick = 0; tick <= 4; tick++) { var value = min + (max - min) * tick / 4, yy = y(value); markup += '<line x1="' + left + '" y1="' + yy + '" x2="' + (W - right) + '" y2="' + yy + '" stroke="' + muted + '" opacity=".22" stroke-dasharray="3 6"/><text x="' + (left - 8) + '" y="' + (yy + 3) + '" fill="' + muted + '" font-family="Space Mono" font-size="9" text-anchor="end">' + value.toFixed(4) + '</text>'; }
+    var yDigits = max - min < .01 ? 4 : max - min < .1 ? 3 : 2;
+    for (var tick = 0; tick <= 5; tick++) { var value = min + (max - min) * tick / 5, yy = y(value); markup += '<line x1="' + left + '" y1="' + yy + '" x2="' + (W - right) + '" y2="' + yy + '" stroke="' + muted + '" opacity=".24" stroke-dasharray="3 5"/><line x1="' + (left - 4) + '" y1="' + yy + '" x2="' + left + '" y2="' + yy + '" stroke="' + ink + '"/><text x="' + (left - 9) + '" y="' + (yy + 3) + '" fill="' + muted + '" font-family="Space Mono" font-size="9" text-anchor="end">' + value.toFixed(yDigits) + '</text>'; }
+    var xTickCount = Math.min(7, points.length), xTicks = [];
+    if (xTickCount === 1) xTicks.push(0); else for (var xTick = 0; xTick < xTickCount; xTick++) { var xIndex = Math.round(xTick * (points.length - 1) / (xTickCount - 1)); if (xTicks.indexOf(xIndex) === -1) xTicks.push(xIndex); }
+    xTicks.forEach(function(index) { var xx = x(index); markup += '<line x1="' + xx + '" y1="' + top + '" x2="' + xx + '" y2="' + plotBottom + '" stroke="' + muted + '" opacity=".18" stroke-dasharray="2 6"/><line x1="' + xx + '" y1="' + plotBottom + '" x2="' + xx + '" y2="' + (plotBottom + 4) + '" stroke="' + ink + '"/><text x="' + xx + '" y="' + (plotBottom + 17) + '" fill="' + muted + '" font-family="Space Mono" font-size="9" text-anchor="middle">' + (index + 1) + '</text>'; });
+    markup += '<line x1="' + left + '" y1="' + top + '" x2="' + left + '" y2="' + plotBottom + '" stroke="' + ink + '" opacity=".8"/><line x1="' + left + '" y1="' + plotBottom + '" x2="' + (W - right) + '" y2="' + plotBottom + '" stroke="' + ink + '" opacity=".8"/>';
     if (amount > 0 && points.length > 1) markup += '<polyline points="' + challengerLine(rawChallengers) + '" fill="none" stroke="' + muted + '" stroke-width="1" opacity=".24" stroke-dasharray="2 5"/>';
     if (amount > 0 && kingPoints.length > 1) markup += '<polyline points="' + kingLine(rawKings) + '" fill="none" stroke="' + ink + '" stroke-width="1" opacity=".2" stroke-dasharray="2 5"/>';
     if (points.length > 1) markup += '<polyline points="' + challengerLine(challengers) + '" fill="none" stroke="' + muted + '" stroke-width="1.5" stroke-dasharray="6 5"/>';
@@ -268,6 +276,8 @@
   el("smooth-mode-toggle").addEventListener("click", function () { smoothMode = smoothMode === "lowess" ? "normal" : "lowess"; localStorage.setItem("smoothMode", smoothMode); updateSmoothControls(); if (lastPayload) renderChart(lastPayload); });
   el("history-errors-toggle").addEventListener("click", function () { historyShowErrors = !historyShowErrors; if (lastPayload) renderHistory(lastPayload); });
   el("benchmark-history-toggle").addEventListener("click", function () { benchmarkHistoryVisible = !benchmarkHistoryVisible; if (benchmarkPayload) renderBenchmarks(benchmarkPayload); });
+  var chartResizeFrame = null;
+  window.addEventListener("resize", function () { if (chartResizeFrame != null) cancelAnimationFrame(chartResizeFrame); chartResizeFrame = requestAnimationFrame(function () { chartResizeFrame = null; if (lastPayload) renderChart(lastPayload); }); });
   poll(); setInterval(poll, POLL_MS);
   loadDatasetManifest(); setInterval(loadDatasetManifest, DATASET_POLL_MS);
   loadBenchmarks(); setInterval(loadBenchmarks, BENCHMARK_POLL_MS);

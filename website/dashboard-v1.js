@@ -164,6 +164,12 @@
         return "https://taomarketcap.com/hotkey/" + encodeURIComponent(address) + "/metagraph";
     }
 
+    function taoMarketCapColdkeyUrl(coldkey) {
+        var address = String(coldkey || "").trim();
+        if (!address) return "";
+        return "https://taomarketcap.com/coldkey/" + encodeURIComponent(address);
+    }
+
     function shardPresentation(record) {
         var rawGroups = record && Array.isArray(record.shards_used) ? record.shards_used : [];
         var groups = rawGroups.map(function(group) {
@@ -411,6 +417,7 @@
         evaluationHistoryMetricsPresentation: evaluationHistoryMetricsPresentation,
         sourceScoresPresentation: sourceScoresPresentation,
         taoMarketCapHotkeyUrl: taoMarketCapHotkeyUrl,
+        taoMarketCapColdkeyUrl: taoMarketCapColdkeyUrl,
         shardPresentation: shardPresentation,
         uploadFailurePresentation: uploadFailurePresentation,
         decisionPresentation: decisionPresentation,

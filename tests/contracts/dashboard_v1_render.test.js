@@ -148,6 +148,15 @@ assert.strictEqual(
     "https://taomarketcap.com/hotkey/5Miner%20Hotkey/metagraph"
 );
 assert.strictEqual(dashboard.taoMarketCapHotkeyUrl(""), "");
+assert.strictEqual(
+    dashboard.taoMarketCapColdkeyUrl("5Ek5KoE56Y5vj4gDMLARUS6UmKhPZBJBS7z2aBkQWZtr57gG"),
+    "https://taomarketcap.com/coldkey/5Ek5KoE56Y5vj4gDMLARUS6UmKhPZBJBS7z2aBkQWZtr57gG"
+);
+assert.strictEqual(
+    dashboard.taoMarketCapColdkeyUrl("5Cold Key"),
+    "https://taomarketcap.com/coldkey/5Cold%20Key"
+);
+assert.strictEqual(dashboard.taoMarketCapColdkeyUrl(""), "");
 
 const shards = dashboard.shardPresentation({
     shards_used: [
