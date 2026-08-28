@@ -97,6 +97,9 @@ const hiddenErrors = dashboard.historyPresentation(historyRows, false);
 assert.deepStrictEqual(hiddenErrors.rows.map((row) => row.challenge_id), ["accepted", "rejected"]);
 assert.strictEqual(hiddenErrors.errorCount, 1);
 assert.strictEqual(dashboard.historyPresentation(historyRows, true).rows.length, 3);
+assert.strictEqual(dashboard.verdictLabel("accepted"), "CHALLENGER");
+assert.strictEqual(dashboard.verdictLabel("rejected"), "KING");
+assert.strictEqual(dashboard.verdictLabel("error"), "ERROR");
 assert.deepStrictEqual(
     dashboard.evaluationHistoryMetricsPresentation({
         n_sequences_evaluated: 600,

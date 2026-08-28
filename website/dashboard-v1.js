@@ -109,6 +109,13 @@
         };
     }
 
+    function verdictLabel(verdict) {
+        var value = String(verdict || "").toLowerCase();
+        if (value === "accepted") return "CHALLENGER";
+        if (value === "rejected") return "KING";
+        return value ? value.toUpperCase() : "--";
+    }
+
     function evaluationHistoryMetricsPresentation(record) {
         record = record || {};
         function optionalCount(value) {
@@ -379,6 +386,7 @@
         presentation: presentation,
         currentEvaluationPresentation: currentEvaluationPresentation,
         historyPresentation: historyPresentation,
+        verdictLabel: verdictLabel,
         evaluationHistoryMetricsPresentation: evaluationHistoryMetricsPresentation,
         taoMarketCapHotkeyUrl: taoMarketCapHotkeyUrl,
         shardPresentation: shardPresentation,
