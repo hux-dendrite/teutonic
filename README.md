@@ -115,7 +115,9 @@ teutonic-miner ready --hotkey "$HOTKEY_NAME"
 `ready` is the irreversible submission point. Once it finalizes, that
 hotkey's one submission is consumed, its R2 upload authority is revoked, the
 public mailbox credential is removed, and validator processing continues
-asynchronously.
+asynchronously. If evaluation rejects the checkpoint because it has reached
+the allowed evaluation reuse limit, the access controller automatically
+deletes that checkpoint's private R2 prefix.
 
 For an already saved hotkey, the complete check, registration validation,
 authorization, upload, and ready flow can be run as one command:

@@ -15,6 +15,7 @@ from .crypto import verify_hotkey_signature
 
 
 CONTROLLER_ADVISORY_LOCK_ID = 8_451_120_703_004_001
+EVALUATION_REUSE_LIMIT_ERROR_CODE = "safetensors_reuse_limit"
 
 
 class ControllerLockUnavailable(RuntimeError):
@@ -775,6 +776,32 @@ class AccessControllerRepository:
                     payload=payload,
                 )
         return True
+
+    def enqueue_reuse_limit_cleanups(self) -> int:
+        """Durably schedule R2 cleanup for checkpoints rejected by the reuse policy."""
+        self._require_lock()
+        rows = self.connection.execute(
+            """
+            INSERT INTO control_plane.controller_jobs (
+                registration_id, upload_id, operation, idempotency_key,
+                state, next_retry_at, payload
+            )
+            SELECT upload.registration_id, upload.upload_id, 'cleanup_upload',
+                   'cleanup-upload-after-reuse-limit:' || upload.upload_id::text,
+                   'pending', NULL,
+                   jsonb_build_object('reason', %s::text)
+              FROM control_plane.uploads upload
+             WHERE upload.state = 'evaluation_failed'
+               AND upload.failure_code = %s
+            ON CONFLICT (idempotency_key) DO NOTHING
+            RETURNING controller_job_id
+            """,
+            (
+                EVALUATION_REUSE_LIMIT_ERROR_CODE,
+                EVALUATION_REUSE_LIMIT_ERROR_CODE,
+            ),
+        ).fetchall()
+        return len(rows)
 
     def accept_ready_signal(self, signal: ReadySignal, *, now: datetime) -> str:
         self._require_lock()

@@ -218,6 +218,24 @@ class AccessControllerContractTests(unittest.TestCase):
         secret_cipher = SecretCipher(b"x" * 32)
         self.assertEqual(secret_cipher.decrypt(secret_cipher.encrypt("parent-secret")), "parent-secret")
 
+    def test_model_cleanup_raises_when_r2_reports_delete_errors(self) -> None:
+        s3 = FakeS3()
+        prefix = f"models/registrations/{self.registration}/"
+        s3.put_object(Bucket="private", Key=f"{prefix}model.bin", Body=b"model")
+
+        def fail_delete(**_kwargs):
+            return {"Errors": [{"Key": f"{prefix}model.bin", "Code": "InternalError"}]}
+
+        s3.delete_objects = fail_delete
+        controller = R2UploadController(
+            s3,
+            private_model_bucket="private",
+            genesis_contract_files={"config.json": "b" * 64},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "R2 failed to delete"):
+            controller.cleanup_model_prefix(prefix)
+
     def test_mailbox_deletion_is_exact_and_idempotent(self) -> None:
         s3 = FakeS3()
         store = MailboxStore(s3, bucket="dashboard")

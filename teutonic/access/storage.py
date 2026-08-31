@@ -424,11 +424,13 @@ class R2UploadController:
             return 0
         keys = sorted(objects)
         for offset in range(0, len(keys), 1000):
-            self.s3.delete_objects(
+            response = self.s3.delete_objects(
                 Bucket=self.private_model_bucket,
                 Delete={
                     "Objects": [{"Key": key} for key in keys[offset : offset + 1000]],
                     "Quiet": True,
                 },
             )
+            if response.get("Errors"):
+                raise RuntimeError("R2 failed to delete one or more model objects")
         return len(keys)

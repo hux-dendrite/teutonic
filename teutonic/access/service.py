@@ -230,6 +230,10 @@ class AccessControllerJobRunner:
                 )
         return revoked
 
+    def schedule_reuse_limit_cleanups(self) -> int:
+        """Schedule deletion of model prefixes that exhausted evaluation reuse."""
+        return self.repository.enqueue_reuse_limit_cleanups()
+
     def _dispatch(self, job: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         operation = job["operation"]
         if operation == "create_parent_token":

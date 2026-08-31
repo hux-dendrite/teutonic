@@ -36,6 +36,7 @@ log = logging.getLogger("teutonic.access-controller")
 stopping = False
 STATUS_LOG_SECONDS = 60.0
 UPLOAD_QUOTA_SCAN_SECONDS = 5.0
+FAILED_MODEL_CLEANUP_SCAN_SECONDS = 5.0
 
 
 def required(name: str) -> str:
@@ -174,6 +175,7 @@ def main() -> int:
         )
         next_chain_scan = 0.0
         next_upload_quota_scan = 0.0
+        next_failed_model_cleanup_scan = 0.0
         next_status_log = 0.0
         mailboxes_reconciled = False
         while not stopping:
@@ -199,17 +201,31 @@ def main() -> int:
                         time.monotonic() + UPLOAD_QUOTA_SCAN_SECONDS
                     )
                     quota_revocations = runner.enforce_upload_quotas()
+                reuse_limit_cleanups = 0
+                if time.monotonic() >= next_failed_model_cleanup_scan:
+                    next_failed_model_cleanup_scan = (
+                        time.monotonic() + FAILED_MODEL_CLEANUP_SCAN_SECONDS
+                    )
+                    reuse_limit_cleanups = runner.schedule_reuse_limit_cleanups()
                 recovered = repository.recover_expired_jobs(
                     now=datetime.now(timezone.utc)
                 )
                 processed = runner.run_until_idle(maximum_jobs=1000)
-                if scanned or accepted or quota_revocations or recovered or processed:
+                if (
+                    scanned
+                    or accepted
+                    or quota_revocations
+                    or reuse_limit_cleanups
+                    or recovered
+                    or processed
+                ):
                     log.info(
                         "controller chain_blocks=%d signals=%d quota_revocations=%d "
-                        "jobs_recovered=%d jobs_processed=%d",
+                        "reuse_limit_cleanups=%d jobs_recovered=%d jobs_processed=%d",
                         scanned,
                         accepted,
                         quota_revocations,
+                        reuse_limit_cleanups,
                         recovered,
                         processed,
                     )

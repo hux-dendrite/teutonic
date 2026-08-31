@@ -490,6 +490,70 @@ class AccessControllerIntegrationTests(unittest.TestCase):
         self.assertEqual(self.s3.multipart, [])
         self.assertEqual(self.runner.enforce_upload_quotas(), 0)
 
+    def test_reuse_limit_failure_queues_idempotent_private_model_cleanup(self) -> None:
+        registration = self.activate()
+        prefix = f"models/registrations/{registration}/"
+        model_key = f"{prefix}model.safetensors"
+        self.s3.put_object(Bucket="private", Key=model_key, Body=b"reused-model")
+        manifest_sha256 = "b" * 64
+        upload_id = self.connection.execute(
+            """
+            INSERT INTO control_plane.uploads (
+                registration_id, chain_generation, signalling_hotkey,
+                ready_payload, ready_finalized_block, ready_extrinsic_index,
+                ready_event_index, manifest_sha256, state, failure_code, ready_at
+            ) VALUES (
+                %s, 'phase4-chain', %s, %s, 101, 0, 0, %s,
+                'evaluation_failed', 'evaluation_failed', %s
+            )
+            RETURNING upload_id
+            """,
+            (
+                registration,
+                self.hotkey,
+                f"r2ready:v1|{registration}|{manifest_sha256}",
+                manifest_sha256,
+                NOW,
+            ),
+        ).fetchone()[0]
+
+        self.assertEqual(self.runner.schedule_reuse_limit_cleanups(), 0)
+        self.connection.execute(
+            """
+            UPDATE control_plane.uploads
+               SET failure_code = 'safetensors_reuse_limit'
+             WHERE upload_id = %s
+            """,
+            (upload_id,),
+        )
+        self.assertEqual(self.runner.schedule_reuse_limit_cleanups(), 1)
+        self.assertEqual(self.runner.schedule_reuse_limit_cleanups(), 0)
+        cleanup = self.connection.execute(
+            """
+            SELECT operation, state, payload ->> 'reason'
+              FROM control_plane.controller_jobs
+             WHERE idempotency_key = %s
+            """,
+            (f"cleanup-upload-after-reuse-limit:{upload_id}",),
+        ).fetchone()
+        self.assertEqual(
+            cleanup,
+            ("cleanup_upload", "pending", "safetensors_reuse_limit"),
+        )
+
+        self.runner.run_until_idle(propagate=True)
+
+        self.assertNotIn(("private", model_key), self.s3.objects)
+        completed = self.connection.execute(
+            """
+            SELECT state, (result ->> 'deleted')::integer
+              FROM control_plane.controller_jobs
+             WHERE idempotency_key = %s
+            """,
+            (f"cleanup-upload-after-reuse-limit:{upload_id}",),
+        ).fetchone()
+        self.assertEqual(completed, ("completed", 1))
+
     def test_advisory_lock_allows_only_one_controller(self) -> None:
         with psycopg.connect(DATABASE_URL, autocommit=True) as second_connection:
             contender = AccessControllerRepository(
