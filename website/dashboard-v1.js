@@ -14,7 +14,9 @@
         { name: "GSM8K", fewshot: 4 },
         { name: "PIQA", fewshot: 0 },
         { name: "ARC-C", fewshot: 0 },
-        { name: "ARC-E", fewshot: 0 }
+        { name: "ARC-E", fewshot: 0 },
+        { name: "GPQA Diamond", fewshot: 0 },
+        { name: "MATH-500", fewshot: 4 }
     ];
 
     function walkFinite(value, path) {
