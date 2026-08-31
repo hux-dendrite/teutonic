@@ -110,7 +110,8 @@
     function x(index) { return points.length === 1 ? W / 2 : left + index / (points.length - 1) * (W - left - right); }
     function y(value) { return top + (max - value) / (max - min) * (H - top - bottom); }
     if (points.length > 1) svg.appendChild(node("polyline", { points: points.map(function(point, index) { return x(index).toFixed(1) + "," + y(point.score).toFixed(1); }).join(" "), class: "bench-sparkline-line" }));
-    points.forEach(function(point, index) { var dot = node("circle", { cx: x(index).toFixed(1), cy: y(point.score).toFixed(1), r: point.current ? 3.5 : 2.7, class: point.current ? "bench-sparkline-point current" : "bench-sparkline-point" }), title = node("title"); title.textContent = "REIGN #" + point.reignNumber + " · " + percent(point.score); dot.appendChild(title); svg.appendChild(dot); });
+    var pointRadius = TeutonicDashboardV1.graphPointRadius(points.length, W - left - right, 1, 2.7);
+    points.forEach(function(point, index) { var radius = point.current ? Math.min(3.5, pointRadius + 0.8) : pointRadius, dot = node("circle", { cx: x(index).toFixed(1), cy: y(point.score).toFixed(1), r: radius.toFixed(2), class: point.current ? "bench-sparkline-point current" : "bench-sparkline-point" }), title = node("title"); title.textContent = "REIGN #" + point.reignNumber + " · " + percent(point.score); dot.appendChild(title); svg.appendChild(dot); });
     var first = node("text", { x: left, y: H - 3, class: "bench-sparkline-label", "text-anchor": "start" }); first.textContent = "R" + points[0].reignNumber; svg.appendChild(first);
     if (points.length > 1) { var last = node("text", { x: W - right, y: H - 3, class: "bench-sparkline-label", "text-anchor": "end" }); last.textContent = "R" + points[points.length - 1].reignNumber; svg.appendChild(last); }
     return svg;
@@ -260,8 +261,9 @@
     if (amount > 0 && kingPoints.length > 1) markup += '<polyline points="' + kingLine(rawKings) + '" fill="none" stroke="' + ink + '" stroke-width="1" opacity=".2" stroke-dasharray="2 5"/>';
     if (points.length > 1) markup += '<polyline points="' + challengerLine(challengers) + '" fill="none" stroke="' + muted + '" stroke-width="1.5" stroke-dasharray="6 5"/>';
     if (kingPoints.length > 1) markup += '<polyline points="' + kingLine(kings) + '" fill="none" stroke="' + ink + '" stroke-width="2"/>';
-    challengers.forEach(function (value, i) { markup += '<circle cx="' + x(i) + '" cy="' + y(value) + '" r="2.5" fill="' + paper + '" stroke="' + muted + '"/>'; });
-    kings.forEach(function (value, i) { markup += '<circle cx="' + x(kingPoints[i].index) + '" cy="' + y(value) + '" r="3" fill="' + ink + '"/>'; });
+    var pointRadius = TeutonicDashboardV1.graphPointRadius(points.length, W - left - right, 0.75, 2.5), kingPointRadius = Math.min(3, pointRadius + 0.5);
+    challengers.forEach(function (value, i) { markup += '<circle cx="' + x(i) + '" cy="' + y(value) + '" r="' + pointRadius.toFixed(2) + '" fill="' + paper + '" stroke="' + muted + '"/>'; });
+    kings.forEach(function (value, i) { markup += '<circle cx="' + x(kingPoints[i].index) + '" cy="' + y(value) + '" r="' + kingPointRadius.toFixed(2) + '" fill="' + ink + '"/>'; });
     svg.setAttribute("viewBox", "0 0 " + W + " " + H); svg.innerHTML = markup;
   }
   function render(d) { TeutonicDashboardV1.validate(d); lastPayload = d; renderHeader(d); renderReigns(d); renderEvaluation(d); renderChart(d); renderQueue(d); renderHistory(d); renderWeightStatus(d); text("last-refresh", "LAST REFRESH " + new Date().toLocaleTimeString()); el("error-banner").hidden = true; }

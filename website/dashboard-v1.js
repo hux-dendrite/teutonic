@@ -77,6 +77,15 @@
         return Number.isFinite(number) ? number : fallback;
     }
 
+    function graphPointRadius(pointCount, plotWidth, minimum, maximum) {
+        var count = Math.max(1, Math.floor(finiteNumber(pointCount, 1)));
+        var width = Math.max(1, finiteNumber(plotWidth, 1));
+        var minRadius = Math.max(0.5, finiteNumber(minimum, 0.75));
+        var maxRadius = Math.max(minRadius, finiteNumber(maximum, 2.5));
+        if (count <= 1) return maxRadius;
+        return Math.max(minRadius, Math.min(maxRadius, width / (count - 1) * 0.28));
+    }
+
     function currentEvaluationPresentation(record) {
         record = record || {};
         function optionalNumber(value) {
@@ -424,6 +433,7 @@
         uploadFailurePresentation: uploadFailurePresentation,
         decisionPresentation: decisionPresentation,
         datasetPresentation: datasetPresentation,
+        graphPointRadius: graphPointRadius,
         benchmarkPresentation: benchmarkPresentation
     };
 });
