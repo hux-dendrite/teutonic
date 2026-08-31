@@ -433,6 +433,32 @@ CREATE VIEW control_plane.dashboard_dataset_manifests WITH (security_barrier='tr
 ALTER VIEW control_plane.dashboard_dataset_manifests OWNER TO teutonic_schema_owner;
 
 --
+-- Name: dashboard_dataset_versions; Type: VIEW; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+CREATE VIEW control_plane.dashboard_dataset_versions WITH (security_barrier='true') AS
+ SELECT competition.netuid,
+    competition.chain_generation,
+    competition.name AS competition,
+    config.config_version,
+    config.dataset_label,
+    config.eval_n,
+    config.delta_threshold,
+    config.created_at AS config_created_at,
+    manifest."position",
+    manifest.name,
+    manifest.manifest_url,
+    manifest.manifest_sha256,
+    manifest.sample_proportion,
+    manifest.manifest_json
+   FROM ((control_plane.competitions competition
+     JOIN control_plane.evaluation_configs config ON (config.competition_id = competition.competition_id))
+     JOIN control_plane.dataset_manifests manifest ON (manifest.evaluation_config_id = config.evaluation_config_id));
+
+
+ALTER VIEW control_plane.dashboard_dataset_versions OWNER TO teutonic_schema_owner;
+
+--
 -- Name: evaluations; Type: TABLE; Schema: control_plane; Owner: teutonic_schema_owner
 --
 
@@ -2236,6 +2262,13 @@ GRANT SELECT ON TABLE control_plane.dashboard_contract TO teutonic_dashboard_vie
 --
 
 GRANT SELECT ON TABLE control_plane.dashboard_dataset_manifests TO teutonic_dashboard_view;
+
+
+--
+-- Name: TABLE dashboard_dataset_versions; Type: ACL; Schema: control_plane; Owner: teutonic_schema_owner
+--
+
+GRANT SELECT ON TABLE control_plane.dashboard_dataset_versions TO teutonic_dashboard_view;
 
 
 --

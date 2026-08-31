@@ -94,7 +94,7 @@ class DashboardViewService:
         dashboard_result = self.store.publish(
             body, source_watermark=payload["source_watermark"]
         )
-        return dashboard_result, dataset_result
+        return dashboard_result, dataset_result, payload["current_eval"] is not None
 
     def publish_market_only(self, *, now: datetime | None = None):
         """Refresh public market fields while the projection database is unavailable."""

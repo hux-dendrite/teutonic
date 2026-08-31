@@ -2,6 +2,7 @@
 
 const assert = require("assert");
 const dashboard = require("../../website/dashboard-v1.js");
+const devDashboard = require("../../dev-website/dashboard-v1.js");
 
 function base() {
     return {
@@ -21,6 +22,7 @@ function base() {
         current_eval: null,
         queue: [],
         history: [],
+        dataset_versions: [],
         weight_status: {},
         service_status: { overall: "healthy" },
         market: null
@@ -267,7 +269,9 @@ const benchmarkResults = dashboard.benchmarkPresentation({
                 model: { reign_number: 7, uid: 226, hotkey: "current", model_repo: "owner/current", is_current: true },
                 benchmarks: [
                     { name: "BBH", fewshot: 3, status: "completed", metric: { name: "acc_norm,none", value: 0.297344 } },
-                    { name: "GSM8K", fewshot: 4, status: "completed", metric: { name: "exact_match,strict-match", value: 0 } }
+                    { name: "GSM8K", fewshot: 4, status: "completed", metric: { name: "exact_match,strict-match", value: 0 } },
+                    { name: "GPQA Diamond", fewshot: 0, status: "completed", metric: { name: "acc_norm,none", value: 0.42 } },
+                    { name: "MATH-500", fewshot: 4, status: "completed", metric: { name: "exact_match,none", value: 0.38 } }
                 ]
             }
         }
@@ -275,11 +279,16 @@ const benchmarkResults = dashboard.benchmarkPresentation({
 });
 assert.deepStrictEqual(benchmarkResults.kings.map((king) => king.kingId), ["reign-7", "reign-6"]);
 assert.strictEqual(benchmarkResults.selected.kingId, "reign-7");
-assert.strictEqual(benchmarkResults.selected.benchmarks.length, 8);
+assert.strictEqual(benchmarkResults.selected.benchmarks.length, 10);
 assert.strictEqual(benchmarkResults.selected.benchmarks[0].name, "BBH");
 assert.strictEqual(benchmarkResults.selected.benchmarks[0].score, 0.297344);
 assert.strictEqual(benchmarkResults.selected.benchmarks[4].name, "GSM8K");
 assert.strictEqual(benchmarkResults.selected.benchmarks[4].score, 0);
+assert.strictEqual(benchmarkResults.selected.benchmarks[8].name, "GPQA Diamond");
+assert.strictEqual(benchmarkResults.selected.benchmarks[8].score, 0.42);
+assert.strictEqual(benchmarkResults.selected.benchmarks[9].name, "MATH-500");
+assert.strictEqual(benchmarkResults.selected.benchmarks[9].score, 0.38);
+assert.strictEqual(benchmarkResults.selected.benchmarks[9].fewshot, 4);
 assert.strictEqual(benchmarkResults.selected.benchmarks[1].status, "pending");
 assert.deepStrictEqual(
     benchmarkResults.series[0].points.map((point) => [point.reignNumber, point.score]),
@@ -294,4 +303,33 @@ assert.throws(
     () => dashboard.benchmarkPresentation({ schema_version: "wrong", kings: [] }),
     /unsupported benchmark results schema/
 );
+const benchmarkNames = ["BBH", "MMLU", "HellaSwag", "WinoGrande", "GSM8K", "PIQA", "ARC-C", "ARC-E", "GPQA Diamond", "MATH-500"];
+assert.deepStrictEqual(
+    dashboard.benchmarkPresentation({ schema_version: "teutonic-king-benchmark-all-results.v2", kings: [] }).series.map((series) => series.name),
+    benchmarkNames
+);
+assert.deepStrictEqual(
+    devDashboard.benchmarkPresentation({ schema_version: "teutonic-king-benchmark-all-results.v2", kings: [] }).series.map((series) => series.name),
+    benchmarkNames
+);
+assert.strictEqual(dashboard.graphPointRadius(1, 1000, 0.75, 2.5), 2.5);
+assert.strictEqual(dashboard.graphPointRadius(1000, 200, 0.75, 2.5), 0.75);
+assert.ok(dashboard.graphPointRadius(200, 800, 0.75, 2.5) < 2.5);
+assert.strictEqual(
+    devDashboard.graphPointRadius(200, 800, 0.75, 2.5),
+    dashboard.graphPointRadius(200, 800, 0.75, 2.5)
+);
+const datasetChanges = dashboard.datasetChangePresentation(
+    [{ dataset_version: "a".repeat(64) }, { dataset_version: "b".repeat(64) }],
+    [
+        { config_version: "a".repeat(64), dataset_label: "mix-v1", eval_n: 1000, delta_threshold: 0.5, sources: [{ name: "fixture", proportion: 1, manifest_sha256: "c".repeat(64), total_tokens: 1000, total_shards: 1, sequence_length: 100 }] },
+        { config_version: "b".repeat(64), dataset_label: "mix-v2", eval_n: 2000, delta_threshold: 0.5, sources: [{ name: "fixture", proportion: 1, manifest_sha256: "d".repeat(64), total_tokens: 2000, total_shards: 2, sequence_length: 100 }] }
+    ]
+);
+assert.strictEqual(datasetChanges.length, 1);
+assert.strictEqual(datasetChanges[0].index, 1);
+assert.strictEqual(datasetChanges[0].fromLabel, "mix-v1");
+assert.strictEqual(datasetChanges[0].toLabel, "mix-v2");
+assert.ok(datasetChanges[0].changes.some((change) => change.includes("EVAL SAMPLES")));
+assert.ok(datasetChanges[0].changes.some((change) => change.includes("fixture CONTENT")));
 console.log("dashboard-v1 representative render states passed");

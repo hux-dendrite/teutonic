@@ -174,6 +174,32 @@ def _dataset_source(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _dataset_versions(rows: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["config_version"]), []).append(row)
+    versions: list[dict[str, Any]] = []
+    for config_version, config_rows in grouped.items():
+        first = config_rows[0]
+        stable_fields = ("dataset_label", "eval_n", "delta_threshold", "config_created_at")
+        if any(
+            any(row[field] != first[field] for field in stable_fields)
+            for row in config_rows[1:]
+        ):
+            raise DashboardProjectionError(
+                f"dataset config {config_version} has inconsistent metadata"
+            )
+        versions.append({
+            "config_version": config_version,
+            "dataset_label": str(first["dataset_label"]),
+            "eval_n": int(first["eval_n"]),
+            "delta_threshold": float(first["delta_threshold"]),
+            "created_at": _iso(first["config_created_at"]),
+            "sources": [_dataset_source(row) for row in config_rows],
+        })
+    return versions
+
+
 def _scope_sql(view: str) -> str:
     return (
         f"SELECT * FROM control_plane.{view} "
@@ -253,6 +279,11 @@ class DashboardProjectionRepository:
             history = cursor.execute(
                 _scope_sql("dashboard_evaluation_history")
                 + " ORDER BY completed_at ASC NULLS LAST, challenge_id ASC",
+                self._scope,
+            ).fetchall()
+            dataset_version_rows = cursor.execute(
+                _scope_sql("dashboard_dataset_versions")
+                + ' ORDER BY config_created_at ASC, config_version ASC, "position" ASC',
                 self._scope,
             ).fetchall()
             source_score_rows = []
@@ -339,6 +370,7 @@ class DashboardProjectionRepository:
             "current_eval": current,
             "queue": [self._queue(row) for row in queue],
             "history": history_entries,
+            "dataset_versions": _dataset_versions(dataset_version_rows),
             "weight_status": weight_status,
             "service_status": service_status,
             "market": None,

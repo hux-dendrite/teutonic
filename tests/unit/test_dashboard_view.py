@@ -63,6 +63,7 @@ def payload() -> dict:
         "current_eval": None,
         "queue": [],
         "history": [],
+        "dataset_versions": [],
         "weight_status": {
             "state": None,
             "cadence_blocks": None,
@@ -196,6 +197,22 @@ class DashboardContractTests(unittest.TestCase):
         }
         parsed = json.loads(canonical_dashboard_json(fixture))
         self.assertEqual(parsed["current_eval"]["provisional_lcb"], 0.61)
+
+    def test_dashboard_accepts_sanitized_dataset_version_catalog(self):
+        fixture = payload()
+        fixture["dataset_versions"] = [{
+            "config_version": "a" * 64,
+            "dataset_label": "fixture-v1",
+            "eval_n": 2000,
+            "delta_threshold": 0.5,
+            "created_at": "2026-08-18T12:00:00Z",
+            "sources": dataset_manifest()["sources"],
+        }]
+        parsed = json.loads(canonical_dashboard_json(fixture))
+        self.assertEqual(parsed["dataset_versions"][0]["sources"][0]["name"], "fixture")
+        fixture["dataset_versions"][0]["private_manifest"] = {"secret": "never"}
+        with self.assertRaises(DashboardContractError):
+            canonical_dashboard_json(fixture)
 
     def test_global_dataset_manifest_is_canonical_and_strict(self):
         body = canonical_dataset_manifest_json(dataset_manifest())
@@ -540,7 +557,10 @@ class DashboardServiceTests(unittest.TestCase):
         previous["market"] = market(fetched_at="2026-08-18T11:30:00Z")
 
         class Repository:
+            project_calls = 0
+
             def project(self, *, now):
+                self.project_calls += 1
                 candidate = payload()
                 candidate["source_watermark"] = 8
                 return candidate
@@ -567,12 +587,15 @@ class DashboardServiceTests(unittest.TestCase):
             def fetch(self, *, now):
                 raise RuntimeError("private endpoint details must not escape")
 
+        repository = Repository()
         store = Store()
-        dashboard_result, dataset_result = DashboardViewService(
-            Repository(), store, market_client=FailedMarket()
+        dashboard_result, dataset_result, active = DashboardViewService(
+            repository, store, market_client=FailedMarket()
         ).publish_once(now=NOW)
         self.assertEqual(dashboard_result, 8)
         self.assertEqual(dataset_result, "a" * 64)
+        self.assertFalse(active)
+        self.assertEqual(repository.project_calls, 1)
         self.assertEqual(store.published["source_watermark"], 8)
         self.assertEqual(store.dataset["eval_n"], 2000)
         self.assertTrue(store.published["market"]["stale"])

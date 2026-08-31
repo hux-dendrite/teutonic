@@ -226,7 +226,8 @@
     var weight = d.weight_status || {}; text("weight-state", String(weight.state || weight.latest_attempt_state || "NOT SCHEDULED").toUpperCase()); text("weight-block", number(weight.latest_finalized_block || weight.last_attempted_block)); text("weight-next", number(weight.next_due_block)); text("weight-finalized", date(weight.finalized_at));
   }
   function renderChart(d) {
-    var svg = el("loss-chart");
+    var svg = el("loss-chart"), tooltip = el("dataset-change-tooltip");
+    tooltip.hidden = true;
     var amount = finite(el("smooth-slider").value) || 0;
     var smoothLabel = amount > 0 ? "SMOOTH " + smoothMode.toUpperCase() + " " + amount.toFixed(2) : "SMOOTH OFF";
     text("smooth-status", smoothLabel);
@@ -265,6 +266,37 @@
     challengers.forEach(function (value, i) { markup += '<circle cx="' + x(i) + '" cy="' + y(value) + '" r="' + pointRadius.toFixed(2) + '" fill="' + paper + '" stroke="' + muted + '"/>'; });
     kings.forEach(function (value, i) { markup += '<circle cx="' + x(kingPoints[i].index) + '" cy="' + y(value) + '" r="' + kingPointRadius.toFixed(2) + '" fill="' + ink + '"/>'; });
     svg.setAttribute("viewBox", "0 0 " + W + " " + H); svg.innerHTML = markup;
+    var namespace = "http://www.w3.org/2000/svg", datasetChanges = TeutonicDashboardV1.datasetChangePresentation(points, d.dataset_versions);
+    function tooltipContent(change) {
+      clear(tooltip);
+      var heading = document.createElement("strong"), versions = document.createElement("span"), list = document.createElement("ul");
+      heading.textContent = "DATASET CHANGED";
+      versions.textContent = change.fromLabel + " [" + change.fromVersion.slice(0, 8) + "] → " + change.toLabel + " [" + change.toVersion.slice(0, 8) + "]";
+      change.changes.forEach(function(description) { var item = document.createElement("li"); item.textContent = description; list.appendChild(item); });
+      tooltip.appendChild(heading); tooltip.appendChild(versions); tooltip.appendChild(list);
+    }
+    function positionTooltip(clientX) {
+      var shell = svg.parentElement, bounds = shell.getBoundingClientRect(), requested = clientX - bounds.left + 10;
+      tooltip.style.top = "8px"; tooltip.style.left = "8px"; tooltip.hidden = false;
+      tooltip.style.left = Math.max(8, Math.min(requested, bounds.width - tooltip.offsetWidth - 8)) + "px";
+    }
+    function showTooltip(change, clientX) { tooltipContent(change); positionTooltip(clientX); }
+    function hideTooltip() { tooltip.hidden = true; }
+    datasetChanges.forEach(function(change) {
+      var marker = document.createElementNS(namespace, "g"), line = document.createElementNS(namespace, "line"), hit = document.createElementNS(namespace, "line"), flag = document.createElementNS(namespace, "rect"), label = document.createElementNS(namespace, "text"), xx = (x(change.index - 1) + x(change.index)) / 2, flagWidth = 68, flagX = Math.max(left, Math.min(xx - flagWidth / 2, W - right - flagWidth));
+      marker.setAttribute("class", "dataset-change-marker"); marker.setAttribute("tabindex", "0"); marker.setAttribute("role", "img"); marker.setAttribute("aria-label", "Dataset changed from " + change.fromLabel + " to " + change.toLabel + ". " + change.changes.join(". "));
+      [line, hit].forEach(function(node) { node.setAttribute("x1", xx); node.setAttribute("x2", xx); node.setAttribute("y1", top); node.setAttribute("y2", plotBottom); });
+      line.setAttribute("class", "dataset-change-line"); line.setAttribute("stroke", muted); line.setAttribute("stroke-width", "1.5"); line.setAttribute("stroke-dasharray", "5 4");
+      hit.setAttribute("class", "dataset-change-hit");
+      flag.setAttribute("class", "dataset-change-flag"); flag.setAttribute("x", flagX); flag.setAttribute("y", 2); flag.setAttribute("width", flagWidth); flag.setAttribute("height", 14); flag.setAttribute("fill", paper); flag.setAttribute("stroke", muted);
+      label.setAttribute("class", "dataset-change-label"); label.setAttribute("x", flagX + flagWidth / 2); label.setAttribute("y", 12); label.setAttribute("fill", muted); label.setAttribute("text-anchor", "middle"); label.textContent = "DATASET Δ";
+      marker.appendChild(line); marker.appendChild(hit); marker.appendChild(flag); marker.appendChild(label); svg.appendChild(marker);
+      marker.addEventListener("pointerenter", function(event) { showTooltip(change, event.clientX); });
+      marker.addEventListener("pointermove", function(event) { positionTooltip(event.clientX); });
+      marker.addEventListener("pointerleave", hideTooltip);
+      marker.addEventListener("focus", function() { var markerBounds = marker.getBoundingClientRect(); showTooltip(change, markerBounds.left + markerBounds.width / 2); });
+      marker.addEventListener("blur", hideTooltip);
+    });
   }
   function render(d) { TeutonicDashboardV1.validate(d); lastPayload = d; renderHeader(d); renderReigns(d); renderEvaluation(d); renderChart(d); renderQueue(d); renderHistory(d); renderWeightStatus(d); text("last-refresh", "LAST REFRESH " + new Date().toLocaleTimeString()); el("error-banner").hidden = true; }
   async function poll() { try { var response = await fetch(ENDPOINT + "?t=" + Date.now(), { cache: "no-store" }); if (!response.ok) throw new Error("dashboard request returned HTTP " + response.status); render(await response.json()); } catch (error) { var banner = el("error-banner"); banner.textContent = "DATA REFRESH FAILED — " + error.message + (lastPayload ? " — SHOWING LAST GOOD PUBLICATION" : ""); banner.hidden = false; } }

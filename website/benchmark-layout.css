@@ -9,3 +9,79 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+.dataset-change-line {
+  stroke: var(--muted);
+  stroke-width: 1.25;
+  stroke-dasharray: 5 4;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+
+.dataset-change-hit {
+  stroke: transparent;
+  stroke-width: 16;
+  vector-effect: non-scaling-stroke;
+  pointer-events: stroke;
+  cursor: help;
+}
+
+.dataset-change-flag {
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.dataset-change-label {
+  font: 700 8px var(--mono);
+  letter-spacing: .05em;
+  pointer-events: none;
+}
+
+.dataset-change-marker:hover .dataset-change-line,
+.dataset-change-marker:focus .dataset-change-line {
+  stroke-width: 2.25;
+}
+
+.dataset-change-marker:focus {
+  outline: none;
+}
+
+.dataset-change-tooltip {
+  position: absolute;
+  z-index: 4;
+  width: min(360px, calc(100% - 24px));
+  max-height: 220px;
+  overflow: auto;
+  padding: 9px 11px;
+  border: 1px solid var(--muted);
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 4px 4px 0 color-mix(in srgb, var(--ink) 18%, transparent);
+  font: 9px/1.45 var(--mono);
+  pointer-events: none;
+}
+
+.dataset-change-tooltip strong,
+.dataset-change-tooltip span {
+  display: block;
+}
+
+.dataset-change-tooltip strong {
+  margin-bottom: 3px;
+  color: var(--muted);
+  letter-spacing: .07em;
+}
+
+.dataset-change-tooltip span {
+  margin-bottom: 6px;
+  color: var(--muted);
+}
+
+.dataset-change-tooltip ul {
+  margin: 0;
+  padding-left: 15px;
+}
+
+.dataset-change-tooltip li + li {
+  margin-top: 2px;
+}

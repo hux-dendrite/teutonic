@@ -115,7 +115,7 @@ def main() -> int:
                 try:
                     while not stopping:
                         try:
-                            result, dataset_result = service.publish_once()
+                            result, dataset_result, active = service.publish_once()
                             failures = 0
                             log.info(
                                 "dashboard %s bytes=%d sha256=%s",
@@ -131,7 +131,6 @@ def main() -> int:
                             )
                             if args.once:
                                 return 0
-                            active = repository.project()["current_eval"] is not None
                             time.sleep(5 if active else 20)
                         except psycopg.Error:
                             raise

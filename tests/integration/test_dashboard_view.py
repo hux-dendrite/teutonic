@@ -273,6 +273,10 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["history"][0]["model_identity"], "hidden_until_promotion")
         self.assertIsNone(payload["history"][0]["challenger_repo"])
         self.assertEqual(payload["king"]["coldkey"], "5" + "G" * 47)
+        self.assertEqual(len(payload["dataset_versions"]), 1)
+        self.assertEqual(payload["dataset_versions"][0]["config_version"], "7" * 64)
+        self.assertEqual(payload["dataset_versions"][0]["dataset_label"], "fixture-datasets")
+        self.assertEqual(payload["dataset_versions"][0]["sources"][0]["name"], "fixture")
         for marker in (
             "DO-NOT-LEAK",
             "secret_access_key",
@@ -675,6 +679,7 @@ class DashboardViewIntegrationTests(unittest.TestCase):
                 "dashboard_current_evaluation",
                 "dashboard_current_king",
                 "dashboard_dataset_manifests",
+                "dashboard_dataset_versions",
                 "dashboard_evaluation_history",
                 "dashboard_king_reigns",
                 "dashboard_queue",

@@ -35,7 +35,7 @@
             throw new Error("dashboard payload must be an object");
         }
         if (payload.schema_version !== 1) throw new Error("unsupported dashboard schema");
-        ["queue", "history", "king_chain"].forEach(function(name) {
+        ["queue", "history", "king_chain", "dataset_versions"].forEach(function(name) {
             if (!Array.isArray(payload[name])) throw new Error("dashboard " + name + " must be an array");
         });
         ["chain", "stats", "king_payout", "weight_status", "service_status"].forEach(function(name) {
@@ -84,6 +84,63 @@
         var maxRadius = Math.max(minRadius, finiteNumber(maximum, 2.5));
         if (count <= 1) return maxRadius;
         return Math.max(minRadius, Math.min(maxRadius, width / (count - 1) * 0.28));
+    }
+
+    function datasetChangePresentation(history, datasetVersions) {
+        var configs = {};
+        (Array.isArray(datasetVersions) ? datasetVersions : []).forEach(function(config) {
+            if (config && typeof config.config_version === "string") {
+                configs[config.config_version] = config;
+            }
+        });
+        function shortVersion(value) { return String(value || "").slice(0, 8) || "unknown"; }
+        function numberLabel(value) {
+            var number = finiteNumber(value, null);
+            return number == null ? "--" : number.toLocaleString();
+        }
+        function percentLabel(value) {
+            var number = finiteNumber(value, null);
+            return number == null ? "--" : (number * 100).toFixed(1).replace(/\.0$/, "") + "%";
+        }
+        function valueLabel(value) { return value == null || value === "" ? "--" : String(value); }
+        function changesBetween(previous, next) {
+            if (!previous || !next) return ["CONFIGURATION DETAILS UNAVAILABLE"];
+            var changes = [];
+            if (previous.dataset_label !== next.dataset_label) changes.push("DATASET MIX: " + valueLabel(previous.dataset_label) + " → " + valueLabel(next.dataset_label));
+            if (finiteNumber(previous.eval_n, null) !== finiteNumber(next.eval_n, null)) changes.push("EVAL SAMPLES: " + numberLabel(previous.eval_n) + " → " + numberLabel(next.eval_n));
+            if (finiteNumber(previous.delta_threshold, null) !== finiteNumber(next.delta_threshold, null)) changes.push("DELTA THRESHOLD: " + valueLabel(previous.delta_threshold) + " → " + valueLabel(next.delta_threshold));
+            var beforeSources = {}, afterSources = {};
+            (Array.isArray(previous.sources) ? previous.sources : []).forEach(function(source) { if (source && source.name) beforeSources[source.name] = source; });
+            (Array.isArray(next.sources) ? next.sources : []).forEach(function(source) { if (source && source.name) afterSources[source.name] = source; });
+            Object.keys(beforeSources).sort().forEach(function(name) { if (!afterSources[name]) changes.push("SOURCE REMOVED: " + name); });
+            Object.keys(afterSources).sort().forEach(function(name) {
+                var before = beforeSources[name], after = afterSources[name];
+                if (!before) { changes.push("SOURCE ADDED: " + name + " (" + percentLabel(after.proportion) + ")"); return; }
+                if (finiteNumber(before.proportion, null) !== finiteNumber(after.proportion, null)) changes.push(name + " WEIGHT: " + percentLabel(before.proportion) + " → " + percentLabel(after.proportion));
+                if (before.manifest_sha256 !== after.manifest_sha256) changes.push(name + " CONTENT: " + shortVersion(before.manifest_sha256) + " → " + shortVersion(after.manifest_sha256));
+                if (finiteNumber(before.total_tokens, null) !== finiteNumber(after.total_tokens, null)) changes.push(name + " TOKENS: " + numberLabel(before.total_tokens) + " → " + numberLabel(after.total_tokens));
+                if (finiteNumber(before.total_shards, null) !== finiteNumber(after.total_shards, null)) changes.push(name + " SHARDS: " + numberLabel(before.total_shards) + " → " + numberLabel(after.total_shards));
+                if (finiteNumber(before.sequence_length, null) !== finiteNumber(after.sequence_length, null)) changes.push(name + " SEQUENCE LENGTH: " + numberLabel(before.sequence_length) + " → " + numberLabel(after.sequence_length));
+                ["source_repo", "tokenizer", "dtype", "tokenization_mode"].forEach(function(field) {
+                    if (valueLabel(before[field]) !== valueLabel(after[field])) changes.push(name + " " + field.replaceAll("_", " ").toUpperCase() + ": " + valueLabel(before[field]) + " → " + valueLabel(after[field]));
+                });
+            });
+            return changes.length ? changes : ["CONFIGURATION HASH CHANGED; PUBLISHED SETTINGS ARE OTHERWISE IDENTICAL"];
+        }
+        var rows = Array.isArray(history) ? history : [], events = [];
+        for (var index = 1; index < rows.length; index++) {
+            var fromVersion = String(rows[index - 1].dataset_version || ""), toVersion = String(rows[index].dataset_version || "");
+            if (!fromVersion || !toVersion || fromVersion === toVersion) continue;
+            events.push({
+                index: index,
+                fromVersion: fromVersion,
+                toVersion: toVersion,
+                fromLabel: configs[fromVersion] ? configs[fromVersion].dataset_label : shortVersion(fromVersion),
+                toLabel: configs[toVersion] ? configs[toVersion].dataset_label : shortVersion(toVersion),
+                changes: changesBetween(configs[fromVersion], configs[toVersion])
+            });
+        }
+        return events;
     }
 
     function currentEvaluationPresentation(record) {
@@ -434,6 +491,7 @@
         decisionPresentation: decisionPresentation,
         datasetPresentation: datasetPresentation,
         graphPointRadius: graphPointRadius,
+        datasetChangePresentation: datasetChangePresentation,
         benchmarkPresentation: benchmarkPresentation
     };
 });
