@@ -2,7 +2,6 @@
 
 const assert = require("assert");
 const dashboard = require("../../website/dashboard-v1.js");
-const devDashboard = require("../../dev-website/dashboard-v1.js");
 
 function base() {
     return {
@@ -308,17 +307,9 @@ assert.deepStrictEqual(
     dashboard.benchmarkPresentation({ schema_version: "teutonic-king-benchmark-all-results.v2", kings: [] }).series.map((series) => series.name),
     benchmarkNames
 );
-assert.deepStrictEqual(
-    devDashboard.benchmarkPresentation({ schema_version: "teutonic-king-benchmark-all-results.v2", kings: [] }).series.map((series) => series.name),
-    benchmarkNames
-);
 assert.strictEqual(dashboard.graphPointRadius(1, 1000, 0.75, 2.5), 2.5);
 assert.strictEqual(dashboard.graphPointRadius(1000, 200, 0.75, 2.5), 0.75);
 assert.ok(dashboard.graphPointRadius(200, 800, 0.75, 2.5) < 2.5);
-assert.strictEqual(
-    devDashboard.graphPointRadius(200, 800, 0.75, 2.5),
-    dashboard.graphPointRadius(200, 800, 0.75, 2.5)
-);
 const datasetChanges = dashboard.datasetChangePresentation(
     [{ dataset_version: "a".repeat(64) }, { dataset_version: "b".repeat(64) }],
     [
