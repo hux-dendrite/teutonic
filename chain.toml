@@ -60,8 +60,8 @@ initial_weight_uids = [110, 115, 143, 224, 226]
 
 [evaluation]
 dataset_label = "finewebedu-automathtext-v2-dclm-baseline-1.0"
-n = 2000
-delta_threshold = 0.1
+n = 4000
+delta_threshold = 0.025
 
 [[evaluation.datasets]]
 name = "finewebedu"
