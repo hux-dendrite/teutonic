@@ -92,7 +92,13 @@ DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
 DEFAULT_DELTA = float(os.environ.get("EVAL_DELTA", "0.0015"))
 DEFAULT_BOOTSTRAP_B = int(os.environ.get("EVAL_BOOTSTRAP_B", "10000"))
 DEFAULT_N = int(os.environ.get("EVAL_N", "25000"))
-DEFAULT_ATTN_IMPLEMENTATION = "eager"
+SUPPORTED_ATTN_IMPLEMENTATIONS = ("eager", "flash_attention_4")
+DEFAULT_ATTN_IMPLEMENTATION = os.environ.get("TEUTONIC_ATTN_IMPLEMENTATION", "eager")
+if DEFAULT_ATTN_IMPLEMENTATION not in SUPPORTED_ATTN_IMPLEMENTATIONS:
+    raise RuntimeError(
+        "TEUTONIC_ATTN_IMPLEMENTATION must be one of "
+        f"{SUPPORTED_ATTN_IMPLEMENTATIONS}, got {DEFAULT_ATTN_IMPLEMENTATION!r}"
+    )
 EVALUATOR_VERSION = os.environ.get("TEUTONIC_EVALUATOR_VERSION", "pair-evaluator-v2")
 EVALUATION_POLICY_VERSION = os.environ.get(
     "TEUTONIC_EVALUATION_POLICY_VERSION", "paired-bootstrap-v1"
@@ -149,7 +155,7 @@ class EvalRequest(BaseModel):
     dataset_sources: list[dict[str, Any]] = Field(default_factory=list)
     seq_len: int = Field(default=DEFAULT_SEQ_LEN, ge=2)
     vocab_size: int = 0
-    attn_implementation: Literal["eager"] = DEFAULT_ATTN_IMPLEMENTATION
+    attn_implementation: Literal["eager", "flash_attention_4"] = DEFAULT_ATTN_IMPLEMENTATION
     n: int = DEFAULT_N
     batch_size: Literal[1] = DEFAULT_BATCH_SIZE
     alpha: float = DEFAULT_ALPHA
@@ -533,8 +539,11 @@ def resolved_attention_types(config) -> list[str]:
         )
     if not bool(getattr(config, "add_swa_attention_sink_bias", False)):
         raise RuntimeError("MiMo SWA learned attention sink bias must be enabled")
-    if str(getattr(config, "_attn_implementation", "")) != "eager":
-        raise RuntimeError("MiMo evaluation requires eager attention")
+    implementation = str(getattr(config, "_attn_implementation", ""))
+    if implementation not in SUPPORTED_ATTN_IMPLEMENTATIONS:
+        raise RuntimeError(
+            f"MiMo evaluation does not support attention implementation {implementation!r}"
+        )
     return resolved
 
 
@@ -551,6 +560,8 @@ def validate_and_report_attention_config(config, label: str, on_phase=None) -> d
             "sliding_window_size": config.sliding_window_size,
             "add_swa_attention_sink_bias": config.add_swa_attention_sink_bias,
             "attn_implementation": config._attn_implementation,
+            "qk_head_dim": getattr(config, "head_dim", None),
+            "v_head_dim": getattr(config, "v_head_dim", getattr(config, "head_dim", None)),
         },
         sort_keys=True,
     ).encode()
@@ -561,13 +572,21 @@ def validate_and_report_attention_config(config, label: str, on_phase=None) -> d
         cached["preflight_cached"] = True
         return cached
     attention_types = resolved_attention_types(config)
+    qk_head_dim = int(getattr(config, "head_dim", 0) or 0)
+    v_head_dim = int(getattr(config, "v_head_dim", qk_head_dim) or 0)
+    implementation = str(config._attn_implementation)
     report = {
         "label": label,
         "n_layers": len(attention_types),
         "attention_types": attention_types,
         "sliding_window": int(config.sliding_window),
         "learned_swa_sink_bias": True,
-        "attn_implementation": "eager",
+        "attn_implementation": implementation,
+        "qk_head_dim": qk_head_dim,
+        "v_head_dim": v_head_dim,
+        "fa4_native_asymmetric_value_dim": (
+            implementation == "flash_attention_4" and qk_head_dim != v_head_dim
+        ),
         "preflight_cache_key": cache_key,
         "preflight_cached": False,
     }
@@ -1054,7 +1073,10 @@ def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: Eva
     if on_phase:
         on_phase({"phase": f"{label}_load_start", "device": device, "snapshot": snapshot_dir})
     t0 = time.time()
+    requested_attn_implementation = req.attn_implementation
     config.use_cache = False
+    # The remote MiMo class has a stale FA4 capability flag. Construct the
+    # module under eager, then select the requested backend for every forward.
     config._attn_implementation = "eager"
     dtype = torch.bfloat16
     effective_ids = list(gpu_ids if gpu_ids is not None else _gpu_ids)
@@ -1116,7 +1138,7 @@ def load_eval_model(snapshot_dir: str, config, device: str, label: str, req: Eva
         enable_grouped_mimo_moe(model)
     model.eval()
     model.config.use_cache = False
-    model.config._attn_implementation = "eager"
+    model.config._attn_implementation = requested_attn_implementation
     params = sum(p.numel() for p in model.parameters()) / 1e9
     if on_phase:
         on_phase({"phase": f"{label}_load_done", "params_b": round(params, 3), "elapsed_s": round(time.time() - t0, 1)})
@@ -2364,6 +2386,7 @@ async def health():
         },
         "request_features": {
             "challenger_futility_early_stopping": "observed-quantile-v1",
+            "flash_attention_4": "native-asymmetric-value-head-dim-v1",
         },
         "active_evals": _attempts.active_count(),
         "cache_dir": str(MODEL_CACHE_DIR),

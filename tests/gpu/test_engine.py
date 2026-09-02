@@ -14,9 +14,9 @@ from transformers import GPT2Config, GPT2LMHeadModel
 
 from teutonic.evaluator import engine as eval_server
 from teutonic.evaluator.engine import (
-    EvalRequest,
     MODEL_INSTANCES_PER_SIDE,
     MODEL_WORKER_PROCESSES,
+    EvalRequest,
     PersistentModelWorkerPool,
     TwoGpuSequencePipeline,
     checkpoint_load_key,
@@ -26,6 +26,7 @@ from teutonic.evaluator.engine import (
     patch_mimo_masking_compat,
     resolved_attention_types,
     snapshot_safetensor_keys,
+    validate_and_report_attention_config,
 )
 
 
@@ -88,6 +89,7 @@ def test_worker_pool_early_stop_drains_dispatched_results():
 def mimo_config(**overrides):
     pattern = [0, 1, 1, 0]
     values = {
+        "model_type": "mimo_v2",
         "num_hidden_layers": len(pattern),
         "hybrid_layer_pattern": pattern,
         "layer_types": [
@@ -100,6 +102,8 @@ def mimo_config(**overrides):
         "sliding_window_size": 128,
         "add_swa_attention_sink_bias": True,
         "_attn_implementation": "eager",
+        "head_dim": 192,
+        "v_head_dim": 128,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -155,8 +159,9 @@ def test_mimo_masking_compat_removes_only_obsolete_cache_position():
         sys.modules.pop(module.__name__, None)
 
 
-def test_non_eager_or_malformed_hybrid_config_is_rejected():
-    with pytest.raises(RuntimeError, match="requires eager"):
+def test_supported_attention_backends_and_malformed_hybrid_config():
+    assert resolved_attention_types(mimo_config(_attn_implementation="flash_attention_4"))
+    with pytest.raises(RuntimeError, match="does not support attention implementation"):
         resolved_attention_types(mimo_config(_attn_implementation="sdpa"))
     with pytest.raises(RuntimeError, match="entries for 4 surviving layers"):
         resolved_attention_types(mimo_config(hybrid_layer_pattern=[0, 1]))
@@ -170,6 +175,32 @@ def test_eval_request_fixes_reference_runtime_settings():
     assert request.parallel_models is True
     assert request.seq_len == 2048
     assert request.lm_head_chunk == 1024
+
+
+def test_eval_request_accepts_only_eager_and_fa4():
+    request = EvalRequest(
+        king_repo="king",
+        challenger_repo="challenger",
+        attn_implementation="flash_attention_4",
+    )
+    assert request.attn_implementation == "flash_attention_4"
+    with pytest.raises(ValueError):
+        EvalRequest(
+            king_repo="king",
+            challenger_repo="challenger",
+            attn_implementation="sdpa",
+        )
+
+
+def test_fa4_attention_report_preserves_asymmetric_value_head_dim():
+    report = validate_and_report_attention_config(
+        mimo_config(_attn_implementation="flash_attention_4"),
+        "test-model",
+    )
+    assert report["attn_implementation"] == "flash_attention_4"
+    assert report["qk_head_dim"] == 192
+    assert report["v_head_dim"] == 128
+    assert report["fa4_native_asymmetric_value_dim"] is True
 
 
 def test_worker_topology_uses_two_processes_per_side_and_two_gpus_each():
@@ -251,7 +282,8 @@ def test_duplicate_check_hashes_all_model_shards_in_parallel(monkeypatch, tmp_pa
     assert phases[-1]["hash_workers"] == 4
 
 
-def test_direct_checkpoint_loader_resolves_tied_meta_weights(tmp_path):
+@pytest.mark.parametrize("attn_implementation", ["eager", "flash_attention_4"])
+def test_direct_checkpoint_loader_resolves_tied_meta_weights(tmp_path, attn_implementation):
     config = GPT2Config(
         n_layer=1,
         n_head=2,
@@ -262,10 +294,15 @@ def test_direct_checkpoint_loader_resolves_tied_meta_weights(tmp_path):
         eos_token_id=1,
     )
     GPT2LMHeadModel(config).save_pretrained(tmp_path, safe_serialization=True)
-    request = EvalRequest(king_repo="king", challenger_repo="challenger")
+    request = EvalRequest(
+        king_repo="king",
+        challenger_repo="challenger",
+        attn_implementation=attn_implementation,
+    )
     loaded = load_eval_model(str(tmp_path), config, "cpu", "tiny", request, gpu_ids=[])
     assert not any(parameter.is_meta for parameter in loaded.parameters())
     assert next(loaded.parameters()).dtype == torch.bfloat16
+    assert loaded.config._attn_implementation == attn_implementation
 
 
 def test_kernel_cache_is_architecture_keyed(monkeypatch):
