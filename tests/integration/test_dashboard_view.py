@@ -340,6 +340,27 @@ class DashboardViewIntegrationTests(unittest.TestCase):
             "This model checkpoint has reached the allowed evaluation reuse limit.",
         )
 
+    def test_model_copy_failure_is_projected_with_specific_public_reason(self):
+        self.owner.execute(
+            """
+            UPDATE control_plane.evaluations
+               SET state = 'terminal_failure', verdict = 'failed',
+                   failure_class = 'policy', public_error_code = 'model_copy',
+                   verdict_summary = '{"error_code":"model_copy"}'::jsonb,
+                   completed_at = %s
+             WHERE evaluation_id = %s
+            """,
+            (NOW, self.ids["evaluation"]),
+        )
+
+        entry = self.repository.project(now=NOW)["history"][0]
+        self.assertEqual(entry["verdict"], "error")
+        self.assertEqual(entry["error_code"], "model_copy")
+        self.assertEqual(
+            entry["error_message"],
+            "The challenger's model weights are identical to the current king.",
+        )
+
     def test_upload_verification_failure_is_projected_as_hidden_history_error(self):
         registration = "a" * 64
         hotkey = "5" + "F" * 47

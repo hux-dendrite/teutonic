@@ -356,6 +356,8 @@ def classify_eval_error(exc: BaseException | str) -> tuple[bool, str]:
         return False, "prefetch_exhausted"
     if "safetensors_reuse_limit" in text:
         return False, "safetensors_reuse_limit"
+    if "model_copy" in text:
+        return False, "model_copy"
     if (
         "failed to download shard" in text
         or "s3 shard download failed" in text

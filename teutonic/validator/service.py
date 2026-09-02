@@ -25,9 +25,14 @@ log = logging.getLogger("teutonic.validator.scheduler")
 
 def _evaluator_error_code(payload: Mapping[str, Any]) -> str:
     code = payload.get("code") or payload.get("error_code")
-    if isinstance(code, str) and code:
+    if isinstance(code, str) and code and code != "evaluation_failed":
         return code
     reason = str(payload.get("error") or payload.get("reason") or "").lower()
+    if "challenger .safetensors are identical to the king" in reason:
+        # The current evaluator reports this deterministic policy rejection
+        # under its generic failure code. Keep the public contract stable at
+        # the validator boundary without requiring an evaluator rollout.
+        return "model_copy"
     if (
         "safetensors sha-256" in reason
         and "already completed" in reason
@@ -35,7 +40,7 @@ def _evaluator_error_code(payload: Mapping[str, Any]) -> str:
     ):
         # Support an evaluator rolling upgrade without persisting its detailed message.
         return "safetensors_reuse_limit"
-    return "evaluation_failed"
+    return code if isinstance(code, str) and code else "evaluation_failed"
 
 
 class ValidatorScheduler:
@@ -230,7 +235,7 @@ class ValidatorScheduler:
             if transient
             else "policy"
             if isinstance(exc, (EvaluatorConflictError, ProtocolValidationError))
-            or marker == "safetensors_reuse_limit"
+            or marker in {"model_copy", "safetensors_reuse_limit"}
             else "unknown"
         )
         self.repository.fail_attempt(

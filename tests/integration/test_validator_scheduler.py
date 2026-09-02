@@ -176,6 +176,20 @@ class ReuseLimitEvaluator(FakeEvaluator):
         }
 
 
+class LegacyDuplicateEvaluator(FakeEvaluator):
+    async def events(self, eval_id):
+        request = EvaluationRequestV2.from_mapping(self.started[-1])
+        yield {
+            "evaluation_id": request.evaluation_id,
+            "attempt_number": request.attempt_number,
+            "type": "error",
+            "data": {
+                "code": "evaluation_failed",
+                "error": "challenger .safetensors are identical to the king",
+            },
+        }
+
+
 class DispatchOutageEvaluator(FakeEvaluator):
     def __init__(self, result):
         super().__init__(result)
@@ -668,6 +682,33 @@ class ValidatorSchedulerIntegrationTests(unittest.TestCase):
         self.assertEqual(row[4], f"diagnostic:{row[0]}:RuntimeError")
         self.assertEqual(row[5:], ("evaluation_failed", "safetensors_reuse_limit"))
         self.assertNotIn("private-digest", str(row))
+
+    def test_legacy_duplicate_failure_persists_model_copy(self) -> None:
+        async def preflight(_request):
+            return None
+
+        scheduler = ValidatorScheduler(
+            self.repository,
+            LegacyDuplicateEvaluator(lambda request: terminal_result(request, accepted=False)),
+            policy=policy(),
+            preflight=preflight,
+            clock=lambda: NOW,
+        )
+        self.assertTrue(asyncio.run(scheduler.run_once()))
+        row = self.connection.execute(
+            """
+            SELECT e.state, e.failure_class, e.public_error_code,
+                   e.verdict_summary, u.state, u.failure_code
+              FROM control_plane.evaluations e
+              JOIN control_plane.uploads u USING (upload_id)
+             WHERE e.attempt_number = 1
+             ORDER BY e.created_at
+             LIMIT 1
+            """
+        ).fetchone()
+        self.assertEqual(row[:3], ("terminal_failure", "policy", "model_copy"))
+        self.assertEqual(row[3], {"error_code": "model_copy"})
+        self.assertEqual(row[4:], ("evaluation_failed", "model_copy"))
 
     def test_dispatch_outage_reuses_attempt_without_spending_retry_budget(self) -> None:
         current = [NOW]

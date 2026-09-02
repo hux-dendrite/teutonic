@@ -126,6 +126,21 @@ def legacy_bootstrap_verdict(policy_input, now):
 
 
 class EvaluationPolicyRegressionTests(unittest.TestCase):
+    def test_duplicate_safetensors_maps_to_model_copy_without_evaluator_change(self) -> None:
+        self.assertEqual(
+            _evaluator_error_code(
+                {
+                    "code": "evaluation_failed",
+                    "error": "challenger .safetensors are identical to the king",
+                }
+            ),
+            "model_copy",
+        )
+        self.assertEqual(
+            classify_eval_error(RuntimeError("eval server error: model_copy")),
+            (False, "model_copy"),
+        )
+
     def test_evaluator_reuse_limit_code_supports_rolling_upgrade(self) -> None:
         self.assertEqual(
             _evaluator_error_code({"code": "safetensors_reuse_limit"}),
