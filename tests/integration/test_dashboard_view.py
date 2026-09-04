@@ -445,12 +445,32 @@ class DashboardViewIntegrationTests(unittest.TestCase):
         projected = self.repository.project(now=NOW)
         current = projected["current_eval"]
         self.assertIsNotNone(current)
+        self.assertIsNone(current["model_digest"])
         self.assertEqual(current["provisional_mu_hat"], 0.72)
         self.assertEqual(current["provisional_lcb"], 0.61)
         self.assertEqual(current["provisional_n_sequences"], 400)
         self.assertEqual(current["provisional_n_bootstrap"], 1000)
         self.assertEqual(current["delta_threshold"], 0.5)
         canonical_dashboard_json(projected)
+
+        self.repository.release_lock()
+        owner_repository = DashboardProjectionRepository(
+            self.owner,
+            netuid=306,
+            chain_generation="test",
+            competition="quasar",
+            chain_name="Teutonic Testnet",
+            seed_repo="owner/genesis",
+            seed_digest="hf:" + "b" * 40,
+            seed_repo_backend="hf",
+        )
+        self.assertTrue(owner_repository.acquire_lock())
+        try:
+            owner_current = owner_repository.project(now=NOW)["current_eval"]
+            self.assertEqual(owner_current["model_digest"], self.ids["model_digest"])
+        finally:
+            owner_repository.release_lock()
+            self.assertTrue(self.repository.acquire_lock())
 
     def test_current_king_uses_remapped_uid_from_latest_weight_revision(self):
         self.owner.execute(

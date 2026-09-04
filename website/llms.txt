@@ -58,8 +58,9 @@ Key fields in dashboard.json:
 - `king_chain`   — recent reigns that currently share rewards
 - `king_payout`  — current king weight share and estimated earnings
 - `queue` / `current_eval` / `history` — pending, live, and past duels;
-  live scoring publishes checkpointed `provisional_mu_hat` and
-  `provisional_lcb` values with their sequence/bootstrap sample sizes
+  pending and live entries expose `model_digest`; live scoring publishes
+  checkpointed `provisional_mu_hat` and `provisional_lcb` values with their
+  sequence/bootstrap sample sizes
 - `weight_status` / `service_status`  — validator publication health
 - `market`       — TAO/USD price, SN3 alpha price in TAO, and
                    `sn3_reg_burn_tao` (current registration cost)

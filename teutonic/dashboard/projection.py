@@ -276,6 +276,38 @@ class DashboardProjectionRepository:
             ).fetchall()
             if len(current_rows) > 1:
                 raise DashboardProjectionError("multiple active evaluations in dashboard snapshot")
+            pending_rows = [*queue, *current_rows]
+            pending_digests: dict[str, str] = {}
+            if pending_rows:
+                digest_access = cursor.execute(
+                    "SELECT has_table_privilege(current_user, "
+                    "'control_plane.verified_uploads', 'SELECT') AS allowed"
+                ).fetchone()
+                if digest_access and digest_access["allowed"]:
+                    challenge_ids = list(
+                        dict.fromkeys(str(row["challenge_id"]) for row in pending_rows)
+                    )
+                    digest_rows = cursor.execute(
+                        """
+                        SELECT SUBSTRING(
+                                   encode(public.digest(upload_id::text, 'sha256'), 'hex')
+                                   FROM 1 FOR 16
+                               ) AS challenge_id,
+                               model_digest
+                          FROM control_plane.verified_uploads
+                         WHERE SUBSTRING(
+                                   encode(public.digest(upload_id::text, 'sha256'), 'hex')
+                                   FROM 1 FOR 16
+                               ) = ANY(%s)
+                        """,
+                        (challenge_ids,),
+                    ).fetchall()
+                    pending_digests = {
+                        str(row["challenge_id"]): str(row["model_digest"])
+                        for row in digest_rows
+                    }
+            for row in pending_rows:
+                row["model_digest"] = pending_digests.get(str(row["challenge_id"]))
             history = cursor.execute(
                 _scope_sql("dashboard_evaluation_history")
                 + " ORDER BY completed_at ASC NULLS LAST, challenge_id ASC",
@@ -458,6 +490,9 @@ class DashboardProjectionRepository:
         return {
             **self._identity(row),
             "challenge_id": row["challenge_id"],
+            "model_digest": (
+                str(row["model_digest"]) if row["model_digest"] is not None else None
+            ),
             "model_identity": "hidden_until_promotion",
             "block": int(row["ready_finalized_block"]),
             "queue_position": int(row["queue_position"]),
@@ -469,6 +504,9 @@ class DashboardProjectionRepository:
         return {
             **self._identity(row),
             "challenge_id": row["challenge_id"],
+            "model_digest": (
+                str(row["model_digest"]) if row["model_digest"] is not None else None
+            ),
             "model_identity": "hidden_until_promotion",
             "stage": row["progress_phase"] or row["stage"],
             "progress": _int(row["completed_sequences"]) or 0,

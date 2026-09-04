@@ -184,9 +184,15 @@
     "current_eval": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["challenge_id", "hotkey", "coldkey", "uid", "model_identity", "stage", "progress", "total", "percent", "elapsed_seconds", "early_stopped", "policy_version", "dataset_version", "started_at", "last_progress_at", "provisional_mu_hat", "provisional_lcb", "provisional_n_sequences", "provisional_n_bootstrap", "delta_threshold"],
+      "required": ["challenge_id", "model_digest", "hotkey", "coldkey", "uid", "model_identity", "stage", "progress", "total", "percent", "elapsed_seconds", "early_stopped", "policy_version", "dataset_version", "started_at", "last_progress_at", "provisional_mu_hat", "provisional_lcb", "provisional_n_sequences", "provisional_n_bootstrap", "delta_threshold"],
       "properties": {
         "challenge_id": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "model_digest": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            { "type": "null" }
+          ]
+        },
         "hotkey": { "type": "string", "minLength": 1 },
         "coldkey": { "$ref": "#/$defs/nullable_string" },
         "uid": { "type": "integer", "minimum": 0 },
@@ -211,9 +217,15 @@
     "queue_entry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["challenge_id", "hotkey", "coldkey", "uid", "model_identity", "block", "queue_position", "state", "submitted_at"],
+      "required": ["challenge_id", "model_digest", "hotkey", "coldkey", "uid", "model_identity", "block", "queue_position", "state", "submitted_at"],
       "properties": {
         "challenge_id": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "model_digest": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            { "type": "null" }
+          ]
+        },
         "hotkey": { "type": "string", "minLength": 1 },
         "coldkey": { "$ref": "#/$defs/nullable_string" },
         "uid": { "type": "integer", "minimum": 0 },

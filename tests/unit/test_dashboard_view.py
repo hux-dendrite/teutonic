@@ -175,6 +175,7 @@ class DashboardContractTests(unittest.TestCase):
         fixture = payload()
         fixture["current_eval"] = {
             "challenge_id": "0123456789abcdef",
+            "model_digest": "c" * 64,
             "hotkey": "public-hotkey",
             "coldkey": "public-coldkey",
             "uid": 7,
@@ -197,6 +198,30 @@ class DashboardContractTests(unittest.TestCase):
         }
         parsed = json.loads(canonical_dashboard_json(fixture))
         self.assertEqual(parsed["current_eval"]["provisional_lcb"], 0.61)
+
+    def test_queue_entry_exposes_the_model_digest(self):
+        fixture = payload()
+        fixture["queue"] = [{
+            "challenge_id": "0123456789abcdef",
+            "model_digest": "d" * 64,
+            "hotkey": "public-hotkey",
+            "coldkey": "public-coldkey",
+            "uid": 7,
+            "model_identity": "hidden_until_promotion",
+            "block": 123,
+            "queue_position": 1,
+            "state": "queued",
+            "submitted_at": "2026-08-18T12:00:00Z",
+        }]
+        parsed = json.loads(canonical_dashboard_json(fixture))
+        self.assertEqual(parsed["queue"][0]["model_digest"], "d" * 64)
+
+        fixture["queue"][0]["model_digest"] = None
+        canonical_dashboard_json(fixture)
+
+        del fixture["queue"][0]["model_digest"]
+        with self.assertRaises(DashboardContractError):
+            canonical_dashboard_json(fixture)
 
     def test_dashboard_accepts_sanitized_dataset_version_catalog(self):
         fixture = payload()
