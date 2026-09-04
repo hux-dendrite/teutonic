@@ -19,6 +19,7 @@ from teutonic.evaluation import (
     result_provenance,
     validate_result_v2,
 )
+from teutonic.evaluation.protocol_v2 import MAX_BATCH_SIZE
 from teutonic.storage.artifacts import (
     ArtifactDownloadProfile,
     ArtifactIntegrityError,
@@ -202,6 +203,21 @@ class EvaluatorProtocolV2ContractTests(unittest.TestCase):
         interval_too_large["early_stopping"]["check_interval"] = 25001
         with self.assertRaisesRegex(ProtocolValidationError, "cannot exceed"):
             EvaluationRequestV2.from_mapping(interval_too_large)
+
+        batched = request_payload()
+        batched["limits"]["batch_size"] = 256
+        self.assertEqual(
+            EvaluationRequestV2.from_mapping(batched).limits["batch_size"],
+            256,
+        )
+
+        oversized_batch = request_payload()
+        oversized_batch["limits"]["batch_size"] = MAX_BATCH_SIZE + 1
+        with self.assertRaisesRegex(
+            ProtocolValidationError,
+            f"batch_size must be <= {MAX_BATCH_SIZE}",
+        ):
+            EvaluationRequestV2.from_mapping(oversized_batch)
 
     def test_production_adapter_binds_sampling_to_block_hash(self) -> None:
         source = (

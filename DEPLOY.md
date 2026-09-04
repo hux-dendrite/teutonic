@@ -149,6 +149,8 @@ Fill `.gpu.env`, paying particular attention to:
 - Read-only evaluator R2 credentials.
 - Dataset bundle and tokenizer identities.
 - The same evaluator/policy/code versions configured on the validator host.
+- The same `TEUTONIC_EVAL_BATCH_SIZE` configured on both hosts (default `96`),
+  validated for the GPU model and sequence length in use.
 - GPU memory fraction and local cache paths.
 
 Start the evaluator and GPU cleanup schedules:

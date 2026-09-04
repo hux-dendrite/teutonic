@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import unittest
 
 from teutonic.evaluation.configuration import (
@@ -7,8 +8,6 @@ from teutonic.evaluation.configuration import (
     EvaluationSettings,
     canonical_manifest_bytes,
 )
-import hashlib
-
 from teutonic.validator.runtime import (
     CrownCoordinator,
     FinalizedMetagraph,
@@ -122,15 +121,30 @@ class ValidatorRuntimeTests(unittest.TestCase):
                 "TEUTONIC_EVALUATION_POLICY_VERSION": "paired-bootstrap-v1",
                 "TEUTONIC_EVALUATOR_CODE_VERSION": "release-1",
                 "TEUTONIC_EVALUATOR_VERSION": "pair-evaluator-v2",
+                "TEUTONIC_EVAL_BATCH_SIZE": "64",
             },
             settings=self._settings(),
         )
         self.assertEqual(policy.n, 2000)
         self.assertEqual(policy.seq_len, 2048)
         self.assertEqual(policy.n_bootstrap, 10000)
+        self.assertEqual(policy.batch_size, 64)
+        self.assertEqual(policy.thresholds["batch_size"], 64)
         self.assertEqual(policy.delta_threshold, 0.5)
         self.assertEqual(policy.dataset_source, "pretokenized_npy")
         self.assertFalse(policy.publish_non_winning_models)
+
+    def test_policy_defaults_to_tested_batch_size(self):
+        policy = evaluation_policy_from_env(
+            {
+                "TEUTONIC_EVALUATION_POLICY_VERSION": "paired-bootstrap-v1",
+                "TEUTONIC_EVALUATOR_CODE_VERSION": "release-1",
+                "TEUTONIC_EVALUATOR_VERSION": "pair-evaluator-v2",
+            },
+            settings=self._settings(),
+        )
+
+        self.assertEqual(policy.batch_size, 96)
 
 
 if __name__ == "__main__":

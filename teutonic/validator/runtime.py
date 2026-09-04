@@ -8,6 +8,7 @@ from typing import Any
 
 from teutonic.evaluation.configuration import EvaluationSettings
 from teutonic.evaluation.early_stopping import EarlyStoppingPolicy
+from teutonic.evaluation.protocol_v2 import DEFAULT_EVAL_BATCH_SIZE
 
 from .contracts import EvaluationPolicyConfig
 
@@ -55,6 +56,9 @@ def evaluation_policy_from_env(
         delta_threshold=settings.delta_threshold,
         dataset_source="pretokenized_npy",
         dataset_label=settings.dataset_label,
+        batch_size=int(
+            env.get("TEUTONIC_EVAL_BATCH_SIZE", str(DEFAULT_EVAL_BATCH_SIZE))
+        ),
         dataset_manifests=settings.manifests,
         early_stopping=early_stopping or EarlyStoppingPolicy(),
         lease=timedelta(seconds=int(env.get("TEUTONIC_EVALUATION_LEASE_SECONDS", "120"))),

@@ -65,6 +65,7 @@ from teutonic.evaluation import (
     result_provenance,
     validate_result_v2,
 )
+from teutonic.evaluation.protocol_v2 import DEFAULT_EVAL_BATCH_SIZE, MAX_BATCH_SIZE
 from teutonic.storage.artifacts import R2ArtifactResolver
 
 log = logging.getLogger("teutonic.evaluator.engine")
@@ -85,7 +86,14 @@ SHARD_CACHE_DIR = Path(
         os.environ.get("TEUTONIC_PARQUET_CACHE_DIR", "/tmp/teutonic/finewebedu_shards"),
     )
 )
-DEFAULT_BATCH_SIZE = 1
+DEFAULT_BATCH_SIZE = int(
+    os.environ.get("TEUTONIC_EVAL_BATCH_SIZE", str(DEFAULT_EVAL_BATCH_SIZE))
+)
+if not 1 <= DEFAULT_BATCH_SIZE <= MAX_BATCH_SIZE:
+    raise RuntimeError(
+        f"TEUTONIC_EVAL_BATCH_SIZE must be in [1, {MAX_BATCH_SIZE}], "
+        f"got {DEFAULT_BATCH_SIZE}"
+    )
 DEFAULT_PARALLEL_BATCH_SIZE = 1
 DEFAULT_ALPHA = float(os.environ.get("EVAL_ALPHA", "0.001"))
 DEFAULT_SEQ_LEN = int(os.environ.get("EVAL_SEQ_LEN", "2048"))
@@ -157,7 +165,7 @@ class EvalRequest(BaseModel):
     vocab_size: int = 0
     attn_implementation: Literal["eager", "flash_attention_4"] = DEFAULT_ATTN_IMPLEMENTATION
     n: int = DEFAULT_N
-    batch_size: Literal[1] = DEFAULT_BATCH_SIZE
+    batch_size: int = Field(default=DEFAULT_BATCH_SIZE, ge=1, le=MAX_BATCH_SIZE)
     alpha: float = DEFAULT_ALPHA
     delta_threshold: float = DEFAULT_DELTA
     n_bootstrap: int = DEFAULT_BOOTSTRAP_B
@@ -1262,8 +1270,8 @@ def compute_per_sequence_loss(
     *,
     reset_peak_memory: bool = True,
 ) -> list[float]:
-    if len(token_batches) != 1:
-        raise RuntimeError(f"eager scoring requires batch size 1, got {len(token_batches)}")
+    if not token_batches:
+        return []
     input_device = model_input_device(model)
     cuda_devices = model_cuda_devices(model)
     if reset_peak_memory:
@@ -1315,13 +1323,14 @@ def compute_per_sequence_loss(
             for device in cuda_devices
         )
         raise RuntimeError(
-            f"OOM scoring an unmodified {input_ids.shape[1]}-token sequence with eager attention; "
+            f"OOM scoring a batch of {input_ids.shape[0]} unmodified "
+            f"{input_ids.shape[1]}-token sequences; "
             f"evaluation stopped without truncation or backend fallback. {peak_detail}"
         ) from exc
 
 
 class TwoGpuSequencePipeline:
-    """Overlap one sequence on each layer-sharded GPU without concurrent use of either GPU."""
+    """Score batches, overlapping two single-sequence forwards when possible."""
 
     def __init__(self, model, req: EvalRequest, spec: dict, result_queue, generation: str):
         self.model = model
@@ -1347,7 +1356,7 @@ class TwoGpuSequencePipeline:
         return 2 if self.boundary_layer is not None else 1
 
     def _find_boundary_layer(self) -> int | None:
-        if len(self.spec["gpu_ids"]) != 2:
+        if self.req.batch_size > 1 or len(self.spec["gpu_ids"]) != 2:
             return None
         layers = getattr(getattr(self.model, "model", None), "layers", None)
         if layers is None:
@@ -1368,31 +1377,56 @@ class TwoGpuSequencePipeline:
         state["boundary"].set()
 
     def submit(self, sequence_index: int, token_ids: list[int]) -> None:
+        self.submit_batch([sequence_index], [token_ids])
+
+    def submit_batch(
+        self,
+        sequence_indices: list[int],
+        token_batches: list[list[int]],
+    ) -> None:
+        if not sequence_indices or len(sequence_indices) != len(token_batches):
+            raise ValueError("sequence indices and token batches must be non-empty and aligned")
         if self._previous_boundary is not None:
             self._previous_boundary.wait()
         state = {"boundary": threading.Event(), "stage2_acquired": False}
         self._previous_boundary = state["boundary"]
-        self._executor.submit(self._score, sequence_index, token_ids, state)
+        self._executor.submit(self._score, sequence_indices, token_batches, state)
 
-    def _score(self, sequence_index: int, token_ids: list[int], state: dict) -> None:
+    def _score(
+        self,
+        sequence_indices: list[int],
+        token_batches: list[list[int]],
+        state: dict,
+    ) -> None:
         self._thread_state.current = state
         started = time.time()
         try:
-            loss = compute_per_sequence_loss(
+            losses = compute_per_sequence_loss(
                 self.model,
-                [token_ids],
+                token_batches,
                 self.req.lm_head_chunk,
                 reset_peak_memory=False,
-            )[0]
-            self.result_queue.put({
+            )
+            if len(losses) != len(sequence_indices):
+                raise RuntimeError(
+                    f"scorer returned {len(losses)} losses for "
+                    f"{len(sequence_indices)} sequences"
+                )
+            result = {
                 "type": "result",
                 "generation": self.generation,
                 "worker_id": self.spec["worker_id"],
                 "role": self.spec["role"],
-                "sequence_index": sequence_index,
-                "loss": loss,
+                "sequence_indices": sequence_indices,
+                "losses": losses,
                 "wall_time_s": time.time() - started,
-            })
+            }
+            if len(sequence_indices) == 1:
+                result.update(
+                    sequence_index=sequence_indices[0],
+                    loss=losses[0],
+                )
+            self.result_queue.put(result)
         except BaseException as exc:
             self.result_queue.put({
                 "type": "error",
@@ -1502,7 +1536,10 @@ def model_worker_main(spec: dict, command_queue, result_queue) -> None:
             elif command["type"] == "score":
                 if pipeline is None or command["generation"] != pipeline.generation:
                     raise RuntimeError(f"{worker_id} received score command before matching load")
-                pipeline.submit(command["sequence_index"], command["token_ids"])
+                pipeline.submit_batch(
+                    command["sequence_indices"],
+                    command["token_batches"],
+                )
             else:
                 raise RuntimeError(f"unknown worker command: {command['type']}")
     except BaseException as exc:
@@ -1630,14 +1667,15 @@ class PersistentModelWorkerPool:
         def fill_worker(worker_id: str, role: str) -> None:
             depth = int(self.ready[worker_id].get("pipeline_depth", 1))
             while in_flight[worker_id] < depth and next_index[role] < len(sequences):
-                index = next_index[role]
+                start = next_index[role]
+                end = min(start + req.batch_size, len(sequences))
                 self.command_queues[worker_id].put({
                     "type": "score",
                     "generation": generation,
-                    "sequence_index": index,
-                    "token_ids": sequences[index],
+                    "sequence_indices": list(range(start, end)),
+                    "token_batches": sequences[start:end],
                 })
-                next_index[role] += 1
+                next_index[role] = end
                 in_flight[worker_id] += 1
 
         for spec in self.specs:
@@ -1672,11 +1710,17 @@ class PersistentModelWorkerPool:
             worker_id = message["worker_id"]
             role = message["role"]
             in_flight[worker_id] -= 1
-            index = int(message["sequence_index"])
+            indices = [int(value) for value in message["sequence_indices"]]
+            losses = [float(value) for value in message["losses"]]
+            if not indices or len(indices) != len(losses):
+                raise RuntimeError(f"malformed batched result from {worker_id}")
             target = king_losses if role == "king" else challenger_losses
-            if target[index] is not None:
-                raise RuntimeError(f"duplicate {role} result for sequence {index}")
-            target[index] = float(message["loss"])
+            for index, loss in zip(indices, losses, strict=True):
+                if not 0 <= index < len(target):
+                    raise RuntimeError(f"out-of-range {role} result for sequence {index}")
+                if target[index] is not None:
+                    raise RuntimeError(f"duplicate {role} result for sequence {index}")
+                target[index] = loss
 
             previous_done = paired_done
             if early_stop_at is None:
@@ -1729,25 +1773,27 @@ class PersistentModelWorkerPool:
                         float(provisional["provisional_lcb"]),
                         seq_per_s,
                     )
-                if (
+                while (
                     early_stop_at is None
-                    and paired_done < len(sequences)
-                    and paired_done >= next_early_check
+                    and early_policy.enabled
+                    and next_early_check < len(sequences)
+                    and next_early_check <= paired_done
                 ):
-                    early_stop_decision = challenger_futility_decision(
-                        [float(value) for value in king_losses[:paired_done]],
-                        [float(value) for value in challenger_losses[:paired_done]],
+                    check_at = next_early_check
+                    next_early_check += early_policy.check_interval
+                    decision = challenger_futility_decision(
+                        [float(value) for value in king_losses[:check_at]],
+                        [float(value) for value in challenger_losses[:check_at]],
                         total_sequences=len(sequences),
                         delta_threshold=req.delta_threshold,
                         policy=early_policy,
                     )
-                    while next_early_check <= paired_done:
-                        next_early_check += early_policy.check_interval
-                    if early_stop_decision is not None:
-                        early_stop_at = paired_done
+                    if decision is not None:
+                        early_stop_decision = decision
+                        early_stop_at = check_at
                         on_progress({
                             "phase": "eval_early_stopping",
-                            "done": paired_done,
+                            "done": check_at,
                             "total": len(sequences),
                             "early_stopped": True,
                             "mu_hat": round(early_stop_decision["mu_hat"], 6),
@@ -1758,7 +1804,7 @@ class PersistentModelWorkerPool:
                         eval_log.info(
                             "early stop | paired=%d/%d mu_upper=%.6f stop_threshold=%.6f "
                             "advantage_quantile=%.4f",
-                            paired_done,
+                            check_at,
                             len(sequences),
                             early_stop_decision["mu_hat_upper_bound"],
                             early_stop_decision["stop_threshold"],
@@ -2421,6 +2467,7 @@ async def health():
         "caps": {
             "eval_n_cap": EVAL_N_CAP,
             "eval_bootstrap_b_cap": EVAL_BOOTSTRAP_B_CAP,
+            "eval_batch_size_cap": MAX_BATCH_SIZE,
             "eval_max_runtime_s": EVAL_MAX_RUNTIME_S,
         },
     }

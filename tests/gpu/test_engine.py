@@ -36,16 +36,19 @@ class ImmediateScoreQueue:
         self.worker_id = worker_id
         self.role = role
         self.loss = loss
+        self.batch_sizes = []
 
     def put(self, command):
         assert command["type"] == "score"
+        indices = command["sequence_indices"]
+        self.batch_sizes.append(len(indices))
         self.result_queue.put({
             "type": "result",
             "generation": command["generation"],
             "worker_id": self.worker_id,
             "role": self.role,
-            "sequence_index": command["sequence_index"],
-            "loss": self.loss,
+            "sequence_indices": indices,
+            "losses": [self.loss] * len(indices),
         })
 
 
@@ -69,6 +72,86 @@ def test_worker_pool_early_stop_drains_dispatched_results():
     request = EvalRequest(
         king_repo="king",
         challenger_repo="challenger",
+        delta_threshold=0.5,
+        early_stop_enabled=True,
+        early_stop_min_fraction=0.4,
+        early_stop_advantage_quantile=0.95,
+        early_stop_margin=0.0,
+        early_stop_check_interval=2,
+    )
+
+    king, challenger, metadata = pool.score(
+        [[index] for index in range(10)], "generation-1", request, lambda _event: None
+    )
+
+    assert len(king) == len(challenger) == 4
+    assert metadata["early_stop"]["completed_sequences"] == 4
+    assert pool.result_queue.empty()
+
+
+def test_worker_pool_batches_sequences_and_preserves_the_tail():
+    pool = object.__new__(PersistentModelWorkerPool)
+    pool.specs = [
+        {"worker_id": "king-0", "role": "king"},
+        {"worker_id": "challenger-0", "role": "challenger"},
+    ]
+    pool.ready = {
+        "king-0": {"pipeline_depth": 1},
+        "challenger-0": {"pipeline_depth": 1},
+    }
+    pool.result_queue = Queue()
+    king_queue = ImmediateScoreQueue(pool.result_queue, "king-0", "king", 1.0)
+    challenger_queue = ImmediateScoreQueue(
+        pool.result_queue,
+        "challenger-0",
+        "challenger",
+        2.0,
+    )
+    pool.command_queues = {
+        "king-0": king_queue,
+        "challenger-0": challenger_queue,
+    }
+    request = EvalRequest(
+        king_repo="king",
+        challenger_repo="challenger",
+        batch_size=3,
+    )
+
+    king, challenger, metadata = pool.score(
+        [[index] for index in range(8)], "generation-1", request, lambda _event: None
+    )
+
+    assert king == [1.0] * 8
+    assert challenger == [2.0] * 8
+    assert metadata["early_stop"] is None
+    assert king_queue.batch_sizes == [3, 3, 2]
+    assert challenger_queue.batch_sizes == [3, 3, 2]
+
+
+def test_batched_early_stop_uses_the_configured_check_boundary():
+    pool = object.__new__(PersistentModelWorkerPool)
+    pool.specs = [
+        {"worker_id": "king-0", "role": "king"},
+        {"worker_id": "challenger-0", "role": "challenger"},
+    ]
+    pool.ready = {
+        "king-0": {"pipeline_depth": 1},
+        "challenger-0": {"pipeline_depth": 1},
+    }
+    pool.result_queue = Queue()
+    pool.command_queues = {
+        "king-0": ImmediateScoreQueue(pool.result_queue, "king-0", "king", 1.0),
+        "challenger-0": ImmediateScoreQueue(
+            pool.result_queue,
+            "challenger-0",
+            "challenger",
+            2.0,
+        ),
+    }
+    request = EvalRequest(
+        king_repo="king",
+        challenger_repo="challenger",
+        batch_size=3,
         delta_threshold=0.5,
         early_stop_enabled=True,
         early_stop_min_fraction=0.4,

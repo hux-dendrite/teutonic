@@ -14,6 +14,8 @@ from .early_stopping import EarlyStoppingPolicy
 
 
 PROTOCOL_VERSION = "teutonic-evaluator-v2"
+DEFAULT_EVAL_BATCH_SIZE = 96
+MAX_BATCH_SIZE = 1024
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _BLOCK_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
@@ -220,8 +222,10 @@ class EvaluationRequestV2:
             if isinstance(number, bool) or not isinstance(number, int) or number < minimum:
                 raise ProtocolValidationError(f"limits.{key} must be an integer >= {minimum}")
             normalized_limits[key] = number
-        if normalized_limits["batch_size"] != 1:
-            raise ProtocolValidationError("limits.batch_size must be 1")
+        if normalized_limits["batch_size"] > MAX_BATCH_SIZE:
+            raise ProtocolValidationError(
+                f"limits.batch_size must be <= {MAX_BATCH_SIZE}"
+            )
         for key in ("alpha", "delta_threshold"):
             number = limits.get(key)
             if isinstance(number, bool) or not isinstance(number, (int, float)):

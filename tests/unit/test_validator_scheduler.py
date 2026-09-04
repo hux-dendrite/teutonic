@@ -93,6 +93,8 @@ class ValidatorSchedulerPolicyTests(unittest.TestCase):
             self._policy(max_attempts=0)
         with self.assertRaises(ValueError):
             self._policy(dataset_source="unknown")
+        with self.assertRaisesRegex(ValueError, "batch_size"):
+            self._policy(batch_size=0)
         with self.assertRaisesRegex(ValueError, "check_interval"):
             self._policy(
                 n=32,

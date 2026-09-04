@@ -10,6 +10,7 @@ from teutonic.evaluation.configuration import (
     pretokenized_dataset_request,
 )
 from teutonic.evaluation.early_stopping import EarlyStoppingPolicy
+from teutonic.evaluation.protocol_v2 import DEFAULT_EVAL_BATCH_SIZE, MAX_BATCH_SIZE
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +28,7 @@ class EvaluationPolicyConfig:
     delta_threshold: float
     dataset_source: str
     dataset_label: str
+    batch_size: int = DEFAULT_EVAL_BATCH_SIZE
     dataset_manifests: tuple[DatasetManifestSnapshot, ...] = ()
     early_stopping: EarlyStoppingPolicy = field(default_factory=EarlyStoppingPolicy)
     lease: timedelta = timedelta(minutes=2)
@@ -48,6 +50,8 @@ class EvaluationPolicyConfig:
             raise ValueError("lease must be positive and retry delay cannot be negative")
         if self.max_attempts < 1:
             raise ValueError("max_attempts must be positive")
+        if not 1 <= self.batch_size <= MAX_BATCH_SIZE:
+            raise ValueError(f"batch_size must be in [1, {MAX_BATCH_SIZE}]")
         if self.early_stopping.enabled and self.early_stopping.check_interval > self.n:
             raise ValueError("early stopping check_interval cannot exceed evaluation n")
         if self.dataset_source != "pretokenized_npy" or not self.dataset_manifests:
@@ -61,7 +65,7 @@ class EvaluationPolicyConfig:
             "n_bootstrap": self.n_bootstrap,
             "alpha": self.alpha,
             "delta_threshold": self.delta_threshold,
-            "batch_size": 1,
+            "batch_size": self.batch_size,
         }
 
     @property
